@@ -154,6 +154,10 @@ endif()
 
 create_target_directory_groups(citra_common)
 
+if (ENABLE_MSR_GAME_FOLDER)
+    target_compile_definitions(citra_common PRIVATE LOG_FILE="samus_returns_log.txt")
+endif()
+
 target_link_libraries(citra_common PUBLIC fmt library-headers microprofile Boost::boost Boost::serialization Boost::iostreams)
 target_link_libraries(citra_common PRIVATE cryptopp zstd)
 

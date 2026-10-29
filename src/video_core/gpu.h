@@ -109,6 +109,18 @@ private:
 
     void VBlankCallback(uintptr_t user_data, s64 cycles_late);
 
+    /// Sets Samus Returns' frame limit for `fps` frames per second (msr/frame_rate.h).
+    void ApplyMsrFrameLimit(int fps);
+
+    /// Sets Samus Returns' extras to the player's choice (msr/cheats.h).
+    void ApplyMsrCheats();
+
+    /// Keeps the inventory items the player's cheats ask for at their maximum (msr/cheats.h).
+    void ApplyMsrRefills();
+
+    /// Switches Samus's models when the Fusion suit setting changes in game (msr/suit_swap.h).
+    void ApplyMsrSuitSwap();
+
     friend class boost::serialization::access;
     template <class Archive>
     void serialize(Archive& ar, const u32 file_version);

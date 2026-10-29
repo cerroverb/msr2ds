@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <cmath>
 
 #include "common/assert.h"
@@ -331,6 +332,30 @@ FramebufferLayout AndroidSecondaryLayout(u32 width, u32 height) {
         return SingleFrameLayout(width, height, !Settings::values.swap_screen.GetValue(),
                                  Settings::values.upright_screen.GetValue());
     }
+}
+
+FramebufferLayout MsrSingleScreenLayout(u32 width, u32 height, bool widescreen, float panel_scale) {
+    ASSERT(width > 0);
+    ASSERT(height > 0);
+    FramebufferLayout res{width, height, true, true, {}, {}, true};
+
+    const Common::Rectangle<u32> window{0, 0, width, height};
+    const float aspect = widescreen ? 9.f / 16.f
+                                    : static_cast<float>(Core::kScreenTopHeight) /
+                                          static_cast<float>(Core::kScreenTopWidth);
+    auto top = MaxRectangle(window, aspect);
+    top = top.TranslateX((width - top.GetWidth()) / 2).TranslateY((height - top.GetHeight()) / 2);
+
+    const float panel_height = static_cast<float>(top.GetHeight()) * std::clamp(panel_scale, .3f, 1.f);
+    const u32 panel_h = static_cast<u32>(std::lround(panel_height));
+    const u32 panel_w = static_cast<u32>(std::lround(panel_height * Core::kScreenBottomWidth /
+                                                     Core::kScreenBottomHeight));
+    const u32 panel_x = top.left + (top.GetWidth() - std::min(panel_w, top.GetWidth())) / 2;
+    const u32 panel_y = top.top + (top.GetHeight() - panel_h) / 2;
+
+    res.top_screen = top;
+    res.bottom_screen = {panel_x, panel_y, panel_x + panel_w, panel_y + panel_h};
+    return res;
 }
 
 FramebufferLayout CustomFrameLayout(u32 width, u32 height, bool is_swapped, bool is_portrait_mode) {

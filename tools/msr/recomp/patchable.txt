@@ -1,0 +1,44 @@
+# Instructions rewritten in memory while the game runs (generate.py). The recompiled code checks
+# each one's word before running it and hands it to the interpreter when it has changed.
+# One address per line, odd for Thumb.
+
+# Frame limit (src/msr/frame_rate.h): cmp r0, #33 and rsb r6, r0, #33 in the main loop.
+0x156484
+0x15648C
+
+# The frame limiter's first instruction, a branch to the suit swap stub while it has a command
+# (src/msr/suit_swap.h).
+0x156450
+
+# The interface's fixed 1/30 s steps (src/msr/frame_rate.h, StepPatches).
+0x49DFF8
+0x4E3BA4
+0x10C6B4
+
+# Extras otherwise given by amiibo (src/msr/cheats.h, Patches).
+0x3F8D40
+0x3F8D44
+0x3F8E10
+0x3F8E14
+0x3F8E38
+0x3F8E3C
+0x3F8E60
+0x3F8E64
+0x492504
+0x492508
+0x495BC8
+0x495BCC
+0x495D54
+0x495D58
+0x10D438
+0x2707A0
+0x143EF8
+0x404080
+0x3A83D4
+0x250448
+0x453468
+0x473544
+0x4D828C
+0x4DD3F4
+0x4E2134
+0x4E3430

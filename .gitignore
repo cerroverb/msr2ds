@@ -64,3 +64,5 @@ GIT-TAG
 
 # verify-release.sh downloads
 verify/
+# Samus Returns build cache (tools/msr/windows/build.sh)
+.ccache-windows/

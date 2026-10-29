@@ -96,7 +96,7 @@ void CustomTexture::LoadDDS(std::span<const u8> input) {
     format = ToCustomPixelFormat(dds_format);
 }
 
-void Material::LoadFromDisk(bool flip_png) noexcept {
+void Material::LoadFromDisk() noexcept {
     if (IsDecoded()) {
         return;
     }
@@ -104,7 +104,7 @@ void Material::LoadFromDisk(bool flip_png) noexcept {
         if (!texture || texture->IsLoaded()) {
             continue;
         }
-        texture->LoadFromDisk(flip_png);
+        texture->LoadFromDisk(texture->flip_png);
         size += texture->data.size();
         LOG_DEBUG(Render, "Loading {} map {}", MapTypeName(texture->type), texture->path);
     }

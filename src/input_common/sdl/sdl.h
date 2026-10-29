@@ -30,6 +30,11 @@ public:
     virtual ~State() = default;
 
     virtual Pollers GetPollers(Polling::DeviceType type) = 0;
+
+    /// Connected SDL game controllers (not raw joysticks) as guid/port param packages
+    virtual std::vector<Common::ParamPackage> GetConnectedGameControllers() {
+        return {};
+    }
 };
 
 class NullState : public State {

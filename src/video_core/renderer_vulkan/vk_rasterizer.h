@@ -113,6 +113,9 @@ private:
     /// Creates the vertex layout struct used for software shader pipelines
     void MakeSoftwareVertexLayout();
 
+    /// Samus Returns: whether this draw is the title menus' bottom-screen backdrop, left out.
+    bool SkipMsrBackdrop();
+
 private:
     const Instance& instance;
     Scheduler& scheduler;
@@ -121,6 +124,10 @@ private:
     PipelineCache pipeline_cache;
     TextureRuntime runtime;
     RasterizerCache res_cache;
+
+    // Samus Returns: the current bottom-screen frame's draws (SkipMsrBackdrop)
+    int msr_bottom_draw = -1;
+    bool msr_backdrop = false;
 
     VertexLayout software_layout;
     std::array<u32, 16> binding_offsets{};

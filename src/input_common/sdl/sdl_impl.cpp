@@ -274,6 +274,23 @@ std::shared_ptr<SDLJoystick> SDLState::GetSDLJoystickBySDLID(SDL_JoystickID sdl_
     return nullptr;
 }
 
+std::vector<Common::ParamPackage> SDLState::GetConnectedGameControllers() {
+    std::lock_guard lock{joystick_map_mutex};
+    std::vector<Common::ParamPackage> controllers;
+    for (const auto& [guid, joystick_list] : joystick_map) {
+        for (const auto& joystick : *joystick_list) {
+            if (!joystick->GetSDLGameController()) {
+                continue;
+            }
+            Common::ParamPackage params({{"engine", "sdl"}, {"api", "controller"}});
+            params.Set("guid", joystick->GetGUID());
+            params.Set("port", joystick->GetPort());
+            controllers.push_back(std::move(params));
+        }
+    }
+    return controllers;
+}
+
 /**
  * Return the button binds param package for the button assuming the params passed in is for the
  * n3ds "A" button to determine whether this is xbox or nintendo layout. If the passed in button
@@ -364,6 +381,8 @@ void SDLState::InitJoystick(int joystick_index) {
         return;
     }
     const std::string guid = GetGUID(sdl_joystick);
+    LOG_INFO(Input, "Gamepad connected: \"{}\", GUID {}{}", SDL_JoystickName(sdl_joystick), guid,
+             sdl_gamecontroller ? "" : " (joystick only, not used by gamepad bindings)");
 
     std::lock_guard lock{joystick_map_mutex};
     if (joystick_map.find(guid) == joystick_map.end()) {
@@ -785,6 +804,10 @@ SDLState::SDLState() {
     if (start_thread && SDL_Init(SDL_INIT_GAMECONTROLLER) < 0) {
         LOG_CRITICAL(Input, "SDL_Init(SDL_INIT_GAMECONTROLLER) failed with: {}", SDL_GetError());
         return;
+    }
+    // Steam Input hides the controllers it takes over and offers its virtual pads instead.
+    if (const char* ignored = SDL_getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES")) {
+        LOG_INFO(Input, "Gamepads hidden by Steam Input: {}", ignored);
     }
     if (SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1") == SDL_FALSE) {
         LOG_ERROR(Input, "Failed to set Hint for background events: {}", SDL_GetError());

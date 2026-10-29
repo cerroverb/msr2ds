@@ -91,6 +91,11 @@ public:
     /// Notify CPU emulation that page tables have changed
     virtual void SetPageTable(const std::shared_ptr<Memory::PageTable>& page_table) = 0;
 
+    /// Replaces the timer, for a backend that runs another core on its behalf.
+    void SetTimer(std::shared_ptr<Core::Timing::Timer> new_timer) {
+        timer = std::move(new_timer);
+    }
+
     /**
      * Set the Program Counter to an address
      * @param addr Address to set PC to

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <memory>
 #include <vector>
 #ifdef __unix__
@@ -94,6 +95,16 @@ enum class MediaType : u32;
 }
 
 int LaunchQtFrontend(int argc, char* argv[]);
+
+#ifdef ENABLE_MSR_GAME_FOLDER
+namespace MSR {
+class InputBridge;
+class Launcher;
+}
+namespace InputCommon::Polling {
+class DevicePoller;
+}
+#endif
 
 class GMainWindow : public QMainWindow {
     Q_OBJECT
@@ -270,6 +281,22 @@ private slots:
     void OnToggleFilterBar();
     void OnDisplayTitleBars(bool);
     void InitializeHotkeys();
+#ifdef ENABLE_MSR_GAME_FOLDER
+    void InitializeMsrGameFolder();
+    void PlayMsrGame();
+    void RefreshMsrOverlaySettings();
+    void RunMsrOverlayActions();
+    void RefreshMsrControls();
+    void RefreshMsrMods();
+    void UpdateMsrDisplayRefresh();
+    void StartMsrBind(int id);
+    void PollMsrBind();
+    void FinishMsrBind(const std::string& param);
+    void StopMsrBind();
+    void ApplyMsrInputProfile();
+    void ApplyMsrLayout(bool gamepad);
+    void AutoConfigureMsrController();
+#endif
     void ToggleFullscreen();
     void ToggleSecondaryFullscreen();
     void ChangeScreenLayout();
@@ -393,6 +420,18 @@ private:
     bool auto_paused = false;
     bool auto_muted = false;
     QTimer mouse_hide_timer;
+#ifdef ENABLE_MSR_GAME_FOLDER
+    /// guid:port of the gamepads seen on the last controller check; the placeholder makes the
+    /// first check run so a saved automatic profile falls back to the keyboard without a pad.
+    std::vector<std::string> msr_connected_pads{"<startup>"};
+    MSR::InputBridge* msr_input = nullptr;
+    MSR::Launcher* msr_launcher = nullptr;
+    QString msr_booted_mods; ///< The texture packs and options the game booted with
+    int msr_bind = -1; ///< Control waiting for a new input in the overlay, or -1
+    bool msr_bind_started = false;
+    std::chrono::steady_clock::time_point msr_bind_deadline{};
+    std::vector<std::unique_ptr<InputCommon::Polling::DevicePoller>> msr_pollers;
+#endif
 
     // Movie
     bool movie_record_on_start = false;

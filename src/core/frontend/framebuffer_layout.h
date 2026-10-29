@@ -152,6 +152,12 @@ FramebufferLayout AndroidSecondaryLayout(u32 width, u32 height);
  * @param height Window framebuffer height in pixels
  * @return Newly created FramebufferLayout object with default screen regions initialized
  */
+/**
+ * Samus Returns single screen: the top screen fills the window at 16:9 (or 5:3 without
+ * widescreen); the bottom screen rectangle is the centered panel used for menus and touch.
+ */
+FramebufferLayout MsrSingleScreenLayout(u32 width, u32 height, bool widescreen, float panel_scale);
+
 FramebufferLayout CustomFrameLayout(u32 width, u32 height, bool is_swapped,
                                     bool is_portrait_mode = false);
 

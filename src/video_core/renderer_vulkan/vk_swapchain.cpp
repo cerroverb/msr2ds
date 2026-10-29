@@ -7,6 +7,7 @@
 #include "common/logging/log.h"
 #include "common/microprofile.h"
 #include "common/settings.h"
+#include "msr/frame_rate.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
@@ -208,9 +209,10 @@ void Swapchain::SetPresentMode() {
     const auto frame_limit = Settings::GetFrameLimit();
 
     // If vsync is enabled attempt to use mailbox mode in case the user wants to speedup/slowdown
-    // the game. If mailbox is not available use immediate and warn about it.
-    if (use_vsync &&
-        (frame_limit > 100 || frame_limit == 0 || low_refresh_rate)) { // 0 = unthrottled
+    // the game. If mailbox is not available use immediate and warn about it. The same when
+    // Samus Returns draws faster than the monitor refreshes (msr/frame_rate.h).
+    if (use_vsync && (frame_limit > 100 || frame_limit == 0 || low_refresh_rate ||
+                      MSR::FrameRate::OutpacesDisplay())) { // 0 = unthrottled
         present_mode = has_mailbox ? vk::PresentModeKHR::eMailbox : vk::PresentModeKHR::eImmediate;
         if (!has_mailbox) {
             LOG_WARNING(

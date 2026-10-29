@@ -153,6 +153,18 @@ option(ENABLE_DEVELOPER_OPTIONS "Enable functionality targeted at emulator devel
 
 option(ENABLE_BUILTIN_KEYBLOB "Enable the inclusion of the default crypto keys blob" ON)
 
+# Metroid: Samus Returns game-folder frontend (src/msr). Turns the Qt frontend into a single-game
+# player: finds and validates the user's ROM, keeps data in a portable user/ folder, boots straight
+# into the game and applies Samus Returns defaults.
+option(ENABLE_MSR_GAME_FOLDER "Build the Metroid: Samus Returns game-folder frontend" OFF)
+# Ahead-of-time recompiled Samus Returns code (tools/msr/recomp/generate.py writes it from the
+# player's own dump into MSR_RECOMP_DIR; it is game code, never part of the source tree).
+option(ENABLE_MSR_RECOMP "Run Samus Returns from recompiled code (needs MSR_RECOMP_DIR)" OFF)
+set(MSR_RECOMP_DIR "" CACHE PATH "Directory of the generated recompiled code (aot_*.cpp)")
+if (ENABLE_MSR_GAME_FOLDER AND NOT ENABLE_QT)
+    message(FATAL_ERROR "ENABLE_MSR_GAME_FOLDER requires the Qt frontend")
+endif()
+
 # Compile options
 CMAKE_DEPENDENT_OPTION(COMPILE_WITH_DWARF "Add DWARF debugging information" ${IS_DEBUG_BUILD} "MINGW" OFF)
 option(ENABLE_LTO "Enable link time optimization" ${DEFAULT_ENABLE_LTO})
@@ -221,12 +233,6 @@ if (CITRA_USE_PRECOMPILED_HEADERS)
     if(NOT MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         list(APPEND CMAKE_CXX_COMPILE_OPTIONS_CREATE_PCH -Xclang -fno-pch-timestamp)
     endif()
-endif()
-
-if(NOT EXISTS ${PROJECT_SOURCE_DIR}/.git/hooks/pre-commit)
-    message(STATUS "Copying pre-commit hook")
-    file(COPY hooks/pre-commit
-        DESTINATION ${PROJECT_SOURCE_DIR}/.git/hooks)
 endif()
 
 # Use ccache for android if available
@@ -590,6 +596,9 @@ if (NOT ANDROID AND NOT IOS)
     include(BundleTarget)
     if (ENABLE_QT)
         qt_bundle_target(citra_meta)
+    endif()
+    if (TARGET msr_direct)
+        bundle_target(msr_direct)
     endif()
     if (ENABLE_ROOM_STANDALONE)
         bundle_target(citra_room_standalone)

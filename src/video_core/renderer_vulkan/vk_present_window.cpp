@@ -6,6 +6,7 @@
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
+#include "msr/frame_rate.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_present_window.h"
@@ -106,7 +107,7 @@ PresentWindow::PresentWindow(Frontend::EmuWindow& emu_window_, const Instance& i
                 emu_window.GetFramebufferLayout().height, surface, low_refresh_rate_},
       graphics_queue{instance.GetGraphicsQueue()}, present_renderpass{CreateRenderpass()},
       vsync_enabled{Settings::values.use_vsync.GetValue()},
-      blit_supported{
+      outpacing_display{MSR::FrameRate::OutpacesDisplay()}, blit_supported{
           CanBlitToSwapchain(instance.GetPhysicalDevice(), swapchain.GetSurfaceFormat().format)},
       use_present_thread{Settings::values.async_presentation.GetValue()},
       last_render_surface{emu_window.GetWindowInfo().render_surface} {
@@ -389,8 +390,11 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
     const bool size_changed =
         swapchain.GetWidth() != frame->width || swapchain.GetHeight() != frame->height;
     const bool vsync_changed = vsync_enabled != use_vsync;
-    if (vsync_changed || size_changed) [[unlikely]] {
+    const bool outpaces_display = MSR::FrameRate::OutpacesDisplay();
+    const bool pace_changed = outpaces_display != outpacing_display;
+    if (vsync_changed || size_changed || pace_changed) [[unlikely]] {
         vsync_enabled = use_vsync;
+        outpacing_display = outpaces_display;
         recreate_swapchain();
     }
 #endif

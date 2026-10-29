@@ -71,6 +71,9 @@ static_assert(sizeof(FSUniformData) < 16384,
 struct VSUniformData {
     u32 enable_clip1;
     u32 flip_viewport;
+    /// Scales clip-space Y (the top screen's horizontal axis) before clipping; < 1 widens the
+    /// view for 16:9 presentation (see msr/presentation.h).
+    f32 clip_scale_y = 1.f;
     alignas(16) Common::Vec4f clip_coef;
 };
 static_assert(sizeof(VSUniformData) == 32,

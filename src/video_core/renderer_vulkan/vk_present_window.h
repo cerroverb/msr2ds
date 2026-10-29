@@ -97,6 +97,7 @@ private:
     std::mutex free_mutex;
     std::jthread present_thread;
     bool vsync_enabled{};
+    bool outpacing_display{}; ///< Samus Returns' frame rate above the monitor's (msr/frame_rate.h)
     bool blit_supported;
     bool use_present_thread{true};
     void* last_render_surface{};

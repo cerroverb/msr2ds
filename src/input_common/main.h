@@ -41,6 +41,8 @@ std::string AnalogToText(const Common::ParamPackage& param, const std::string& d
 std::string ButtonToText(const Common::ParamPackage& param);
 
 Common::ParamPackage GetControllerButtonBinds(const Common::ParamPackage& params, int button);
+/// Connected SDL game controllers as guid/port param packages, usable with the Get*Binds helpers
+std::vector<Common::ParamPackage> GetConnectedGameControllers();
 Common::ParamPackage GetControllerAnalogBinds(const Common::ParamPackage& params, int analog);
 
 /// Reloads the input devices

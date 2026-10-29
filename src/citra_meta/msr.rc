@@ -1,0 +1,31 @@
+#include "winresrc.h"
+
+// Metroid: Samus Returns player build (ENABLE_MSR_GAME_FOLDER): replaces citra.rc.
+// QT requires that the default application icon is named IDI_ICON1
+IDI_ICON1               ICON                    "../../dist/msr/samus.ico"
+
+0                       RT_MANIFEST             "../../dist/azahar.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "Metroid: Samus Returns"
+            VALUE "ProductName", "Metroid: Samus Returns"
+            VALUE "InternalName", "SamusReturns"
+            VALUE "OriginalFilename", "SamusReturns.exe"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "ProductVersion", "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -360,6 +360,16 @@ if (ENABLE_WEB_SERVICE)
     target_link_libraries(citra_qt PRIVATE web_service)
 endif()
 
+if (ENABLE_MSR_GAME_FOLDER)
+    target_sources(citra_qt PRIVATE
+        msr_controls.cpp
+        msr_controls.h
+        msr_launcher.cpp
+        msr_launcher.h
+    )
+    target_link_libraries(citra_qt PRIVATE msr_frontend)
+endif()
+
 if (CITRA_USE_PRECOMPILED_HEADERS)
     target_precompile_headers(citra_qt PRIVATE precompiled_headers.h)
 endif()

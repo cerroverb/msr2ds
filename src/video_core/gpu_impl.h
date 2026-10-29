@@ -5,6 +5,9 @@
 
 #pragma once
 
+#include <array>
+#include <utility>
+#include <vector>
 #include "common/archives.h"
 #include "common/microprofile.h"
 #include "core/core.h"
@@ -35,6 +38,30 @@ struct GPU::Impl {
     std::unique_ptr<SwRenderer::SwBlitter> sw_blitter;
     Core::TimingEventType* vblank_event;
     Service::GSP::InterruptHandler signal_interrupt;
+
+    /// Samus Returns: the Fusion suit switched in game (GPU::ApplyMsrSuitSwap).
+    struct MsrSuitSwap {
+        enum class Step { Idle, Loading, Settling, Swapping, Releasing, Aborting, Calling };
+        Step step = Step::Idle;
+        bool target = false;    ///< The family being switched to
+        int given_up = -1;      ///< The family a swap failed to reach (-1: none)
+        u32 runs = 0;           ///< The stub's count before the command out
+        s64 since_us = 0;       ///< When the command went out, or the wait started
+        s64 next_scan_us = 0;   ///< When to look for the components again
+        std::vector<u32> components;
+        /// Models hanging from Samus's bones before the swap: scene node and bone name hash.
+        std::vector<std::pair<u32, u32>> attachments;
+        /// Calls the stub makes when it is free (the refills' setters): function, r0, r1, s0.
+        std::vector<std::array<u32, 4>> calls;
+    } msr_suit_swap;
+
+    /// Samus Returns: the components the cheats keep full (GPU::ApplyMsrRefills), by
+    /// MSR::Cheats::LockedValues, and whether the cheat locked them.
+    struct MsrRefills {
+        std::array<u32, 2> components{};
+        std::array<bool, 2> locked{};
+        s64 next_scan_us = 0;
+    } msr_refills;
 
     explicit Impl(Core::System& system, Frontend::EmuWindow& emu_window,
                   Frontend::EmuWindow* secondary_window)

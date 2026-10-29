@@ -19,6 +19,9 @@
 #include "core/hle/service/ir/ir_user.h"
 #if CITRA_ARCH(x86_64) || CITRA_ARCH(arm64)
 #include "core/arm/dynarmic/arm_dynarmic.h"
+#ifdef ENABLE_MSR_RECOMP
+#include "core/arm/msr_aot/arm_aot.h"
+#endif
 #endif
 #include "core/arm/dyncom/arm_dyncom.h"
 #include "core/cheats/cheats.h"
@@ -50,6 +53,7 @@
 #include "core/loader/loader.h"
 #include "core/movie.h"
 #include "core/savestate.h"
+#include "msr/frame_rate.h"
 #ifdef ENABLE_SCRIPTING
 #include "core/rpc/server.h"
 #endif
@@ -59,6 +63,14 @@
 #include "video_core/renderer_base.h"
 
 namespace Core {
+
+namespace {
+/// The CPU clock setting, raised for Samus Returns' faster frame rates (msr/frame_rate.h).
+u32 CpuClockPercentage() {
+    const auto percent = static_cast<u32>(Settings::values.cpu_clock_percentage.GetValue());
+    return MSR::FrameRate::ClockPercent(MSR::FrameRate::target.load(), percent);
+}
+} // Anonymous namespace
 
 /*static*/ System System::s_instance;
 
@@ -585,7 +597,7 @@ System::ResultStatus System::Init(Frontend::EmuWindow& emu_window,
 
     memory = std::make_unique<Memory::MemorySystem>(*this);
 
-    timing = std::make_unique<Timing>(num_cores, Settings::values.cpu_clock_percentage.GetValue(),
+    timing = std::make_unique<Timing>(num_cores, CpuClockPercentage(),
                                       movie.GetOverrideBaseTicks());
 
     kernel = std::make_unique<Kernel::KernelSystem>(
@@ -597,6 +609,14 @@ System::ResultStatus System::Init(Frontend::EmuWindow& emu_window,
     if (Settings::values.use_cpu_jit) {
 #if CITRA_ARCH(x86_64) || CITRA_ARCH(arm64)
         for (u32 i = 0; i < num_cores; ++i) {
+#ifdef ENABLE_MSR_RECOMP
+            // Samus Returns' recompiled code, on whichever core runs its threads.
+            if (ARM_AOT::Available()) {
+                cpu_cores.push_back(std::make_shared<ARM_AOT>(*this, *memory, i, timing->GetTimer(i),
+                                                              *exclusive_monitor));
+                continue;
+            }
+#endif
             cpu_cores.push_back(std::make_shared<ARM_Dynarmic>(
                 *this, *memory, i, timing->GetTimer(i), *exclusive_monitor));
         }
@@ -858,7 +878,7 @@ void System::ApplySettings() {
     }
 
     if (IsPoweredOn()) {
-        CoreTiming().UpdateClockSpeed(Settings::values.cpu_clock_percentage.GetValue());
+        CoreTiming().UpdateClockSpeed(CpuClockPercentage());
         dsp_core->SetSink(Settings::values.output_type.GetValue(),
                           Settings::values.output_device.GetValue());
         dsp_core->EnableStretching(Settings::values.enable_audio_stretching.GetValue());
@@ -993,6 +1013,8 @@ void System::serialize(Archive& ar, const unsigned int file_version) {
         u32 cheats_pid;
         ar & cheats_pid;
         timing->UnlockEventQueue();
+        // The loaded timers start at the default clock speed.
+        timing->UpdateClockSpeed(CpuClockPercentage());
         cheat_engine.Connect(cheats_pid);
 
         if (Settings::values.custom_textures) {

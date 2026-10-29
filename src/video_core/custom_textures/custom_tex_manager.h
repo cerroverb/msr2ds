@@ -43,6 +43,9 @@ public:
     /// Reads the pack configuration file
     bool ReadConfig(u64 title_id, bool options_only = false);
 
+    /// Reads a pack configuration file (pack.json)
+    bool ReadConfigFile(const std::string& config_path, bool options_only = false);
+
     /// Saves the pack configuration file template to the dump directory if it doesn't exist.
     void PrepareDumping(u64 title_id);
 
@@ -75,6 +78,13 @@ private:
 
     /// Returns a vector of all custom texture files.
     std::vector<FileUtil::FSTEntry> GetTextures(u64 title_id);
+
+    /// Returns all files in a pack folder and its subfolders.
+    std::vector<FileUtil::FSTEntry> ScanPack(const std::string& path);
+
+    /// Registers the textures of one pack; earlier packs keep the hashes they claimed. Returns
+    /// how many of its textures they override.
+    std::size_t AddPack(const std::vector<FileUtil::FSTEntry>& textures);
 
     /// Creates the thread workers.
     void CreateWorkers();

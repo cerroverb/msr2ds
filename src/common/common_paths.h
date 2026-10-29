@@ -71,7 +71,9 @@
 
 // Filenames
 // Files in the directory returned by GetUserPath(UserPath::LogDir)
+#ifndef LOG_FILE // The Samus Returns build names its own log (src/common/CMakeLists.txt)
 #define LOG_FILE "azahar_log.txt"
+#endif
 
 // Files in the directory returned by GetUserPath(UserPath::ConfigDir)
 #define EMU_CONFIG "emu.ini"

@@ -1,0 +1,12 @@
+# Entry points static analysis cannot find (reached only through pointers computed at run
+# time), from the recompiled build's "JIT entries" log line (src/core/arm/msr_aot/arm_aot.cpp).
+# One address per line; an odd address is Thumb code.
+0x00103F1B
+0x00103F23
+0x00103F2D
+0x00103F4D
+0x002FE43D
+0x0010506D
+0x00305D04
+0x00305CE4
+0x001010BB

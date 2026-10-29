@@ -200,6 +200,10 @@ std::string GenerateAnalogParamFromKeys(int key_up, int key_down, int key_left, 
     return circle_pad_param.Serialize();
 }
 
+std::vector<Common::ParamPackage> GetConnectedGameControllers() {
+    return sdl ? sdl->GetConnectedGameControllers() : std::vector<Common::ParamPackage>{};
+}
+
 Common::ParamPackage GetControllerButtonBinds(const Common::ParamPackage& params, int button) {
     const auto native_button{static_cast<Settings::NativeButton::Values>(button)};
     const auto engine{params.Get("engine", "")};

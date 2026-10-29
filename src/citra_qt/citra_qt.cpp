@@ -113,6 +113,23 @@
 #include "core/savestate.h"
 #include "core/system_titles.h"
 #include "input_common/main.h"
+#ifdef ENABLE_MSR_GAME_FOLDER
+#include "citra_qt/msr_controls.h"
+#include "citra_qt/msr_launcher.h"
+#include "msr/controller_autoconfig.h"
+#include "msr/defaults.h"
+#include "msr/code_coverage.h"
+#include "msr/draw_probe.h"
+#include "msr/frame_rate.h"
+#include "msr/game_folder.h"
+#include "msr/input_bridge.h"
+#include "msr/mods.h"
+#include "msr/overlay.h"
+#include "msr/overlay_hook.h"
+#include "msr/presentation.h"
+#include "msr/version.h"
+#include "core/loader/smdh.h"
+#endif
 #include "ui_main.h"
 #include "video_core/gpu.h"
 #include "video_core/renderer_base.h"
@@ -268,7 +285,18 @@ GMainWindow::GMainWindow(Core::System& system_)
     QStringList args = QApplication::arguments();
     QString game_path;
     std::optional<bool> fullscreen_override;
+#ifdef ENABLE_MSR_GAME_FOLDER
+    bool msr_play = false;
+#endif
     for (int i = 1; i < args.size(); ++i) {
+#ifdef ENABLE_MSR_GAME_FOLDER
+        // Straight into the game, without the launcher (SamusReturns-Direct.exe passes it).
+        if (args[i] == QStringLiteral("--play")) {
+            msr_play = true;
+            continue;
+        }
+#endif
+
         // Preserves drag/drop functionality
         if (args.size() == 2 && !args[1].startsWith(QChar::fromLatin1('-'))) {
             game_path = args[1];
@@ -396,6 +424,10 @@ GMainWindow::GMainWindow(Core::System& system_)
             continue;
         }
     }
+#ifdef ENABLE_MSR_GAME_FOLDER
+    // Single-game player: the launcher boots the dump it shows, never one from the command line.
+    game_path.clear();
+#endif
 
 #ifdef __unix__
     SetGamemodeEnabled(Settings::values.enable_gamemode.GetValue());
@@ -413,6 +445,17 @@ GMainWindow::GMainWindow(Core::System& system_)
     system.RegisterInfoLEDColorChanged([this]() { emit InfoLEDColorChanged(); });
 
     LoadTranslation();
+
+#ifdef ENABLE_MSR_GAME_FOLDER
+    if (MSR::GameFolder::IsFirstRun()) {
+        MSR::Defaults::ApplyFirstRun();
+        UISettings::values.hide_mouse = true;
+    }
+    MSR::Defaults::ApplyEveryLaunch();
+    // The game list and menus belong to the emulator, not the player; F1 opens the game menu.
+    UISettings::values.single_window_mode = true;
+    UISettings::values.show_status_bar = false;
+#endif
 
     if (Settings::values.pica_debugging) {
         Pica::g_debug_context = Pica::DebugContext::Construct();
@@ -458,6 +501,9 @@ GMainWindow::GMainWindow(Core::System& system_)
     ConnectMenuEvents();
     ConnectWidgetEvents();
 
+#ifdef ENABLE_MSR_GAME_FOLDER
+    LOG_INFO(Frontend, "{} {}", MSR::ProjectName, MSR::Version);
+#endif
     LOG_INFO(Frontend, "Azahar Version: {} | {}-{}", Common::g_build_fullname, Common::g_scm_branch,
              Common::g_scm_desc);
     std::string build_variant = Common::g_build_variant;
@@ -491,6 +537,20 @@ GMainWindow::GMainWindow(Core::System& system_)
     QIcon azahar_icon = QIcon(QString::fromStdString(":/icons/default/256x256/azahar.png"));
     render_window->setWindowIcon(azahar_icon);
     secondary_window->setWindowIcon(azahar_icon);
+
+#ifdef ENABLE_MSR_GAME_FOLDER
+    // Until the game's own icon replaces it: the AppImage's icon (Windows shows the exe's).
+    const QString msr_icon = MSR::GameFolder::Root() +
+                             QStringLiteral("/../share/icons/hicolor/512x512/apps/"
+                                            "samus-returns-recomp.png");
+    if (QFileInfo::exists(msr_icon)) {
+        const QIcon icon(msr_icon);
+        setWindowIcon(icon);
+        render_window->setWindowIcon(icon);
+        secondary_window->setWindowIcon(icon);
+    }
+    InitializeMsrGameFolder();
+#endif
 
     show();
 
@@ -540,6 +600,18 @@ GMainWindow::GMainWindow(Core::System& system_)
     physical_devices = GetVulkanPhysicalDevices();
 #endif
 
+#ifdef ENABLE_MSR_GAME_FOLDER
+    // --play boots the dump the launcher would, with the saved settings; the launcher shows
+    // when there is none yet, and if the game does not boot.
+    if (msr_play && !MSR::GameFolder::ActiveRom().isEmpty()) {
+        QTimer::singleShot(0, this, &GMainWindow::PlayMsrGame);
+    } else {
+        msr_launcher->Open();
+    }
+    if (qEnvironmentVariableIntValue("MSR_TEST") != 0) {
+        QTimer::singleShot(500, this, &GMainWindow::PlayMsrGame); // automated tests skip the launcher
+    }
+#endif
     if (!game_path.isEmpty()) {
         BootGame(game_path);
     }
@@ -986,7 +1058,425 @@ void GMainWindow::InitializeHotkeys() {
     });
 }
 
+#ifdef ENABLE_MSR_GAME_FOLDER
+void GMainWindow::InitializeMsrGameFolder() {
+    ui->menubar->hide();
+    game_list->hide();
+    game_list_placeholder->hide();
+
+    // The launcher takes the game list's place: the dump to play and the settings.
+    msr_launcher = new MSR::Launcher(this);
+    msr_launcher->hide();
+    ui->horizontalLayout->addWidget(msr_launcher);
+    connect(msr_launcher, &MSR::Launcher::PlayRequested, this, &GMainWindow::PlayMsrGame);
+    connect(msr_launcher, &MSR::Launcher::QuitRequested, this, &GMainWindow::close);
+
+    // Emulator windows (game loading, netplay, the list's filter, the status bar) have no place
+    // in the player.
+    for (QAction* action : {ui->action_Load_File, ui->action_View_Lobby, ui->action_Start_Room,
+                            ui->action_Connect_To_Room, ui->action_Show_Room,
+                            ui->action_Leave_Room, ui->action_Show_Filter_Bar,
+                            ui->action_Show_Status_Bar}) {
+        action->setShortcut({});
+        action->setEnabled(false);
+    }
+
+    // The settings overlay is drawn by the renderer; register it before the first boot.
+    auto& overlay = MSR::GetOverlay();
+    MSR::PlayerSettings player;
+    player.Load(MSR::GameFolder::User() + QStringLiteral("msr/settings.ini"));
+    overlay.SetPlayerSettings(player);
+    MSR::OverlayHook::overlay = &overlay;
+
+    // F1 or L3+R3 open it; keyboard, mouse and gamepad then drive the menu.
+    msr_input = new MSR::InputBridge(render_window, [this] { RefreshMsrOverlaySettings(); }, this);
+    qApp->installEventFilter(msr_input);
+    auto* overlay_timer = new QTimer(this);
+    connect(overlay_timer, &QTimer::timeout, this, [this] {
+        msr_input->Poll();
+        RunMsrOverlayActions();
+        PollMsrBind();
+        if (msr_bind >= 0 && !MSR::GetOverlay().Visible()) {
+            StopMsrBind(); // The menu closed while waiting for an input.
+        }
+        // Developer code coverage (MSR_DEV=1): user/msr/coverage.trigger writes coverage.bin.
+        if (MSR::CodeCoverage::enabled) {
+            const QString msr_dir = MSR::GameFolder::User() + QStringLiteral("msr/");
+            if (QFile::exists(msr_dir + QStringLiteral("coverage.trigger"))) {
+                QFile::remove(msr_dir + QStringLiteral("coverage.trigger"));
+                MSR::CodeCoverage::Dump(QString(msr_dir + QStringLiteral("coverage.bin")).toStdString());
+            }
+        }
+    });
+    overlay_timer->start(16);
+
+    // Automated tests (MSR_TEST=1): the default keyboard layout whatever pads are connected.
+    if (qEnvironmentVariableIntValue("MSR_TEST") != 0) {
+        MSR::Controls::ApplyKeyboardLayout();
+        return;
+    }
+
+    // Gamepad bindings read every connected pad, Steam Input's virtual pads included; profiles
+    // saved before read one pad by its GUID.
+    bool every_pad = false;
+    for (auto& profile : Settings::values.input_profiles) {
+        every_pad |= MSR::ControllerAutoConfig::ReadEveryPad(profile);
+    }
+    every_pad |= MSR::ControllerAutoConfig::ReadEveryPad(Settings::values.current_input_profile);
+    if (every_pad) {
+        config->Save();
+        LOG_INFO(Frontend, "Gamepad bindings now read every connected gamepad");
+    }
+
+    // Pick up gamepads as they are connected and fall back to the keyboard when they leave.
+    auto* controller_timer = new QTimer(this);
+    connect(controller_timer, &QTimer::timeout, this, &GMainWindow::AutoConfigureMsrController);
+    controller_timer->start(1000);
+}
+
+void GMainWindow::PlayMsrGame() {
+    const QString rom = MSR::GameFolder::ActiveRom();
+    if (rom.isEmpty() || emu_thread) {
+        return;
+    }
+    // Keep what was changed in the launcher.
+    MSR::GetOverlay().GetPlayerSettings().Save(MSR::GameFolder::User() +
+                                               QStringLiteral("msr/settings.ini"));
+    config->Save();
+    ui->action_Fullscreen->setChecked(UISettings::values.fullscreen.GetValue());
+
+    // Use the game's own icon for the window and taskbar.
+    if (const auto loader = Loader::GetLoader(rom.toStdString())) {
+        std::vector<u8> smdh;
+        if (loader->ReadIcon(smdh) == Loader::ResultStatus::Success && Loader::IsValidSMDH(smdh)) {
+            const QIcon icon(GetQPixmapFromSMDH(smdh));
+            setWindowIcon(icon);
+            render_window->setWindowIcon(icon);
+            secondary_window->setWindowIcon(icon);
+        }
+    }
+
+    msr_launcher->hide();
+    BootGame(rom);
+    if (!emu_thread) {
+        msr_launcher->Open(); // The dump did not load; the error has been shown.
+    }
+}
+
+void GMainWindow::RefreshMsrOverlaySettings() {
+    MSR::EmulatorSettings settings;
+    settings.fullscreen = ui->action_Fullscreen->isChecked();
+    settings.resolution = static_cast<int>(Settings::values.resolution_factor.GetValue());
+    settings.vsync = Settings::values.use_vsync.GetValue();
+    settings.volume = static_cast<int>(std::lround(Settings::values.volume.GetValue() * 100.f));
+    MSR::GetOverlay().SetEmulatorSettings(settings);
+    RefreshMsrControls();
+    RefreshMsrMods();
+    ShowMouseCursor();
+}
+
+void GMainWindow::RefreshMsrMods() {
+    MSR::ModsSnapshot snapshot;
+    for (const auto& pack : MSR::Mods::TexturePacks()) {
+        snapshot.packs.push_back({pack.name.toStdString(), MSR::Mods::Describe(pack).toStdString(),
+                                  pack.enabled});
+    }
+    snapshot.folder = QDir::toNativeSeparators(MSR::Mods::TexturePackFolder()).toStdString();
+    snapshot.preload = Settings::values.preload_textures.GetValue();
+    snapshot.dump = Settings::values.dump_textures.GetValue();
+    snapshot.restart_needed = emu_thread && MSR::Mods::Pending() != msr_booted_mods;
+    MSR::GetOverlay().SetMods(snapshot);
+}
+
+void GMainWindow::UpdateMsrDisplayRefresh() {
+    if (const QScreen* display = screen()) {
+        MSR::FrameRate::display_refresh = display->refreshRate();
+    }
+}
+
+void GMainWindow::RunMsrOverlayActions() {
+    using Kind = MSR::OverlayAction::Kind;
+    for (const auto& action : MSR::GetOverlay().TakeActions()) {
+        switch (action.kind) {
+        case Kind::Emulator: {
+            const auto& wanted = action.emulator;
+            if (wanted.fullscreen != ui->action_Fullscreen->isChecked()) {
+                ui->action_Fullscreen->setChecked(wanted.fullscreen);
+                ToggleFullscreen();
+            }
+            Settings::values.volume = static_cast<float>(wanted.volume) / 100.f;
+            if (wanted.resolution != static_cast<int>(Settings::values.resolution_factor.GetValue()) ||
+                wanted.vsync != Settings::values.use_vsync.GetValue()) {
+                Settings::values.resolution_factor = static_cast<u32>(wanted.resolution);
+                Settings::values.use_vsync = wanted.vsync;
+                system.ApplySettings();
+            }
+            break;
+        }
+        case Kind::Player:
+            MSR::GetOverlay().GetPlayerSettings().Save(MSR::GameFolder::User() +
+                                                       QStringLiteral("msr/settings.ini"));
+            config->Save();
+            break;
+        case Kind::Layout:
+            // Recomputes the framebuffer layout (widescreen, panel size).
+            system.ApplySettings();
+            break;
+        case Kind::QuickSave:
+            ui->action_Quick_Save->trigger();
+            break;
+        case Kind::QuickLoad:
+            ui->action_Quick_Load->trigger();
+            break;
+        case Kind::Restart:
+            OnRestartGame();
+            break;
+        case Kind::FrameRate:
+            // The CPU clock follows the frame rate (core.cpp); presentation checks the monitor.
+            UpdateMsrDisplayRefresh();
+            system.ApplySettings();
+            break;
+        case Kind::TexturePack:
+        case Kind::TexturePackUp:
+        case Kind::TexturePackDown: {
+            const auto packs = MSR::Mods::TexturePacks();
+            if (action.value >= 0 && action.value < static_cast<int>(packs.size())) {
+                const auto& pack = packs[action.value];
+                if (action.kind == Kind::TexturePack) {
+                    MSR::Mods::SetEnabled(pack.name, !pack.enabled);
+                } else {
+                    MSR::Mods::Move(pack.name, action.kind == Kind::TexturePackUp ? -1 : 1);
+                }
+            }
+            RefreshMsrMods();
+            break;
+        }
+        case Kind::ModsFolder:
+            MSR::Mods::OpenFolder();
+            break;
+        case Kind::PreloadTextures:
+            Settings::values.preload_textures = action.value != 0;
+            config->Save();
+            RefreshMsrMods();
+            break;
+        case Kind::DumpTextures:
+            Settings::values.dump_textures = action.value != 0;
+            config->Save();
+            RefreshMsrMods();
+            break;
+        case Kind::Quit:
+            close();
+            break;
+        case Kind::Bind:
+            StartMsrBind(action.value);
+            break;
+        case Kind::CancelBind:
+            StopMsrBind();
+            RefreshMsrControls();
+            break;
+        case Kind::GamepadLayout:
+            ApplyMsrLayout(true);
+            break;
+        case Kind::KeyboardLayout:
+            ApplyMsrLayout(false);
+            break;
+        }
+    }
+}
+
+void GMainWindow::RefreshMsrControls() {
+    MSR::ControlsSnapshot snapshot;
+    const auto& profile = Settings::values.current_input_profile;
+    snapshot.profile = profile.name;
+    for (const auto& row : MSR::Controls::Rows) {
+        snapshot.rows.push_back({row.id, row.label, MSR::Controls::BindingText(row.id)});
+    }
+    snapshot.capturing = msr_bind;
+    snapshot.controller_connected = MSR::Controls::ControllerConnected();
+    MSR::GetOverlay().SetControls(snapshot);
+}
+
+void GMainWindow::StartMsrBind(int id) {
+    StopMsrBind();
+    msr_bind = id;
+    msr_bind_started = false;
+    msr_bind_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    // Keys bind buttons directly; Escape cancels. Gamepads are polled in PollMsrBind.
+    msr_input->SetCapture([this](int key) {
+        if (key == Qt::Key_Escape) {
+            StopMsrBind();
+            RefreshMsrControls();
+        } else if (msr_bind >= 0 && msr_bind < MSR::Controls::AnalogBase) {
+            FinishMsrBind(InputCommon::GenerateKeyboardParam(key));
+        }
+        return true;
+    });
+    RefreshMsrControls();
+}
+
+void GMainWindow::PollMsrBind() {
+    if (msr_bind < 0) {
+        return;
+    }
+    if (std::chrono::steady_clock::now() > msr_bind_deadline) {
+        StopMsrBind();
+        RefreshMsrControls();
+        return;
+    }
+    if (!msr_bind_started) {
+        // Wait until the button that chose this row is released, or it would bind itself.
+        if (msr_input->AnyPadHeld()) {
+            return;
+        }
+        msr_pollers = InputCommon::Polling::GetPollers(
+            msr_bind >= MSR::Controls::AnalogBase ? InputCommon::Polling::DeviceType::Analog
+                            : InputCommon::Polling::DeviceType::Button);
+        for (auto& poller : msr_pollers) {
+            poller->Start();
+        }
+        msr_bind_started = true;
+        return;
+    }
+    for (auto& poller : msr_pollers) {
+        if (const auto param = poller->GetNextInput(); param.Has("engine")) {
+            FinishMsrBind(param.Serialize());
+            return;
+        }
+    }
+}
+
+void GMainWindow::FinishMsrBind(const std::string& param) {
+    const int id = msr_bind;
+    StopMsrBind();
+    MSR::Controls::Bind(id, param);
+    ApplyMsrInputProfile();
+}
+
+void GMainWindow::StopMsrBind() {
+    for (auto& poller : msr_pollers) {
+        poller->Stop();
+    }
+    msr_pollers.clear();
+    msr_bind = -1;
+    msr_bind_started = false;
+    if (msr_input) {
+        msr_input->SetCapture(nullptr);
+    }
+}
+
+void GMainWindow::ApplyMsrInputProfile() {
+    Settings::SaveProfile(Settings::values.current_input_profile_index);
+    system.ApplySettings();
+    config->Save();
+    RefreshMsrControls();
+}
+
+void GMainWindow::ApplyMsrLayout(bool gamepad) {
+    if (gamepad) {
+        if (!MSR::Controls::ApplyGamepadLayout()) {
+            return;
+        }
+    } else {
+        MSR::Controls::ApplyKeyboardLayout();
+    }
+    ApplyMsrInputProfile();
+}
+
+void GMainWindow::AutoConfigureMsrController() {
+    if (QApplication::activeModalWidget() ||
+        Settings::values.use_artic_base_controller.GetValue()) {
+        return;
+    }
+    using namespace MSR::ControllerAutoConfig;
+
+    Buttons keyboard_buttons;
+    for (std::size_t i = 0; i < keyboard_buttons.size(); ++i) {
+        keyboard_buttons[i] = InputCommon::GenerateKeyboardParam(QtConfig::default_buttons[i]);
+    }
+    Analogs keyboard_analogs;
+    for (std::size_t i = 0; i < keyboard_analogs.size(); ++i) {
+        const auto& keys = QtConfig::default_analogs[i];
+        keyboard_analogs[i] = InputCommon::GenerateAnalogParamFromKeys(keys[0], keys[1], keys[2],
+                                                                       keys[3], keys[4], 0.5f);
+    }
+    const auto button_binds = [](const Common::ParamPackage& pad, int button) {
+        return InputCommon::GetControllerButtonBinds(pad, button);
+    };
+    const auto analog_binds = [](const Common::ParamPackage& pad, int analog) {
+        return InputCommon::GetControllerAnalogBinds(pad, analog);
+    };
+
+    auto& profiles = Settings::values.input_profiles;
+    const auto& current = Settings::values.current_input_profile;
+    const int current_index = Settings::values.current_input_profile_index;
+    const auto controllers = InputCommon::GetConnectedGameControllers();
+    // Act on plug and unplug only, so a profile picked in Settings stays while the pads do.
+    std::vector<std::string> pads;
+    for (const auto& pad : controllers) {
+        pads.push_back(pad.Get("guid", "") + ':' + std::to_string(pad.Get("port", 0)));
+    }
+    std::sort(pads.begin(), pads.end());
+    if (pads == msr_connected_pads) {
+        return;
+    }
+    msr_connected_pads = std::move(pads);
+
+    const bool managed = Managed(current, button_binds, analog_binds);
+    int target = -1;
+    if (controllers.empty()) {
+        // Pad unplugged: return to the keyboard profile the automatic one replaced.
+        if (!managed) {
+            return;
+        }
+        for (std::size_t i = 0; i < profiles.size(); ++i) {
+            if (Untouched(profiles[i], keyboard_buttons, keyboard_analogs)) {
+                target = static_cast<int>(i);
+                break;
+            }
+        }
+        if (target < 0) {
+            return;
+        }
+    } else {
+        auto mapped = Select(current, controllers, keyboard_buttons, keyboard_analogs,
+                             button_binds, analog_binds);
+        if (!mapped) {
+            return;
+        }
+        if (managed) {
+            target = current_index;
+        } else {
+            // Keep the keyboard profile and reuse the automatic profile's slot across replugs.
+            Settings::SaveProfile(current_index);
+            const auto it = std::find_if(profiles.begin(), profiles.end(), [](const auto& p) {
+                return p.name == ProfileName;
+            });
+            target = static_cast<int>(it - profiles.begin());
+            if (it == profiles.end()) {
+                profiles.emplace_back();
+            }
+        }
+        profiles[target] = std::move(*mapped);
+    }
+
+    Settings::LoadProfile(target);
+    system.ApplySettings();
+    config->Save();
+    LOG_INFO(Frontend, "Selected input profile {} ({}) automatically", target,
+             profiles[target].name);
+}
+#endif
+
 void GMainWindow::SetDefaultUIGeometry() {
+#ifdef ENABLE_MSR_GAME_FOLDER
+    // A centered 16:9 window using 80% of the desktop; later launches restore the saved geometry.
+    const QRect available = screen()->availableGeometry();
+    const int unit =
+        std::max(1, std::min(available.width() * 4 / 5 / 16, available.height() * 4 / 5 / 9));
+    const QSize size(16 * unit, 9 * unit);
+    setGeometry(QRect(available.center() - QPoint(size.width() / 2, size.height() / 2), size));
+    return;
+#endif
     // geometry: 55% of the window contents are in the upper screen half, 45% in the lower half
     const QRect screenRect = screen()->geometry();
 
@@ -1470,6 +1960,12 @@ bool GMainWindow::LoadROM(const QString& filename) {
 }
 
 void GMainWindow::BootGame(const QString& filename) {
+#ifdef ENABLE_MSR_GAME_FOLDER
+    if (const auto info = MSR::GameFolder::Probe(filename); !info.Ok()) {
+        QMessageBox::warning(this, QStringLiteral("Metroid: Samus Returns"), info.error);
+        return;
+    }
+#endif
     if (emu_thread) {
         ShutdownGame();
     }
@@ -1519,6 +2015,12 @@ void GMainWindow::BootGame(const QString& filename) {
         LOG_INFO(Frontend, "Loading per application config file for title {}", config_file_name);
         QtConfig per_game_config(config_file_name, QtConfig::ConfigType::PerGameConfig);
     }
+#ifdef ENABLE_MSR_GAME_FOLDER
+    // The player's texture packs load at boot; the frame rate's presentation needs the monitor's
+    // refresh rate.
+    msr_booted_mods = MSR::Mods::Publish();
+    UpdateMsrDisplayRefresh();
+#endif
 
     // Artic Server cannot accept a client multiple times, so multiple loaders are not
     // possible. Instead register the app loader early and do not create it again on system load.
@@ -1693,12 +2195,23 @@ void GMainWindow::ShutdownGame() {
     loading_screen->hide();
     loading_screen->Clear();
 
+#ifndef ENABLE_MSR_GAME_FOLDER
     if (game_list->IsEmpty()) {
         game_list_placeholder->show();
     } else {
         game_list->show();
     }
     game_list->SetFilterFocus();
+#else
+    QTimer::singleShot(0, this, [this] {
+        if (!emu_thread && isVisible()) {
+            if (ui->action_Fullscreen->isChecked()) {
+                HideFullscreen();
+            }
+            msr_launcher->Open();
+        }
+    });
+#endif
 
     setMouseTracking(false);
 
@@ -2277,6 +2790,9 @@ void GMainWindow::OnGameListAddDirectory() {
 }
 
 void GMainWindow::OnGameListShowList(bool show) {
+#ifdef ENABLE_MSR_GAME_FOLDER
+    return;
+#endif
     if (emulation_running && ui->action_Single_Window_Mode->isChecked())
         return;
     game_list->setVisible(show);
@@ -2667,6 +3183,11 @@ void GMainWindow::OnPauseContinueGame() {
 }
 
 void GMainWindow::OnStopGame() {
+#ifdef ENABLE_MSR_GAME_FOLDER
+    // There is nothing to return to without the game list: stopping quits the player.
+    close();
+    return;
+#endif
     SetTurboEnabled(false);
 
     play_time_manager->Stop();
@@ -2681,6 +3202,9 @@ void GMainWindow::OnStopGame() {
 
 void GMainWindow::OnLoadComplete() {
     loading_screen->OnLoadComplete();
+#ifdef ENABLE_MSR_GAME_FOLDER
+    MSR::GetOverlay().ShowStartupHint();
+#endif
     UpdateSecondaryWindowVisibility();
 }
 
@@ -2742,7 +3266,9 @@ void GMainWindow::ShowFullscreen() {
 void GMainWindow::HideFullscreen() {
     if (ui->action_Single_Window_Mode->isChecked()) {
         statusBar()->setVisible(ui->action_Show_Status_Bar->isChecked());
+#ifndef ENABLE_MSR_GAME_FOLDER
         ui->menubar->show();
+#endif
 #ifdef NEEDS_ROUND_CORNERS_FIX
         WindowCornerManager::instance().blockRoundedCorners(this, false);
 #endif
@@ -3919,6 +4445,10 @@ void GMainWindow::OnCoreError(Core::System::ResultStatus result, std::string det
         if (ShowExceptionDialog(result, details)) {
             if (emu_thread) {
                 ShutdownGame();
+#ifdef ENABLE_MSR_GAME_FOLDER
+                // The game quit or crashed; there is no launcher to fall back to.
+                close();
+#endif
                 return;
             }
         }
@@ -3997,6 +4527,10 @@ void GMainWindow::OnCoreError(Core::System::ResultStatus result, std::string det
             message_box.clickedButton() == abort_button) {
             if (emu_thread) {
                 ShutdownGame();
+#ifdef ENABLE_MSR_GAME_FOLDER
+                // The game quit or crashed; there is no launcher to fall back to.
+                close();
+#endif
                 return;
             }
         }
@@ -4024,6 +4558,9 @@ bool GMainWindow::ConfirmClose() {
     if (!emu_thread || !UISettings::values.confirm_before_closing) {
         return true;
     }
+#ifdef ENABLE_MSR_GAME_FOLDER
+    return true; // Closing the window quits at once, as the overlay's Quit does
+#endif
 
     QMessageBox::StandardButton answer =
         QMessageBox::question(this, QStringLiteral("Azahar"), tr("Would you like to exit now?"),
@@ -4048,6 +4585,10 @@ void GMainWindow::closeEvent(QCloseEvent* event) {
 
     // Save settings in case they were changed from outside the configuration menu.
     config->Save();
+#ifdef ENABLE_MSR_GAME_FOLDER
+    MSR::GetOverlay().GetPlayerSettings().Save(MSR::GameFolder::User() +
+                                               QStringLiteral("msr/settings.ini"));
+#endif
 
     render_window->close();
     secondary_window->close();
@@ -4087,6 +4628,12 @@ bool GMainWindow::DropAction(QDropEvent* event) {
 
     const QMimeData* mime_data = event->mimeData();
     const QString& filename = mime_data->urls().at(0).toLocalFile();
+#ifdef ENABLE_MSR_GAME_FOLDER
+    if (!emulation_running) {
+        msr_launcher->ChooseRom(filename);
+    }
+    return true;
+#endif
 
     if (emulation_running && QFileInfo(filename).suffix() == QStringLiteral("bin")) {
         // Amiibo
@@ -4340,6 +4887,12 @@ void GMainWindow::OnSwitchDiskResources(VideoCore::LoadCallbackStage stage, std:
 }
 
 void GMainWindow::UpdateWindowTitle() {
+#ifdef ENABLE_MSR_GAME_FOLDER
+    setWindowTitle(QStringLiteral("Metroid: Samus Returns"));
+    render_window->setWindowTitle(windowTitle());
+    secondary_window->setWindowTitle(windowTitle());
+    return;
+#endif
     const QString full_name = QString::fromUtf8(Common::g_build_fullname);
 
     if (game_title.isEmpty()) {
@@ -4511,10 +5064,17 @@ int LaunchQtFrontend(int argc, char* argv[]) {
 #endif
 
     // Init settings params
+#ifdef ENABLE_MSR_GAME_FOLDER
+    QCoreApplication::setOrganizationName(QStringLiteral("Samus Returns"));
+    QCoreApplication::setApplicationName(QStringLiteral("Metroid: Samus Returns"));
+    // Matches the AppImage's desktop entry, so Linux taskbars show its name and icon.
+    QGuiApplication::setDesktopFileName(QStringLiteral("samus-returns-recomp"));
+#else
     QCoreApplication::setOrganizationName(QStringLiteral("Azahar Developers"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("azahar_emu.org"));
     QCoreApplication::setApplicationName(QStringLiteral("Azahar"));
     QGuiApplication::setDesktopFileName(QStringLiteral("org.azahar_emu.Azahar"));
+#endif
 
     auto rounding_policy = GetHighDpiRoundingPolicy();
     QApplication::setHighDpiScaleFactorRoundingPolicy(rounding_policy);
@@ -4532,6 +5092,20 @@ int LaunchQtFrontend(int argc, char* argv[]) {
 #endif
 
     QApplication app(argc, argv);
+
+#ifdef ENABLE_MSR_GAME_FOLDER
+    // Before GMainWindow loads any configuration: portable user folder, then the game itself.
+    MSR::GameFolder::Prepare();
+    // The launcher shows this dump, or asks for one (the package does not include the game).
+    MSR::GameFolder::SetActiveRom(MSR::GameFolder::FindRom());
+    // One 16:9 screen with the bottom screen's HUD composited onto it (Vulkan renderer).
+    MSR::Presentation::enabled = true;
+    if (qEnvironmentVariableIntValue("MSR_DEV") != 0) {
+        MSR::DrawProbe::directory = QString(MSR::GameFolder::User() + QStringLiteral("msr")).toStdString();
+        MSR::DrawProbe::enabled = true;
+        MSR::CodeCoverage::Enable();
+    }
+#endif
 
     // Required when using .qrc resources from within a static library.
     // See https://doc.qt.io/qt-5/resources.html#using-resources-in-a-library

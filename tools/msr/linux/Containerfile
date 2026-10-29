@@ -1,0 +1,18 @@
+# Build environment for the AppImage, for machines without a compiler such as the Steam Deck
+# (HANDOFF.md): Ubuntu 24.04 (glibc 2.39, GCC 13) with the same optional libraries as the release
+# build: PulseAudio and ALSA, SDL's X11, Wayland and udev backends, and FFmpeg.
+#   podman build -t samus-build:24.04 tools/msr/linux
+FROM docker.io/library/ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive PIP_BREAK_SYSTEM_PACKAGES=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build git python3 python3-pip python3-capstone curl ca-certificates \
+      pkg-config file rsync xz-utils patchelf desktop-file-utils \
+      libgl-dev libegl-dev libglx-dev libvulkan-dev libxkbcommon-dev libxkbcommon-x11-0 \
+      libx11-dev libx11-xcb-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+      libxss-dev libxinerama-dev libwayland-dev wayland-protocols libdrm-dev libgbm-dev \
+      libudev-dev libpulse-dev libasound2-dev libdbus-1-dev libfontconfig1 libfreetype6 \
+      libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
+      libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
+      libxcb-shape0 libxcb-xkb1 libxcb-xinerama0 libxcb-util1 libsm6 libice6 libxcb-randr0 \
+      libxcb-glx0 libxcb-xfixes0 libxcb-sync1 libxcb-shm0 libxcb-render0 \
+    && rm -rf /var/lib/apt/lists/*

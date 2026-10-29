@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <numeric>
 #include <boost/serialization/array.hpp>
@@ -22,6 +23,7 @@
 #include "core/hle/service/hid/hid_user.h"
 #include "core/hle/service/ir/ir_rst.h"
 #include "core/hle/service/ir/ir_user.h"
+#include "msr/presentation.h"
 #include "core/hle/service/service.h"
 #include "core/movie.h"
 
@@ -240,6 +242,23 @@ void Module::UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late) {
         circle_pad_old_y.erase(circle_pad_old_y.begin());
         circle_pad_old_y.push_back(circle_pad_new_y);
 
+        // Samus Returns: while the settings overlay or touch navigation is open the game keeps
+        // running without the player's input; touches they inject still arrive. Select opens
+        // the player's settings (msr/input_bridge.cpp); the game treats it as Start, which Start
+        // already gives, so it never sees it.
+        if (MSR::Presentation::enabled.load(std::memory_order_relaxed)) {
+            state.select.Assign(0);
+        }
+        const bool input_blocked = MSR::Presentation::block_game_input.load(std::memory_order_relaxed);
+        if (input_blocked) {
+            state.hex = 0;
+            circle_pad_x = 0;
+            circle_pad_y = 0;
+        }
+        const long long now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count();
+
         system.Movie().HandlePadAndCircleStatus(state, circle_pad_x, circle_pad_y);
 
         const DirectionState direction = GetStickDirectionState(circle_pad_x, circle_pad_y);
@@ -258,6 +277,12 @@ void Module::UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late) {
 
         // Compute bitmask with 1s for bits different from the old state
         PadState changed = {{(state.hex ^ old_state.hex)}};
+
+        // Samus Returns: when Start reaches the game, for the pause menu's transition.
+        if (MSR::Presentation::enabled.load(std::memory_order_relaxed) &&
+            PadState{{changed.hex & state.hex}}.start) {
+            MSR::Presentation::start_pressed_us = system.CoreTiming().GetGlobalTimeUs().count();
+        }
 
         // Get the current Pad entry
         PadDataEntry& pad_entry = mem->pad.entries[mem->pad.index];
@@ -288,6 +313,13 @@ void Module::UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late) {
         }
         if (!pressed && controller_touch_device) {
             std::tie(x, y, pressed) = controller_touch_device->GetStatus();
+        }
+        pressed = pressed && !input_blocked;
+        if (MSR::Presentation::touch_hold.load(std::memory_order_relaxed) ||
+            now_ns < MSR::Presentation::touch_tap_until.load(std::memory_order_relaxed)) {
+            pressed = true;
+            x = static_cast<float>(MSR::Presentation::tap_x.load()) / Core::kScreenBottomWidth;
+            y = static_cast<float>(MSR::Presentation::tap_y.load()) / Core::kScreenBottomHeight;
         }
         touch_entry.x = static_cast<u16>(x * Core::kScreenBottomWidth);
         touch_entry.y = static_cast<u16>(y * Core::kScreenBottomHeight);

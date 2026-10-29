@@ -60,6 +60,11 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
+#ifdef ENABLE_MSR_GAME_FOLDER
+    // Single-game player: the CLI and room modes would bypass the game folder checks.
+    return LaunchQtFrontend(argc, argv);
+#endif
+
     if (CitraCLI::CheckForOptions(CitraCLI::cli_capture_optstring, argc, argv)) {
         return CitraCLI::ParseCommand(argc, argv);
     }

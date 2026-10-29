@@ -9,6 +9,8 @@
 #include "common/microprofile.h"
 #include "common/settings.h"
 #include "core/core.h"
+#include "msr/draw_probe.h"
+#include "msr/presentation.h"
 #include "core/loader/loader.h"
 #include "core/memory.h"
 #include "video_core/pica/pica_core.h"
@@ -560,6 +562,53 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
         return true;
     }
 
+    if (MSR::Presentation::enabled.load(std::memory_order_relaxed) && SkipMsrBackdrop()) {
+        return true;
+    }
+
+    if (MSR::DrawProbe::Active()) {
+        const auto& fb = regs.framebuffer.framebuffer;
+        const auto& merger = regs.framebuffer.output_merger;
+        const auto vp = regs.rasterizer.GetViewportRect();
+        const auto textures = regs.texturing.GetTextures();
+        const auto& t0 = textures[0].config;
+        std::string line = fmt::format(
+            "fb={:08X} {}x{} cf={} vp={},{},{},{} n={} acc={} dt={} df={} dw={} bl={} cw={} "
+            "vs={:016X} sw={:016X} t0={} {:08X} {}x{} tf={}",
+            fb.GetColorBufferPhysicalAddress(), fb.GetWidth(), fb.GetHeight(),
+            static_cast<u32>(fb.color_format.Value()), vp.left, vp.top, vp.right, vp.bottom,
+            regs.pipeline.num_vertices, accelerate, merger.depth_test_enable.Value(),
+            static_cast<u32>(merger.depth_test_func.Value()), merger.depth_write_enable.Value(),
+            merger.alphablend_enable.Value(), using_color_fb, pica.vs_setup.GetProgramCodeHash(),
+            pica.vs_setup.GetSwizzleDataHash(), regs.texturing.main_config.texture0_enable.Value(),
+            t0.GetPhysicalAddress(), t0.width.Value(), t0.height.Value(),
+            static_cast<u32>(textures[0].format));
+        // Uniform rows 0-7 identify 2D layouts (sprite placement) versus 3D projections.
+        for (u32 row = 0; row < 8; ++row) {
+            const auto& f = pica.vs_setup.uniforms.f[row];
+            line += fmt::format(" c{}=[{:.4g} {:.4g} {:.4g} {:.4g}]", row, f[0].ToFloat32(),
+                                f[1].ToFloat32(), f[2].ToFloat32(), f[3].ToFloat32());
+        }
+        MSR::DrawProbe::Write(line);
+    }
+
+    // Samus Returns widescreen: squeeze the depth-tested world draws of the top screen before
+    // clipping so more of the level is visible, and let presentation stretch the screen to 16:9.
+    // 2D layers (fades, the game's full-screen composites) keep their full width.
+    {
+        const auto vp = regs.rasterizer.GetViewportRect();
+        const bool top_viewport = vp.GetWidth() == 240 && std::abs(vp.bottom - vp.top) == 400;
+        const bool wide = MSR::Presentation::enabled.load(std::memory_order_relaxed) &&
+                          MSR::Presentation::widescreen.load(std::memory_order_relaxed) &&
+                          using_color_fb && !shadow_rendering && top_viewport &&
+                          regs.framebuffer.output_merger.depth_test_enable != 0;
+        const float clip_scale_y = wide ? MSR::Presentation::WideScale : 1.f;
+        if (vs_data.clip_scale_y != clip_scale_y) {
+            vs_data.clip_scale_y = clip_scale_y;
+            vs_data_dirty = true;
+        }
+    }
+
     pipeline_info.state.attachments.color = framebuffer->Format(SurfaceType::Color);
     pipeline_info.state.attachments.depth = framebuffer->Format(SurfaceType::Depth);
 
@@ -786,7 +835,42 @@ void RasterizerVulkan::ClearAll(bool flush) {
     res_cache.ClearAll(flush);
 }
 
+bool RasterizerVulkan::SkipMsrBackdrop() {
+    // The title, file select and the other title menus open the bottom screen's frame with its
+    // backdrop: two full-screen quads (the blue scanlined fill, then the emblem) from a 1024x512
+    // I8 atlas. Gameplay and the pause menu start with other draws. Left out, the menus stand on
+    // black, which the compositor turns into transparency (renderer_vulkan.cpp).
+    const auto& fb = regs.framebuffer.framebuffer;
+    if (fb.GetWidth() != 240 || fb.GetHeight() != 320) {
+        msr_bottom_draw = -1;
+        return false;
+    }
+    if (++msr_bottom_draw > 1) {
+        return false;
+    }
+    const auto textures = regs.texturing.GetTextures();
+    const auto& texture = textures[0];
+    const bool backdrop = regs.pipeline.num_vertices == 6 &&
+                          regs.texturing.main_config.texture0_enable != 0 &&
+                          texture.config.width == 1024 && texture.config.height == 512 &&
+                          texture.format == Pica::TexturingRegs::TextureFormat::I8;
+    if (msr_bottom_draw == 0) {
+        msr_backdrop = backdrop;
+        MSR::Presentation::backdrop_removed.store(backdrop, std::memory_order_relaxed);
+    }
+    return msr_backdrop && backdrop;
+}
+
 bool RasterizerVulkan::AccelerateDisplayTransfer(const Pica::DisplayTransferConfig& config) {
+    msr_bottom_draw = -1; // A frame was finished: the next bottom-screen draw starts one
+    if (MSR::DrawProbe::Active()) {
+        MSR::DrawProbe::Write(fmt::format("transfer in={:08X} {}x{} out={:08X} {}x{} flip={}",
+                                          config.GetPhysicalInputAddress(),
+                                          config.input_width.Value(), config.input_height.Value(),
+                                          config.GetPhysicalOutputAddress(),
+                                          config.output_width.Value(),
+                                          config.output_height.Value(), config.flip_vertically.Value()));
+    }
     return res_cache.AccelerateDisplayTransfer(config);
 }
 

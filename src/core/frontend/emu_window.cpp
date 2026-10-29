@@ -2,12 +2,14 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <cmath>
 #include <mutex>
 #include "common/settings.h"
 #include "core/3ds.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/input.h"
+#include "msr/presentation.h"
 
 namespace Frontend {
 /// We need a global touch state that is shared across the different window instances
@@ -153,6 +155,20 @@ void EmuWindow::CreateTouchState() {
 }
 
 bool EmuWindow::TouchPressed(unsigned framebuffer_x, unsigned framebuffer_y) {
+    // In the single-screen presentation the bottom screen is only touchable as the panel, where
+    // the renderer last drew it (the gallery moves it beside the art).
+    if (MSR::Presentation::enabled) {
+        namespace P = MSR::Presentation;
+        const int x0 = P::panel_x0, y0 = P::panel_y0, x1 = P::panel_x1, y1 = P::panel_y1;
+        const int x = static_cast<int>(framebuffer_x), y = static_cast<int>(framebuffer_y);
+        if (!P::panel_visible || x1 <= x0 || y1 <= y0 || x < x0 || x >= x1 || y < y0 || y >= y1)
+            return false;
+        std::scoped_lock guard(touch_state->mutex);
+        touch_state->touch_x = static_cast<float>(x - x0) / static_cast<float>(x1 - x0);
+        touch_state->touch_y = static_cast<float>(y - y0) / static_cast<float>(y1 - y0);
+        touch_state->touch_pressed = true;
+        return true;
+    }
     if (!IsWithinTouchscreen(framebuffer_layout, framebuffer_x, framebuffer_y))
         return false;
     Settings::StereoRenderOption render_3d_mode = get3DMode();
@@ -202,6 +218,19 @@ void EmuWindow::TouchMoved(unsigned framebuffer_x, unsigned framebuffer_y) {
     if (!touch_state->touch_pressed)
         return;
 
+    if (MSR::Presentation::enabled) {
+        namespace P = MSR::Presentation;
+        const int x0 = P::panel_x0, y0 = P::panel_y0, x1 = P::panel_x1, y1 = P::panel_y1;
+        if (x1 > x0 && y1 > y0) {
+            framebuffer_x = static_cast<unsigned>(
+                std::clamp(static_cast<int>(framebuffer_x), x0, x1 - 1));
+            framebuffer_y = static_cast<unsigned>(
+                std::clamp(static_cast<int>(framebuffer_y), y0, y1 - 1));
+        }
+        TouchPressed(framebuffer_x, framebuffer_y);
+        return;
+    }
+
     if (!IsWithinTouchscreen(framebuffer_layout, framebuffer_x, framebuffer_y))
         std::tie(framebuffer_x, framebuffer_y) = ClipToTouchScreen(framebuffer_x, framebuffer_y);
 
@@ -246,6 +275,9 @@ void EmuWindow::UpdateCurrentFramebufferLayout(u32 width, u32 height, bool is_po
                                                     Settings::values.upright_screen.GetValue());
             break;
         }
+    } else if (MSR::Presentation::enabled) {
+        layout = Layout::MsrSingleScreenLayout(width, height, MSR::Presentation::widescreen,
+                                               MSR::Presentation::panel_scale);
     } else {
         switch (layout_option) {
         case Settings::LayoutOption::CustomLayout:

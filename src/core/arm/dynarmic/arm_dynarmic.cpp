@@ -20,6 +20,7 @@
 #endif
 #include "core/hle/kernel/svc.h"
 #include "core/memory.h"
+#include "msr/code_coverage.h"
 
 #ifndef SIGILL
 constexpr u32 SIGILL = 4;
@@ -38,6 +39,8 @@ public:
     ~DynarmicUserCallbacks() = default;
 
     std::optional<std::uint32_t> MemoryReadCode(VAddr vaddr) override {
+        // The JIT fetches each instruction once, when it translates its block.
+        MSR::CodeCoverage::Record(vaddr);
         return memory.Read32OrNullopt(vaddr);
     }
 

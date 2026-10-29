@@ -506,6 +506,11 @@ create_target_directory_groups(citra_core)
 
 target_link_libraries(citra_core PUBLIC citra_common PRIVATE audio_core network video_core)
 target_link_libraries(citra_core PRIVATE Boost::boost Boost::serialization Boost::iostreams httplib)
+if (WIN32)
+    # httplib's SSL client reads the Windows certificate store. web_service also links this, so
+    # the dependency was only missing from builds with ENABLE_WEB_SERVICE=OFF.
+    target_link_libraries(citra_core PRIVATE crypt32)
+endif()
 target_link_libraries(citra_core PUBLIC dds-ktx PRIVATE cryptopp fmt lodepng open_source_archives)
 
 if (ENABLE_WEB_SERVICE)
@@ -551,6 +556,27 @@ if ("x86_64" IN_LIST ARCHITECTURE OR "arm64" IN_LIST ARCHITECTURE)
         arm/dynarmic/arm_tick_counts.h
     )
     target_link_libraries(citra_core PRIVATE dynarmic)
+endif()
+
+if (ENABLE_MSR_RECOMP)
+    file(GLOB MSR_RECOMP_SOURCES CONFIGURE_DEPENDS "${MSR_RECOMP_DIR}/aot_*.cpp")
+    if (NOT MSR_RECOMP_SOURCES)
+        message(FATAL_ERROR "ENABLE_MSR_RECOMP: no generated code in MSR_RECOMP_DIR (${MSR_RECOMP_DIR})")
+    endif()
+    # Generated straight-line code: -O1 keeps the compile time reasonable, and the guest's
+    # floating point must not be contracted into fused operations.
+    add_library(msr_recomp_generated STATIC ${MSR_RECOMP_SOURCES})
+    target_include_directories(msr_recomp_generated PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/arm/msr_aot)
+    target_compile_options(msr_recomp_generated PRIVATE -O1 -w -ffp-contract=off -fno-strict-aliasing)
+    set_target_properties(msr_recomp_generated PROPERTIES UNITY_BUILD OFF)
+    target_sources(citra_core PRIVATE
+        arm/msr_aot/aot_generated.h
+        arm/msr_aot/aot_runtime.h
+        arm/msr_aot/arm_aot.cpp
+        arm/msr_aot/arm_aot.h
+    )
+    target_compile_definitions(citra_core PRIVATE ENABLE_MSR_RECOMP)
+    target_link_libraries(citra_core PRIVATE msr_recomp_generated)
 endif()
 
 if (CITRA_USE_PRECOMPILED_HEADERS)

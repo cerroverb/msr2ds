@@ -5,6 +5,13 @@ add_executable(citra_meta
 )
 
 set_target_properties(citra_meta PROPERTIES OUTPUT_NAME "azahar")
+if (ENABLE_MSR_GAME_FOLDER)
+    set_target_properties(citra_meta PROPERTIES OUTPUT_NAME "SamusReturns")
+    target_compile_definitions(citra_meta PRIVATE ENABLE_MSR_GAME_FOLDER)
+    # The player's own icon and version information instead of the emulator's.
+    set_source_files_properties(citra.rc PROPERTIES HEADER_FILE_ONLY TRUE)
+    target_sources(citra_meta PRIVATE msr.rc)
+endif()
 
 if (BSD STREQUAL "NetBSD")
     include(DisablePaxMprotect)

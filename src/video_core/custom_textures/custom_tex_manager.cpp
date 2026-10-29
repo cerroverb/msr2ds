@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <json.hpp>
 #include "common/file_util.h"
 #include "common/literals.h"
@@ -14,6 +15,7 @@
 #include "core/frontend/image_interface.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/process.h"
+#include "msr/texture_packs.h"
 #include "video_core/custom_textures/custom_tex_manager.h"
 #include "video_core/rasterizer_cache/surface_params.h"
 #include "video_core/rasterizer_cache/utils.h"
@@ -94,13 +96,67 @@ void CustomTexManager::FindCustomTextures() {
     }
 
     const u64 title_id = system.Kernel().GetCurrentProcess()->codeset->program_id;
-    const auto textures = GetTextures(title_id);
-    if (!ReadConfig(title_id)) {
-        use_new_hash = false;
-        skip_mipmap = true;
+    if (!MSR::TexturePacks::managed) {
+        const auto textures = GetTextures(title_id);
+        if (!ReadConfig(title_id)) {
+            use_new_hash = false;
+            skip_mipmap = true;
+        }
+        AddPack(textures);
+        textures_loaded = true;
+        return;
     }
 
-    custom_textures.reserve(textures.size());
+    // Samus Returns: the packs the player enabled, highest priority first (msr/texture_packs.h).
+    // Each pack's pack.json names its own files; the first pack's hash and mipmap options hold
+    // for all of them, as the renderer looks textures up only one way.
+    const auto packs = MSR::TexturePacks::Folders();
+    for (std::size_t i = 0; i < packs.size(); ++i) {
+        const auto textures = ScanPack(packs[i]);
+        std::string config;
+        std::size_t depth = std::string::npos;
+        for (const FileUtil::FSTEntry& file : textures) {
+            const auto file_depth = static_cast<std::size_t>(
+                std::count(file.physicalName.begin(), file.physicalName.end(), '/'));
+            if (!file.isDirectory && file.virtualName == "pack.json" && file_depth < depth) {
+                config = file.physicalName;
+                depth = file_depth;
+            }
+        }
+        const bool first_new_hash = use_new_hash;
+        const bool first_skip_mipmap = skip_mipmap;
+        path_to_hash_map.clear();
+        flip_png_files = true;
+        if (config.empty() || !ReadConfigFile(config)) {
+            use_new_hash = false;
+            skip_mipmap = true;
+        }
+        if (i > 0) {
+            if (use_new_hash != first_new_hash) {
+                LOG_WARNING(Render,
+                            "Texture pack {} hashes textures differently from {}: its textures "
+                            "may not apply",
+                            packs[i], packs[0]);
+            }
+            use_new_hash = first_new_hash;
+            skip_mipmap = first_skip_mipmap;
+        }
+        const std::size_t overridden = AddPack(textures);
+        LOG_INFO(Render, "Texture pack {}: {} files, {} replaced by packs listed above", packs[i],
+                 textures.size(), overridden);
+    }
+    textures_loaded = true;
+}
+
+std::size_t CustomTexManager::AddPack(const std::vector<FileUtil::FSTEntry>& textures) {
+    // Hashes earlier packs replace: overlaps between packs are expected, not errors.
+    std::unordered_set<u64> claimed;
+    claimed.reserve(material_map.size());
+    for (const auto& [hash, material] : material_map) {
+        claimed.insert(hash);
+    }
+    std::size_t overridden = 0;
+    custom_textures.reserve(custom_textures.size() + textures.size());
     for (const FileUtil::FSTEntry& file : textures) {
         if (file.isDirectory) {
             continue;
@@ -110,7 +166,12 @@ void CustomTexManager::FindCustomTextures() {
         if (!ParseFilename(file, texture)) {
             continue;
         }
+        texture->flip_png = flip_png_files;
         for (const u64 hash : texture->hashes) {
+            if (claimed.contains(hash)) {
+                ++overridden;
+                continue;
+            }
             auto& material = material_map[hash];
             if (!material) {
                 material = std::make_unique<Material>();
@@ -119,7 +180,7 @@ void CustomTexManager::FindCustomTextures() {
             material->AddMapTexture(texture);
         }
     }
-    textures_loaded = true;
+    return overridden;
 }
 
 bool CustomTexManager::ParseFilename(const FileUtil::FSTEntry& file, CustomTexture* texture) {
@@ -188,6 +249,7 @@ void CustomTexManager::PrepareDumping(u64 title_id) {
     if (FileUtil::Exists(pack_config)) {
         return;
     }
+    FileUtil::CreateFullPath(dump_path); // The first dump has no folder yet
 
     nlohmann::ordered_json json;
     json["author"] = "citra";
@@ -225,7 +287,7 @@ void CustomTexManager::PreloadTextures(const std::atomic_bool& stop_run,
             if (stop_run) {
                 return;
             }
-            material->LoadFromDisk(flip_png_files);
+            material->LoadFromDisk();
             size_sum += material->size;
             if (callback) {
                 callback(VideoCore::LoadCallbackStage::Preload, preloaded, custom_textures.size(),
@@ -290,7 +352,8 @@ void CustomTexManager::DumpTexture(const SurfaceParams& params, u32 level, std::
 Material* CustomTexManager::GetMaterial(u64 data_hash) {
     const auto it = material_map.find(data_hash);
     if (it == material_map.end()) {
-        LOG_WARNING(Render, "Unable to find replacement for surface with hash {:016X}", data_hash);
+        // Packs rarely replace every texture: one line per miss would flood the log.
+        LOG_DEBUG(Render, "Unable to find replacement for surface with hash {:016X}", data_hash);
         return nullptr;
     }
     return it->second.get();
@@ -298,12 +361,12 @@ Material* CustomTexManager::GetMaterial(u64 data_hash) {
 
 bool CustomTexManager::Decode(Material* material, std::function<bool()>&& upload) {
     if (!async_custom_loading) {
-        material->LoadFromDisk(flip_png_files);
+        material->LoadFromDisk();
         return upload();
     }
     if (material->IsUnloaded()) {
         material->state = DecodeState::Pending;
-        workers->QueueWork([material, this] { material->LoadFromDisk(flip_png_files); });
+        workers->QueueWork([material] { material->LoadFromDisk(); });
     }
     async_uploads.push_back({
         .material = material,
@@ -319,7 +382,10 @@ bool CustomTexManager::ReadConfig(u64 title_id, bool options_only) {
         FileUtil::CreateFullPath(load_path);
     }
 
-    const std::string config_path = load_path + "pack.json";
+    return ReadConfigFile(load_path + "pack.json", options_only);
+}
+
+bool CustomTexManager::ReadConfigFile(const std::string& config_path, bool options_only) {
     FileUtil::IOFile config_file{config_path, "r"};
     if (!config_file.IsOpen()) {
         LOG_INFO(Render, "Unable to find pack config file, using legacy defaults");
@@ -378,9 +444,13 @@ std::vector<FileUtil::FSTEntry> CustomTexManager::GetTextures(u64 title_id) {
         FileUtil::CreateFullPath(load_path);
     }
 
+    return ScanPack(load_path);
+}
+
+std::vector<FileUtil::FSTEntry> CustomTexManager::ScanPack(const std::string& path) {
     FileUtil::FSTEntry texture_dir;
     std::vector<FileUtil::FSTEntry> textures;
-    FileUtil::ScanDirectoryTree(load_path, texture_dir, 64);
+    FileUtil::ScanDirectoryTree(path, texture_dir, 64);
     FileUtil::GetAllFilesFromNestedEntries(texture_dir, textures);
     return textures;
 }

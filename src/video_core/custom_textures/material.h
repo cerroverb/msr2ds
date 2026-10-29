@@ -63,6 +63,7 @@ public:
     CustomFileFormat file_format;
     std::vector<u8> data;
     MapType type;
+    bool flip_png = true; ///< The pack's flip_png_files option
 };
 
 struct Material {
@@ -74,7 +75,7 @@ struct Material {
     std::array<CustomTexture*, MAX_MAPS> textures;
     std::atomic<DecodeState> state{};
 
-    void LoadFromDisk(bool flip_png) noexcept;
+    void LoadFromDisk() noexcept;
 
     void AddMapTexture(CustomTexture* texture) noexcept;
 

@@ -2,14 +2,24 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
+#include <cstring>
+#include <vector>
 #include "common/archives.h"
 #include "common/hacks/hack_manager.h"
 #include "common/microprofile.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/process.h"
+#include "core/memory.h"
 #include "core/hle/service/gsp/gsp_gpu.h"
 #include "core/hle/service/plgldr/plgldr.h"
 #include "core/loader/loader.h"
+#include "msr/cheats.h"
+#include "msr/frame_rate.h"
+#include "msr/presentation.h"
+#include "msr/suit_swap.h"
 #include "video_core/debug_utils/debug_utils.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_debugger.h"
@@ -281,6 +291,7 @@ void GPU::SetBufferSwap(u32 screen_id, const Service::GSP::FrameBufferInfo& info
 
     if (screen_id == 0) {
         MicroProfileFlip();
+        MSR::FrameRate::game_frames.fetch_add(1, std::memory_order_relaxed);
         impl->system.perf_stats->EndGameFrame();
         right_eye_disabler->ReportEndFrame();
     }
@@ -493,8 +504,590 @@ void GPU::VBlankCallback(std::uintptr_t user_data, s64 cycles_late) {
     // Present renderered frame.
     impl->renderer->SwapBuffers();
 
+    // Samus Returns at the player's frame rate (msr/frame_rate.h): the game's frame limit
+    // follows it, and the display refreshes at least as often as the game draws.
+    u64 frame_ticks = FRAME_TICKS;
+    if (const int fps = MSR::FrameRate::target.load(std::memory_order_relaxed); fps != 0) {
+        ApplyMsrFrameLimit(fps);
+        if (fps > 60) {
+            frame_ticks = BASE_CLOCK_RATE_ARM11 / static_cast<u64>(fps);
+        }
+        ApplyMsrCheats();
+        ApplyMsrRefills();
+        ApplyMsrSuitSwap();
+    }
+
     // Reschedule recurrent event
-    impl->timing.ScheduleEvent(FRAME_TICKS - cycles_late, impl->vblank_event);
+    impl->timing.ScheduleEvent(frame_ticks - cycles_late, impl->vblank_event);
+}
+
+void GPU::ApplyMsrFrameLimit(int fps) {
+    namespace FrameRate = MSR::FrameRate;
+    const auto process = impl->system.Kernel().GetCurrentProcess();
+    auto& memory = impl->memory;
+    if (!process || !memory.IsValidVirtualAddress(*process, FrameRate::LimitCompare)) {
+        return;
+    }
+    // Rewritten only where the limit's instructions are found: the save states of other rates
+    // bring their own limit back, other programs and versions are left alone.
+    const u32 compare = memory.Read32(FrameRate::LimitCompare);
+    const u32 subtract = memory.Read32(FrameRate::LimitSubtract);
+    if ((compare & ~0xFFu) != FrameRate::CompareBase ||
+        (subtract & ~0xFFu) != FrameRate::SubtractBase ||
+        memory.Read32(FrameRate::LimitBranch) != FrameRate::BranchWord) {
+        return;
+    }
+    const u32 limit = FrameRate::LimitMs(fps);
+    if ((compare & 0xFF) != limit || (subtract & 0xFF) != limit) {
+        memory.Write32(FrameRate::LimitCompare, FrameRate::CompareBase | limit);
+        memory.Write32(FrameRate::LimitSubtract, FrameRate::SubtractBase | limit);
+        impl->system.InvalidateCacheRange(FrameRate::LimitCompare,
+                                          FrameRate::LimitSubtract + 4 - FrameRate::LimitCompare);
+    }
+
+    // The interface's fixed 1/30 s steps follow the measured frame time above 30 FPS.
+    for (const auto& patch : FrameRate::StepPatches) {
+        const u32 word = memory.Read32(patch.address);
+        const u32 wanted = fps > 30 ? patch.replacement : patch.original;
+        if (word != wanted && (word == patch.original || word == patch.replacement)) {
+            memory.Write32(patch.address, wanted);
+            impl->system.InvalidateCacheRange(patch.address, 4);
+        }
+    }
+}
+
+void GPU::ApplyMsrCheats() {
+    namespace Cheats = MSR::Cheats;
+    const auto process = impl->system.Kernel().GetCurrentProcess();
+    auto& memory = impl->memory;
+    const u32 enabled = Cheats::enabled.load(std::memory_order_relaxed);
+    for (const auto& patch : Cheats::Patches) {
+        if (!process || !memory.IsValidVirtualAddress(*process, patch.address)) {
+            return;
+        }
+        // Only where the game's instruction or its replacement is found, as for the frame limit.
+        const u32 word = memory.Read32(patch.address);
+        const u32 wanted = (enabled & patch.flag) != 0 ? patch.replacement : patch.original;
+        if (word != wanted && (word == patch.original || word == patch.replacement)) {
+            memory.Write32(patch.address, wanted);
+            impl->system.InvalidateCacheRange(patch.address, 4);
+        }
+    }
+}
+
+namespace {
+
+/// Objects of one class on the game's heaps, by their vtable (~6 ms for all of them): those of
+/// `size` bytes whose words `fits` accepts (`word(offset)` reads the object), up to `limit`.
+template <typename Fits>
+std::vector<u32> FindMsrObjects(const Kernel::Process& process, u32 vtable, u32 size, Fits fits,
+                                std::size_t limit) {
+    std::vector<u32> found;
+    for (const auto& [base, vma] : process.vm_manager.vma_map) {
+        if (vma.type != Kernel::VMAType::BackingMemory || base < 0x08000000 || vma.size < size ||
+            !vma.backing_memory) {
+            continue;
+        }
+        const u8* data = vma.backing_memory.GetPtr();
+        for (u32 offset = 0; offset + size <= vma.size; offset += 4) {
+            const auto word = [data, offset](u32 field) {
+                u32 value;
+                std::memcpy(&value, data + offset + field, sizeof(value));
+                return value;
+            };
+            if (word(0) != vtable || !fits(word)) {
+                continue;
+            }
+            found.push_back(base + offset);
+            if (found.size() == limit) {
+                return found;
+            }
+        }
+    }
+    return found;
+}
+
+/// Samus's model components (Samus and the morph ball), by their vtable.
+std::vector<u32> FindMsrModelComponents(const Kernel::Process& process) {
+    namespace Swap = MSR::SuitSwap;
+    return FindMsrObjects(
+        process, Swap::ComponentVtable, Swap::ComponentSize,
+        [](const auto& word) {
+            const u32 count = word(Swap::ComponentCountOffset);
+            return count != 0 && count <= 8 && word(Swap::ComponentCapacityOffset) >= count;
+        },
+        Swap::MaxComponents);
+}
+
+/// The components found earlier are still there (an area load replaces them).
+bool MsrComponentsCurrent(Memory::MemorySystem& memory, const Kernel::Process& process,
+                          const std::vector<u32>& components) {
+    namespace Swap = MSR::SuitSwap;
+    for (const u32 component : components) {
+        if (!memory.IsValidVirtualAddress(process, component) ||
+            !memory.IsValidVirtualAddress(process, component + Swap::ComponentSize - 4) ||
+            memory.Read32(component) != Swap::ComponentVtable) {
+            return false;
+        }
+        const u32 count = memory.Read32(component + Swap::ComponentCountOffset);
+        if (count == 0 || count > 8) {
+            return false;
+        }
+    }
+    return !components.empty();
+}
+
+/// Whether a component's models are the Fusion ones, from its first model's file
+/// (actors/characters/samusfusion/...): 1 or 0, -1 when it cannot be read.
+int MsrModelsFusion(Memory::MemorySystem& memory, const Kernel::Process& process, u32 component) {
+    namespace Swap = MSR::SuitSwap;
+    const auto valid = [&](u32 address) { return memory.IsValidVirtualAddress(process, address); };
+    const u32 entries = memory.Read32(component + Swap::ComponentEntriesOffset);
+    if (!valid(entries + Swap::EntryPathOffset)) {
+        return -1;
+    }
+    const u32 path = memory.Read32(entries + Swap::EntryPathOffset);
+    if (!valid(path)) {
+        return -1;
+    }
+    const u32 text = memory.Read32(path);
+    if (!valid(text)) {
+        return -1;
+    }
+    const std::string file = memory.ReadCString(text, 96);
+    if (!file.starts_with("actors/characters/")) {
+        return -1;
+    }
+    return file.find("fusion") != std::string::npos ? 1 : 0;
+}
+
+/// The name hashes of a model instance's bones, in index order (empty when unreadable).
+std::vector<u32> MsrBoneHashes(Memory::MemorySystem& memory, const Kernel::Process& process,
+                               u32 instance) {
+    namespace Swap = MSR::SuitSwap;
+    const auto valid = [&](u32 address) { return memory.IsValidVirtualAddress(process, address); };
+    std::vector<u32> hashes;
+    const u32 skeleton = memory.Read32(instance + Swap::InstanceSkeletonOffset);
+    if (!valid(skeleton + 0x44)) {
+        return hashes;
+    }
+    const u32 data = memory.Read32(skeleton + 0x44);
+    if (!valid(data + 0x3C)) {
+        return hashes;
+    }
+    const u32 table = memory.Read32(data + 0x3C);
+    if (!valid(table + 4)) {
+        return hashes;
+    }
+    const u32 count = memory.Read32(table);
+    const u32 bones = memory.Read32(table + 4);
+    if (count > 512 || !valid(bones) || !valid(bones + count * Swap::BoneSize - 4)) {
+        return hashes;
+    }
+    for (u32 i = 0; i < count; ++i) {
+        const u32 name = memory.Read32(bones + i * Swap::BoneSize + Swap::BoneNameOffset);
+        hashes.push_back(valid(name + 0x10) ? memory.Read32(name + 0x10) : 0);
+    }
+    return hashes;
+}
+
+/// The models hanging from the components' bones: their scene nodes and the bones' name hashes.
+std::vector<std::pair<u32, u32>> MsrBoneAttachments(Memory::MemorySystem& memory,
+                                                    const Kernel::Process& process,
+                                                    const std::vector<u32>& components) {
+    namespace Swap = MSR::SuitSwap;
+    std::vector<std::pair<u32, u32>> found;
+    for (const u32 component : components) {
+        const u32 instance = memory.Read32(component + Swap::ComponentInstanceOffset);
+        if (instance == 0 || !memory.IsValidVirtualAddress(process, instance)) {
+            continue;
+        }
+        const auto bones = MsrBoneHashes(memory, process, instance);
+        u32 child = memory.Read32(instance + Swap::InstanceNodeOffset + Swap::NodeFirstChildOffset);
+        for (int guard = 0; child != 0 && guard < 256; ++guard) {
+            if (!memory.IsValidVirtualAddress(process, child + Swap::NodeBoneOffset)) {
+                break;
+            }
+            const s32 bone = static_cast<s32>(memory.Read32(child + Swap::NodeBoneOffset));
+            if (bone >= 0 && static_cast<std::size_t>(bone) < bones.size()) {
+                found.emplace_back(child, bones[bone]);
+            }
+            child = memory.Read32(child + Swap::NodeNextOffset);
+        }
+    }
+    return found;
+}
+
+/// Hangs the recorded models from the bones of the same names in the components' new skeletons.
+void MsrReattach(Memory::MemorySystem& memory, const Kernel::Process& process,
+                 const std::vector<u32>& components,
+                 const std::vector<std::pair<u32, u32>>& attachments) {
+    namespace Swap = MSR::SuitSwap;
+    int moved = 0;
+    int missing = 0;
+    for (const u32 component : components) {
+        const u32 instance = memory.Read32(component + Swap::ComponentInstanceOffset);
+        if (instance == 0 || !memory.IsValidVirtualAddress(process, instance)) {
+            continue;
+        }
+        const auto bones = MsrBoneHashes(memory, process, instance);
+        u32 child = memory.Read32(instance + Swap::InstanceNodeOffset + Swap::NodeFirstChildOffset);
+        for (int guard = 0; child != 0 && guard < 256; ++guard) {
+            if (!memory.IsValidVirtualAddress(process, child + Swap::NodeBoneOffset)) {
+                break;
+            }
+            const auto recorded = std::find_if(attachments.begin(), attachments.end(),
+                                               [child](const auto& a) { return a.first == child; });
+            if (recorded != attachments.end()) {
+                const auto bone = std::find(bones.begin(), bones.end(), recorded->second);
+                if (bone != bones.end()) {
+                    memory.Write32(child + Swap::NodeBoneOffset,
+                                   static_cast<u32>(bone - bones.begin()));
+                    ++moved;
+                } else {
+                    ++missing;
+                }
+            }
+            child = memory.Read32(child + Swap::NodeNextOffset);
+        }
+    }
+    LOG_INFO(HW_GPU, "Fusion suit: {} attached models moved to their bones, {} without one",
+             moved, missing);
+}
+
+/// Samus is in play (or in the pause menu), not in a load or a cutscene.
+bool MsrInGameplay() {
+    namespace P = MSR::Presentation;
+    switch (static_cast<P::Bottom>(P::bottom.load(std::memory_order_relaxed))) {
+    case P::Bottom::Hud:
+        return true;
+    case P::Bottom::Menu: {
+        const auto page = static_cast<P::Page>(P::page.load(std::memory_order_relaxed));
+        return page == P::Page::PauseMap || page == P::Page::PauseSamus ||
+               page == P::Page::MapPins;
+    }
+    default:
+        return false;
+    }
+}
+
+} // namespace
+
+void GPU::ApplyMsrRefills() {
+    namespace Cheats = MSR::Cheats;
+    auto& refills = impl->msr_refills;
+    const u32 enabled = Cheats::enabled.load(std::memory_order_relaxed);
+    const auto process = impl->system.Kernel().GetCurrentProcess();
+    auto& memory = impl->memory;
+    const auto valid = [&](u32 address) {
+        return process && memory.IsValidVirtualAddress(*process, address);
+    };
+    if (!valid(Cheats::GamePointer)) {
+        return;
+    }
+
+    // Energy and Aeion: their components, found again once an area load has replaced them.
+    bool missing = false;
+    for (std::size_t i = 0; i < Cheats::LockedValues.size(); ++i) {
+        const auto& value = Cheats::LockedValues[i];
+        u32& component = refills.components[i];
+        if (component != 0 &&
+            (!valid(component + value.size - 4) || memory.Read32(component) != value.vtable)) {
+            component = 0;
+            refills.locked[i] = false;
+        }
+        if ((enabled & value.flag) == 0) {
+            if (refills.locked[i]) {
+                memory.Write8(component + value.lock, 0);
+                refills.locked[i] = false;
+            }
+            continue;
+        }
+        if (component == 0) {
+            missing = true;
+            continue;
+        }
+        // Full: locked. Otherwise unlocked and filled through the setter, once the stub is free.
+        const u32 maximum = memory.Read32(component + value.maximum);
+        if (memory.Read32(component + value.current) == maximum) {
+            memory.Write8(component + value.lock, 1);
+            refills.locked[i] = true;
+        } else if (impl->msr_suit_swap.calls.empty()) {
+            memory.Write8(component + value.lock, 0);
+            impl->msr_suit_swap.calls.push_back({value.setter, component, 0, maximum});
+        }
+    }
+    const s64 now_us = impl->timing.GetGlobalTimeUs().count();
+    if (missing && MsrInGameplay() && now_us >= refills.next_scan_us) {
+        refills.next_scan_us = now_us + 1'000'000;
+        for (std::size_t i = 0; i < Cheats::LockedValues.size(); ++i) {
+            const auto& value = Cheats::LockedValues[i];
+            if ((enabled & value.flag) == 0 || refills.components[i] != 0) {
+                continue;
+            }
+            // A plausible maximum, up to which the current value goes.
+            const auto found = FindMsrObjects(
+                *process, value.vtable, value.size,
+                [&value](const auto& word) {
+                    float maximum;
+                    const u32 bits = word(value.maximum);
+                    std::memcpy(&maximum, &bits, sizeof(maximum));
+                    return maximum > 0.f && maximum < 100000.f;
+                },
+                1);
+            if (!found.empty()) {
+                refills.components[i] = found.front();
+                LOG_INFO(HW_GPU, "Cheats: {} kept full",
+                         value.flag == Cheats::InfiniteEnergy ? "energy" : "Aeion");
+            }
+        }
+    }
+
+    // Missiles: Samus's inventory, as the game finds it.
+    if ((enabled & Cheats::InfiniteMissiles) == 0) {
+        return;
+    }
+    const u32 game = memory.Read32(Cheats::GamePointer);
+    u32 inventory = 0;
+    for (const u32 offset : Cheats::PlayerHandles) {
+        if (!valid(game + offset)) {
+            return;
+        }
+        const u32 handle = memory.Read32(game + offset);
+        const u32 entity = valid(handle + 8) ? memory.Read32(handle + 8) : 0;
+        inventory = valid(entity + Cheats::EntityInventoryOffset)
+                        ? memory.Read32(entity + Cheats::EntityInventoryOffset)
+                        : 0;
+        if (inventory != 0) {
+            break;
+        }
+    }
+    if (!valid(inventory + 0x48)) {
+        return;
+    }
+    // Where an item's value is (0 when it is not in the inventory).
+    const auto item = [&](u32 key) -> u32 {
+        const u32 name = valid(key) ? memory.Read32(key) : 0;
+        if (!valid(name + 0x10) || memory.Read32(inventory + 0x44) == 0) {
+            return 0;
+        }
+        const u32 hash = memory.Read32(name + 0x10);
+        const u32 buckets = memory.Read32(inventory + 0x40);
+        const u32 count = memory.Read32(inventory + 0x48);
+        if (count == 0 || !valid(buckets + (hash % count) * 4)) {
+            return 0;
+        }
+        u32 node = memory.Read32(buckets + (hash % count) * 4);
+        for (int guard = 0; node != 0 && guard < 64 && valid(node + 0x10); ++guard) {
+            if (memory.Read32(node) == hash) {
+                const u32 value = memory.Read32(node + 4);
+                return valid(value) ? value : 0;
+            }
+            node = memory.Read32(node + 0x10);
+        }
+        return 0;
+    };
+    for (const auto& refill : Cheats::Refills) {
+        const u32 current = item(refill.current);
+        const u32 maximum = item(refill.maximum);
+        if (current != 0 && maximum != 0 && memory.Read32(current) != memory.Read32(maximum)) {
+            memory.Write32(current, memory.Read32(maximum));
+        }
+    }
+}
+
+void GPU::ApplyMsrSuitSwap() {
+    namespace Swap = MSR::SuitSwap;
+    using Step = Impl::MsrSuitSwap::Step;
+    auto& swap = impl->msr_suit_swap;
+    const auto process = impl->system.Kernel().GetCurrentProcess();
+    auto& memory = impl->memory;
+    if (!process || !memory.IsValidVirtualAddress(*process, Swap::Mailbox) ||
+        !memory.IsValidVirtualAddress(*process, Swap::Hook)) {
+        return;
+    }
+    // Only in the game this was written for: the hook holds the frame limiter's instruction or
+    // the branch to the stub.
+    const u32 hook = memory.Read32(Swap::Hook);
+    if (hook != Swap::HookOriginal && hook != Swap::HookBranch) {
+        return;
+    }
+    const u32 game = memory.Read32(Swap::GamePointer);
+    if (game == 0 || !memory.IsValidVirtualAddress(*process, game + Swap::ForceFusionOffset)) {
+        return;
+    }
+    const bool fusion =
+        (MSR::Cheats::enabled.load(std::memory_order_relaxed) & MSR::Cheats::FusionSuit) != 0 ||
+        memory.Read8(game + Swap::FusionModeOffset) != 0 ||
+        memory.Read8(game + Swap::ForceFusionOffset) != 0;
+    const s64 now_us = impl->timing.GetGlobalTimeUs().count();
+
+    const auto set_hook = [&](bool on) {
+        const u32 word = on ? Swap::HookBranch : Swap::HookOriginal;
+        if (memory.Read32(Swap::Hook) != word) {
+            memory.Write32(Swap::Hook, word);
+            impl->system.InvalidateCacheRange(Swap::Hook, 4);
+        }
+    };
+    // A command for the stub, which runs it on the game's next frame.
+    const auto send = [&](u32 command, bool family) {
+        bool stub_current = true;
+        for (std::size_t i = 0; i < Swap::Stub.size(); ++i) {
+            stub_current &= memory.Read32(Swap::StubAddress + static_cast<u32>(i) * 4) == Swap::Stub[i];
+        }
+        if (!stub_current) {
+            for (std::size_t i = 0; i < Swap::Stub.size(); ++i) {
+                memory.Write32(Swap::StubAddress + static_cast<u32>(i) * 4, Swap::Stub[i]);
+            }
+            impl->system.InvalidateCacheRange(Swap::StubAddress,
+                                              static_cast<u32>(Swap::Stub.size()) * 4);
+        }
+        const u32 count = command == Swap::SwapModels
+                              ? std::min<u32>(static_cast<u32>(swap.components.size()),
+                                              Swap::MaxComponents)
+                              : 0;
+        memory.Write32(Swap::Mailbox + Swap::CommandField, command);
+        memory.Write32(Swap::Mailbox + Swap::Family, family ? 1 : 0);
+        memory.Write32(Swap::Mailbox + Swap::Count, count);
+        for (u32 i = 0; i < count; ++i) {
+            memory.Write32(Swap::Mailbox + Swap::Components + i * 4, swap.components[i]);
+        }
+        const u32 calls = command == Swap::CallList
+                              ? std::min<u32>(static_cast<u32>(swap.calls.size()), Swap::MaxCalls)
+                              : 0;
+        memory.Write32(Swap::Mailbox + Swap::CallCount, calls);
+        for (u32 i = 0; i < calls; ++i) {
+            for (u32 field = 0; field < 4; ++field) {
+                memory.Write32(Swap::Mailbox + Swap::Calls + i * 16 + field * 4,
+                               swap.calls[i][field]);
+            }
+        }
+        swap.runs = memory.Read32(Swap::Mailbox + Swap::Runs);
+        memory.Write32(Swap::Mailbox + Swap::Armed, 1);
+        swap.since_us = now_us;
+        set_hook(true);
+    };
+
+    switch (swap.step) {
+    case Step::Idle: {
+        // A save state may have kept a command or the branch.
+        set_hook(false);
+        if (memory.Read32(Swap::Mailbox + Swap::Armed) != 0) {
+            memory.Write32(Swap::Mailbox + Swap::Armed, 0);
+        }
+        if (swap.given_up >= 0 && swap.given_up != static_cast<int>(fusion)) {
+            swap.given_up = -1;
+        }
+        if (!MsrInGameplay()) {
+            return;
+        }
+        // The refills' setters go first: the stub runs one command at a time.
+        if (!swap.calls.empty()) {
+            send(Swap::CallList, false);
+            swap.step = Step::Calling;
+            return;
+        }
+        // Samus's models as they are: the components found before, or found again after a load
+        // (or a save state) replaced them.
+        if (!MsrComponentsCurrent(memory, *process, swap.components)) {
+            if (now_us < swap.next_scan_us) {
+                return;
+            }
+            swap.next_scan_us = now_us + 1'000'000;
+            swap.components = FindMsrModelComponents(*process); // ~6 ms, once per area
+            if (swap.components.empty()) {
+                return;
+            }
+        }
+        const int models = MsrModelsFusion(memory, *process, swap.components.front());
+        if (models < 0 || models == static_cast<int>(fusion) ||
+            swap.given_up == static_cast<int>(fusion)) {
+            return;
+        }
+        swap.target = fusion;
+        LOG_INFO(HW_GPU, "Fusion suit {}: loading the packages", fusion ? "on" : "off");
+        send(Swap::LoadFamily, fusion);
+        swap.step = Step::Loading;
+        return;
+    }
+    case Step::Settling:
+        // The packages are in; their resources settle for a moment before the models use them.
+        if (now_us - swap.since_us < 300'000) {
+            return;
+        }
+        if (fusion != swap.target) {
+            send(Swap::ReleaseFamily, swap.target); // switched back meanwhile
+            swap.step = Step::Aborting;
+            return;
+        }
+        if (!MsrInGameplay()) {
+            return;
+        }
+        swap.components = FindMsrModelComponents(*process);
+        if (swap.components.empty()) {
+            send(Swap::ReleaseFamily, !swap.target);
+            swap.step = Step::Releasing;
+            return;
+        }
+        LOG_INFO(HW_GPU, "Fusion suit: replacing the models of {} components",
+                 swap.components.size());
+        swap.attachments = MsrBoneAttachments(memory, *process, swap.components);
+        send(Swap::SwapModels, swap.target);
+        swap.step = Step::Swapping;
+        return;
+    default:
+        break;
+    }
+
+    // A command is out.
+    if (memory.Read32(Swap::Mailbox + Swap::Runs) == swap.runs) {
+        // The frame limiter has not run: the game is loading. The components it was given may
+        // be gone when it comes back, so a swap is taken back and prepared again, and calls are
+        // dropped (the refills ask again once they have found their components).
+        if ((swap.step == Step::Swapping || swap.step == Step::Calling) &&
+            now_us - swap.since_us > 500'000) {
+            memory.Write32(Swap::Mailbox + Swap::Armed, 0);
+            set_hook(false);
+            if (swap.step == Step::Calling) {
+                swap.calls.clear();
+                swap.step = Step::Idle;
+            } else {
+                swap.step = Step::Settling;
+            }
+        }
+        return;
+    }
+    set_hook(false);
+    switch (swap.step) {
+    case Step::Calling:
+        swap.calls.clear();
+        swap.step = Step::Idle;
+        break;
+    case Step::Loading:
+        swap.step = Step::Settling;
+        swap.since_us = now_us;
+        break;
+    case Step::Swapping:
+        MsrReattach(memory, *process, swap.components, swap.attachments);
+        send(Swap::ReleaseFamily, !swap.target);
+        swap.step = Step::Releasing;
+        break;
+    case Step::Releasing:
+        // Not tried again for this setting if the models did not change.
+        if (MsrComponentsCurrent(memory, *process, swap.components) &&
+            MsrModelsFusion(memory, *process, swap.components.front()) !=
+                static_cast<int>(swap.target)) {
+            LOG_WARNING(HW_GPU, "Fusion suit: the models did not change");
+            swap.given_up = swap.target;
+        } else {
+            LOG_INFO(HW_GPU, "Fusion suit: done");
+        }
+        swap.step = Step::Idle;
+        break;
+    default:
+        swap.step = Step::Idle;
+        break;
+    }
 }
 
 void GPU::RecreateRenderer(Frontend::EmuWindow& emu_window, Frontend::EmuWindow* secondary_window) {
@@ -547,6 +1140,11 @@ void GPU::ReleaseRenderer() {
 template <class Archive>
 void GPU::serialize(Archive& ar, const u32 file_version) {
     ar & impl->pica;
+    if (Archive::is_loading::value) {
+        // The loaded state brings its own models, components and stub.
+        impl->msr_suit_swap = {};
+        impl->msr_refills = {};
+    }
 }
 
 SERIALIZE_IMPL(GPU)
