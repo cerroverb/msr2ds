@@ -281,6 +281,40 @@ switch, applied immediately by rewriting a few instructions in memory
 
 ## Texture packs
 
+**Quick start**
+
+1. Get a pack, like the HD Texture Pack linked [at the top](#msr2ds).
+2. In the launcher's **Mods** tab, click **Open the texture packs folder**.
+3. Extract the pack there, keeping its folders as they are (no need to flatten them).
+4. Start the game. New packs are turned on; the Mods tab (or the in-game menu, F1
+   or Select) turns each one off or on and moves it up or down.
+
+For the HD Texture Pack the folder should look like this, and each add-on then shows up
+as its own pack:
+
+```
+textures/
+├── 00040000001BB200/          the main pack
+└── Optional Addons/
+    ├── Cleaned Up Suits/      an add-on
+    ├── Updated UI/
+    └── …
+```
+
+- **Keep the pack's folders separate.** Don't merge everything into one folder or
+  bury it two folders deep: the main pack and its add-ons then load as one pack, and
+  some add-on textures won't apply.
+- **Higher in the list wins** when two packs change the same texture. Add-ons go
+  above the main pack on their own.
+- **Changes apply when the game starts.** Changed packs in game? Pick **Restart now**.
+- Readmes and preview images inside a pack are ignored.
+
+The folder is `user/mods/textures/` beside `SamusReturns.exe`. With the AppImage it
+is `~/.local/share/samus-returns-recomp/mods/textures/`, or `user/mods/textures/`
+beside the AppImage if you made a `user` folder there.
+
+### How packs load
+
 Each folder in `user/mods/textures/` is a pack: textures named the way Azahar
 dumps them (`tex1_WxH_HASH_FMT.png`, `.dds` or `.ktx`, in any subfolders), with
 an optional `pack.json`, so existing Azahar and Citra packs work as they are. The
@@ -292,6 +326,8 @@ add-ons override the pack they extend. Packs load when the game starts; after
 changes in game, the overlay offers Restart now. Packs in the `textures` folder
 that ships with a release (the HD texture pack) are listed the same way, marked
 as included with the game.
+
+### Making a pack
 
 To make a pack, turn on **Dump game textures** and play. Textures go to
 `user/dump/textures/00040000001BB200/` with a `pack.json`. Copy the ones you edit,
