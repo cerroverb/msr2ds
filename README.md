@@ -1,5 +1,12 @@
 # msr2ds
 
+> [!IMPORTANT]
+> I don't provide the HD texture pack. For one, I didn't create them. Secondly, it would make the download over a GB.
+> You can find them at the link below. Don't trust the link? No problem, Google where to find it yourself.
+> HD Texture Pack link: https://drive.google.com/file/d/1GxvnzsPQznZ_v_6s-YMgETyLe5rN2Fak/view
+
+> **No game files are included.**
+
 *Metroid: Samus Returns* as a single-screen PC game, built on the Azahar 3DS
 emulator. You need your own decrypted dump of the game (USA): none is included,
 and nothing from the game is in this repository. Windows and Linux downloads are
@@ -36,6 +43,8 @@ Afterwards `SamusReturns-Direct.exe` (Linux: `--play`) skips the launcher. It
 needs a GPU with Vulkan. The first start uses a 4K internal resolution: lower it
 in the launcher's Display tab on a weaker GPU. No texture pack is included;
 Citra and Azahar packs work (see [Texture packs](#texture-packs)).
+
+**Steamdeck stick to around 4x (960p) for performance.**
 
 ## How the single screen works
 
