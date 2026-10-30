@@ -31,6 +31,18 @@ ahead of time into C++, for your own use (see [Recompiled build](#recompiled-bui
 Either way, Azahar provides the 3DS system services, PICA GPU emulation on
 Vulkan and audio.
 
+![Title screen](images/title.jpg)
+
+<p>
+  <img src="images/intro1.jpg" width="49%" alt="Opening story">
+  <img src="images/intro2.jpg" width="49%" alt="Opening story">
+</p>
+<p>
+  <img src="images/samus1.jpg" width="32%" alt="Samus on her gunship">
+  <img src="images/samus2.jpg" width="32%" alt="Exploring a cave">
+  <img src="images/samus3.jpg" width="32%" alt="A Metroid, with the late-game HUD">
+</p>
+
 ## Features
 
 - All play occurs on a single 16:9 screen, with full controller or keyboard support
