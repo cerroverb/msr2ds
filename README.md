@@ -1,4 +1,4 @@
-# msr2ds
+# msr2ds (Metroid Samus Returns 2DS)
 
 > [!IMPORTANT]
 > I don't provide the HD texture pack. For one, I didn't create them. Secondly, it would make the download over a GB.
