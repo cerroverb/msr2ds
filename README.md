@@ -56,6 +56,12 @@ Vulkan and audio.
 - Texture Pack support
 - Cheats: Infinite energy, infinite missiles and bombs, unlimited Aeion
 
+## Extra controls
+
+- Left trigger auto-morphballs like Metroid Dread
+- Right trigger cycles between beams
+- Start pulls up map and lower screen options
+- Select pulls up program options
 
 ## Play
 
