@@ -31,6 +31,20 @@ ahead of time into C++, for your own use (see [Recompiled build](#recompiled-bui
 Either way, Azahar provides the 3DS system services, PICA GPU emulation on
 Vulkan and audio.
 
+## Features
+
+- All play occurs on a single 16:9 screen, with full controller or keyboard support
+- Unlock amiibo galleries
+- Unlock Fusion Mode
+- Fusion suit on any difficulty (and able to swap between on the fly)
+- 4K+ resolution
+- 30 (original), 60, 120, 144 FPS support
+- Vsync
+- HUD controls
+- Texture Pack support
+- Cheats: Infinite energy, infinite missiles and bombs, unlimited Aeion
+
+
 ## Play
 
 1. Download the Windows zip or the Linux AppImage from the
@@ -252,79 +266,6 @@ switch, applied immediately by rewriting a few instructions in memory
 - **Fusion suit, any difficulty** (off by default): Samus wears the Fusion suit
   (models and resource packages) at Normal and Hard, which keep their damage. It
   switches at once, also in the middle of play or in the pause menu.
-
-The game itself picks Samus's models (`actors/characters/samus` or
-`samusfusion`) and suit packages (`packs/players/*.pkg` or `*_fusion.pkg`) only
-while an area loads, and keeps one family loaded; even its developers' toggle
-(`ToggleForceFusionMode` in its Lua) waits for a reload. So the switch in play
-(`src/msr/suit_swap.h`) does what a load would, on the game thread: a small ARM
-stub (`suit_swap_stub.s`, assembled into `suit_swap_stub.h` by
-`tools/msr/suit_swap/assemble.py`) is written into the zeros after the game's
-code, and the frame limiter's first instruction branches to it while it has a
-command. One command per frame: load the other family's packages (as a save
-does, 0x143EB8), then empty each of Samus's model components (Samus and the
-morph ball, found on the heap by their vtable) as their destructor does,
-register the models again and replace the model on screen, then release the
-first family. It takes about half a second. The emulator reads which family
-the models really are from their file names, so a save state made in the other
-suit switches back to the setting too.
-
-The aim laser, the muzzle flash, the charge glow and other effects hang from
-Samus's bones by index, resolved once when she is created, and the Fusion
-skeleton orders its bones differently (the cannon's are 19 and 22 in one, 23
-and 26 in the other). So before a swap the emulator notes each model hanging
-from her bones and the bone's name, and afterwards hangs it from the bone of
-the same name in the new skeleton. Without that the laser started at her feet
-and the flash at her hip.
-
-## Cheats
-
-The Cheats tab (overlay and launcher), all off by default, applied each frame
-while on (`ApplyMsrRefills` in `src/video_core/gpu.cpp`, addresses in
-`src/msr/cheats.h`); nothing is written to the saves beyond what the game
-itself saves.
-
-- **Infinite energy:** Samus's life component (`CPlayerLifeComponent`) is
-  filled to its maximum and locked with the game's own "current life locked"
-  flag, so hits take nothing.
-- **Unlimited missiles:** missiles, Super Missiles and Power Bombs are set to
-  their maximums in Samus's inventory, where the HUD reads them.
-- **Unlimited Aeion:** the same as energy, on `CSpecialEnergyComponent` and its
-  "special energy locked" flag: abilities work and the gauge stays full.
-
-Energy and Aeion are found on the heap by their vtables (once per area, about
-6 ms). The game keeps a copy of each in the inventory for the HUD and updates
-it only through the component's setter, so the value is filled by calling that
-setter on the game thread, through the suit swap stub's call command, and only
-then locked. Turning a cheat off releases the lock it set. The amiibo reserve
-tanks were not used, since they refill only once.
-
-## Frame rate
-
-Samus Returns draws 30 frames per second on the 3DS. Its main loop sleeps until
-33 ms have passed since the previous frame, then waits for the screen's refresh;
-everything in the game advances by the time measured between frames. So 60, 120
-and 144 FPS only change three things, and the game keeps its speed:
-
-- the loop's 33 ms limit (two instructions at `0x156484`), rewritten in memory
-  to 16, 8 or 6 ms;
-- the emulated screen refreshes at the frame rate above 60;
-- the emulated CPU clock rises with the frame rate (250% at 60, 500% at 120,
-  600% at 144), so each frame finishes in time.
-
-Parts of the interface, the HUD on the bottom screen among them, do not follow
-measured time: they advance a constant 1/30 s per frame, which at 144 FPS made
-their animations (the Aeion ability icon's pulse, for one) 4.8 times too fast.
-Above 30 FPS three instructions are rewritten so these updates take the measured
-frame time instead (`StepPatches`); at 30 FPS that is the same 1/30 s. Measured on
-the bottom screen: the Aeion icon pulses once a second at 30 and at 144 FPS.
-
-`src/msr/frame_rate.h` has the details. 60 FPS is the default. The setting
-applies immediately, in game too. The FPS counter shows the game's own frames.
-Above your monitor's refresh rate, frames are replaced instead of queued (Vulkan
-mailbox), so the game never slows down to wait for the display. Tested at all
-four rates: walking for a set time covers the same distance at each, and
-recompiled code stays at 100%.
 
 ## Texture packs
 
