@@ -92,6 +92,20 @@ Citra and Azahar packs work (see [Texture packs](#texture-packs)).
 
 **Steamdeck stick to around 4x (960p) for performance.**
 
+**Mac** Has significant slowdown at frame rates above 60.
+> [!IMPORTANT]
+>
+> MacOS has jitter. Macs have no native Vulkan, so Azahar's Vulkan renderer runs through MoltenVK, a translation layer to Apple's Metal. MoltenVK turns each shader into Metal source code, and Metal compiles it from scratch. Graphics drivers on Windows and Linux compile the same shaders in a few milliseconds, so there you don't notice.
+>
+> It pauses the first time each new visual effect appears, while the Mac compiles a shader for it. Once an effect has been seen, it plays smoothly from then on, even after restarting.
+>
+> Why the game waits: this port tells Azahar to finish each shader before drawing with it. Drawing without it was the "texture flicker" bug fixed in 1.1: fog, dust or enemies disappeared for a frame. So instead of a missing effect, you get a short pause.
+>
+> Why it goes away: macOS keeps the compiled results for the app, in its cache for io.github.gminustwo.msr2ds. So the pauses only happen the first time each effect appears on a given Mac, and get rarer as you play. A macOS update can clear that cache, bringing the first-time pauses back once.
+>
+> >TLDR; Mac version has Jitter. There is an option added to use background shader, but it may cause flicker. Thats the tradeoff.
+
+
 On a Mac, Metal compiles each new shader the first time it is used (about a
 tenth of a second), so effects make the game pause briefly the first time they
 appear. macOS keeps what it compiled: they do not pause again. Background
