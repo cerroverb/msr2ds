@@ -12,7 +12,8 @@
 #                  game runs on the JIT
 #   textures-dir   staged packs (tools/msr/package_release.py textures), shipped in
 #                  usr/share/samus-returns-recomp/textures (MSR::GameFolder::BuiltInTextures).
-#                  "-": none
+#                  A shaders/ folder beside it (package_release.py shaders) ships as the shader
+#                  seed. "-": none
 #   output-dir     where <ProjectName>-<Version>-x86_64.AppImage goes
 #   build-dir      default build-linux
 #   MSR_JOBS       parallel compile jobs (default: nproc / 2; the generated code is large)
@@ -105,6 +106,11 @@ cp "$exe" "$appdir/usr/bin/SamusReturns"
 strip -s "$appdir/usr/bin/SamusReturns"
 if [ "$textures" != - ]; then
   cp -r "$textures" "$appdir/usr/share/samus-returns-recomp/textures"
+  # The shader seed staged beside the packs (package_release.py shaders), personal build only:
+  # it holds the game's shader programs (msr/shader_seed.h, GameFolder::BuiltInShaders).
+  if [ -d "$(dirname "$textures")/shaders" ]; then
+    cp -r "$(dirname "$textures")/shaders" "$appdir/usr/share/samus-returns-recomp/shaders"
+  fi
 fi
 cp dist/msr/samus.png "$appdir/usr/share/icons/hicolor/512x512/apps/samus-returns-recomp.png"
 cat > "$appdir/usr/share/applications/samus-returns-recomp.desktop" <<EOF
