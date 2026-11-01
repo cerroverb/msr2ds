@@ -13,6 +13,8 @@
 #include <boost/serialization/export.hpp>
 #include <boost/serialization/shared_ptr.hpp>
 #include <boost/serialization/string.hpp>
+#include <boost/serialization/vector.hpp>
+#include <boost/serialization/version.hpp>
 #include "common/common_types.h"
 #include "common/swap.h"
 #include "core/file_sys/romfs_reader.h"
@@ -41,11 +43,26 @@ static_assert(sizeof(RomFSHeader) == 0x28, "Size of RomFSHeader is not correct")
  * patch_ext_path: Path for RomFS extensions. Files present in this path:
  *  - When with an extension of ".stub", remove the corresponding file in the RomFS.
  *  - When with an extension of ".ips" or ".bps", patch the file in the RomFS.
+ *
+ * Several layers (mods) can be given, highest priority first. They apply from the last one up,
+ * each over the RomFS as the layers below it left it, so the first one wins where they overlap.
  */
 class LayeredFS : public RomFSReader {
 public:
+    struct Layer {
+        std::string patch_path;
+        std::string patch_ext_path;
+
+        template <class Archive>
+        void serialize(Archive& ar, const unsigned int) {
+            ar & patch_path;
+            ar & patch_ext_path;
+        }
+    };
+
     explicit LayeredFS(std::shared_ptr<RomFSReader> romfs, std::string patch_path,
                        std::string patch_ext_path, bool load_relocations = true);
+    explicit LayeredFS(std::shared_ptr<RomFSReader> romfs, std::vector<Layer> layers);
     ~LayeredFS() override;
 
     std::size_t GetSize() const override;
@@ -82,10 +99,13 @@ private:
     u32 LoadFile(Directory& parent, u32 offset);
 
     // Load replace/create relocations
-    void LoadRelocations();
+    void LoadRelocations(const std::string& patch_path);
 
     // Load patch/remove relocations
-    void LoadExtRelocations();
+    void LoadExtRelocations(std::string patch_ext_path);
+
+    // The file's contents as the relocations so far left them
+    std::vector<u8> ReadCurrent(const File& file);
 
     // Calculate the offset of a single directory add it to the map and list of directories
     void PrepareBuildDirectory(Directory& current);
@@ -109,8 +129,7 @@ private:
     void Load();
 
     std::shared_ptr<RomFSReader> romfs;
-    std::string patch_path;
-    std::string patch_ext_path;
+    std::vector<Layer> layers; // highest priority first
     bool load_relocations;
 
     RomFSHeader header;
@@ -139,11 +158,18 @@ private:
     LayeredFS();
 
     template <class Archive>
-    void serialize(Archive& ar, const unsigned int) {
+    void serialize(Archive& ar, const unsigned int file_version) {
         ar& boost::serialization::base_object<RomFSReader>(*this);
         ar & romfs;
-        ar & patch_path;
-        ar & patch_ext_path;
+        if (file_version > 0) {
+            ar & layers;
+        } else {
+            // One patch path and one extension path before version 1
+            Layer layer;
+            ar & layer.patch_path;
+            ar & layer.patch_ext_path;
+            layers = {std::move(layer)};
+        }
         ar & load_relocations;
         if (Archive::is_loading::value) {
             Load();
@@ -156,3 +182,4 @@ private:
 } // namespace FileSys
 
 BOOST_CLASS_EXPORT_KEY(FileSys::LayeredFS)
+BOOST_CLASS_VERSION(FileSys::LayeredFS, 1)

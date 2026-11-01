@@ -13,22 +13,31 @@
       "HD Texture Pack", "HD Texture Pack Addons/<name>" and the pack's readme, which credits
       its authors. The game lists these as packs included with it (GameFolder::BuiltInTextures).
 
+  python tools/msr/package_release.py shaders <cache-folder>...
+      Stages shader caches (the vulkan/transferable folders of user/shaders, e.g. from a copy of
+      the game that has been played through) as build-release/shaders/: their shader configs and
+      programs merged, without SPIR-V. The game adds the entries a player's cache lacks when it
+      boots, so their pipelines build at boot instead of when an effect first appears
+      (msr/shader_seed.h).
+
   python tools/msr/package_release.py windows [build-dir]
-      Copies <build-dir>/bundle (default build-windows) without user/, game/, scripting/ or any
-      dump, adds build-release/textures, README.txt and license.txt, and zips it as
+      Copies <build-dir>/bundle (default build-windows) without user/, game/, scripting/,
+      shaders/ or any dump, adds build-release/textures, build-release/shaders (when staged),
+      README.txt and license.txt, and zips it as
       build-release/<ProjectName>-<Version>-windows-x64.zip.
 
 The Linux AppImage is made in Linux by tools/msr/linux/build_appimage.sh (public: no
 generated code, no textures). Name and version come from src/msr/version.h.
 
-A recompiled build embeds code translated from your game dump, and the texture pack is its
-authors' work made from the game's textures: keep the personal packages for your own machines.
-Only the public package can be shared.
+A recompiled build embeds code translated from your game dump, the shader caches hold the game's
+shader programs, and the texture pack is its authors' work made from the game's textures: keep
+the personal packages for your own machines. Only the public package can be shared.
 """
 import os
 import pathlib
 import re
 import shutil
+import struct
 import sys
 import zipfile
 
@@ -36,7 +45,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 RELEASE = ROOT / 'build-release'
 PUBLIC = RELEASE / 'public'
 TEXTURES = RELEASE / 'textures'
-EXCLUDED_DIRS = {'user', 'game', 'scripting'}
+SHADERS = RELEASE / 'shaders'
+EXCLUDED_DIRS = {'user', 'game', 'scripting', 'shaders'}
 DUMP_SUFFIXES = {'.3ds', '.cci', '.cxi', '.cia', '.app', '.zcci', '.zcxi'}
 STORED_SUFFIXES = {'.png', '.dds', '.ktx', '.zip'}  # already compressed
 MAIN_PACK = 'HD Texture Pack'
@@ -69,6 +79,10 @@ Your settings and saves:
   AppImage file if you create one
 The launcher's Game tab imports saves from Azahar or Citra.
 
+Game mods: mods made for Citra, Azahar or Luma3DS (romfs, exefs, code.ips...) work as they are.
+Put each mod, as its own folder, in the mods/game folder of your user folder (the launcher's
+Mods tab opens it), then turn mods on and order them there or in the in-game menu.
+
 {textures}
 Controls: see the launcher's Controls tab. A gamepad is set up when it is connected; every
 connected gamepad controls the game, Steam Input included.
@@ -76,14 +90,14 @@ connected gamepad controls the game, Steam Input included.
 {footer}"""
 
 README_TEXTURES = """HD textures: the HD Texture Pack and its add-ons are included and turned on. Turn them off or
-reorder them in the launcher's Mods tab (or the in-game menu, F1 or Select). Credits in
+reorder them in the launcher's Textures tab (or the in-game menu, F1 or Select). Credits in
 textures/{readme}: Triforce141 dumped and upscaled the textures and made the add-ons;
 TheHatedGravity upscaled the rest.
 """
 
 README_PUBLIC_TEXTURES = """Texture packs: none are included. Citra and Azahar packs for this game work as they are: put
 each pack, as its own folder, in the mods/textures folder of your user folder (the launcher's
-Mods tab opens it), then turn packs on and order them there or in the in-game menu (F1 or
+Textures tab opens it), then turn packs on and order them there or in the in-game menu (F1 or
 Select).
 """
 
@@ -126,6 +140,61 @@ def stage_textures(pack):
         shutil.copy2(readme, TEXTURES / f'{MAIN_PACK} - Readme.txt')
     files = sum(1 for p in TEXTURES.rglob('*') if p.is_file())
     print(f'{files} files staged in {TEXTURES}')
+
+
+def cache_entries(path):
+    """Entries of an Azahar Vulkan shader cache file (.vkch) as (type, id, flags, payload): each
+    is a 16-byte header (version 0x42, flags, type, size, id), the payload and a 16-byte footer
+    (version 0x24 and the entry's index, size)."""
+    data = path.read_bytes()
+    pos = 0
+    while pos < len(data):
+        version, flags, kind, size, ident = struct.unpack_from('<BBHIQ', data, pos)
+        if version != 0x42 or size < 32 or pos + size > len(data):
+            sys.exit(f'{path} is damaged at byte {pos}')
+        yield kind, ident, flags, data[pos + 16:pos + size - 16]
+        pos += size
+
+
+def stage_shaders(folders):
+    title = '00040000001BB200'
+    file_info, spirv = 0, {3, 5, 7}  # entry types: FILE_INFO; VS_, FS_ and GS_SPIRV
+    if SHADERS.exists():
+        shutil.rmtree(SHADERS)
+    SHADERS.mkdir(parents=True)
+    for kind in ('vs', 'fs', 'gs', 'pl'):
+        info, entries, seen = None, [], set()
+        for folder in folders:
+            path = pathlib.Path(folder) / f'{title}_{kind}.vkch'
+            if not path.is_file():
+                continue
+            items = list(cache_entries(path))
+            if not items or items[0][0] != file_info or items[0][2] != 0:
+                sys.exit(f'{path} does not start with an uncompressed info entry')
+            # Info: magic, file version, config structure hash, file type (20 bytes), then the
+            # shader generator's source hash (64 bytes), build name and driver profile.
+            head = items[0][3]
+            if info is None:
+                info = head
+            elif head[:20] != info[:20]:
+                sys.exit(f'{path} was written for other config structures than the first cache')
+            for item in items[1:]:
+                if item[0] not in spirv and item[:2] not in seen:
+                    seen.add(item[:2])
+                    entries.append(item)
+        if info is None:
+            continue
+        # A blank source hash: the game regenerates the shaders for the machine it runs on.
+        blank = info[:20] + bytes(64) + info[84:]
+        target = SHADERS / f'{title}_{kind}.vkch'
+        with open(target, 'wb') as out:
+            for index, (kind_id, ident, flags, payload) in enumerate([(file_info, 0, 0, blank)] +
+                                                                      entries):
+                size = len(payload) + 32
+                out.write(struct.pack('<BBHIQ', 0x42, flags, kind_id, size, ident))
+                out.write(payload)
+                out.write(struct.pack('<IIQ', 0x24 | index << 8, size, 0))
+        print(f'{target.name}: {len(entries)} entries, {target.stat().st_size // 1024} KiB')
 
 
 def write_readme(target, exe, public=False):
@@ -173,6 +242,10 @@ def package_windows(build_dir='build-windows', public=False):
             shutil.copy2(source, target)
     if not public:
         copy_tree(TEXTURES, out / 'textures')
+        if SHADERS.is_dir():
+            copy_tree(SHADERS, out / 'shaders')
+        else:
+            print(f'no shaders: {SHADERS} is not staged ("package_release.py shaders <folder>")')
     shutil.copy2(ROOT / 'license.txt', out / 'license.txt')
     write_readme(out / 'README.txt', 'SamusReturns.exe', public)
 
@@ -192,12 +265,17 @@ def package_windows(build_dir='build-windows', public=False):
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ('textures', 'windows', 'public', 'readme'):
+    if len(sys.argv) < 2 or sys.argv[1] not in ('textures', 'shaders', 'windows', 'public',
+                                                'readme'):
         sys.exit(__doc__)
     if sys.argv[1] == 'textures':
         if len(sys.argv) < 3:
             sys.exit('usage: package_release.py textures <pack-folder>')
         stage_textures(sys.argv[2])
+    elif sys.argv[1] == 'shaders':
+        if len(sys.argv) < 3:
+            sys.exit('usage: package_release.py shaders <cache-folder>...')
+        stage_shaders(sys.argv[2:])
     elif sys.argv[1] == 'readme':
         # For the AppImage script: writes README.txt for Linux to the given path.
         write_readme(pathlib.Path(sys.argv[2]), 'the AppImage')

@@ -74,6 +74,8 @@ struct VSUniformData {
     /// Scales clip-space Y (the top screen's horizontal axis) before clipping; < 1 widens the
     /// view for 16:9 presentation (see msr/presentation.h).
     f32 clip_scale_y = 1.f;
+    /// Scales clip-space X (the top screen's vertical axis): with clip_scale_y, the zoom.
+    f32 clip_scale_x = 1.f;
     alignas(16) Common::Vec4f clip_coef;
 };
 static_assert(sizeof(VSUniformData) == 32,

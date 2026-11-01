@@ -182,13 +182,26 @@ private:
         void* mapped{};
         u64 tick{};
         s64 emulated_us{}; ///< Emulated time of the frame
+        u32 frame{};       ///< Presented frame number (DrawProbe::frame)
         bool pending{};
     };
+    /// Draws a screen into `probe` at width x height and records its copy to `readback`.
+    bool RecordMsrReadback(MsrReadback& readback, Frame& probe, u32 screen_id, u32 width,
+                           u32 height);
+    void ReadBackMsrTop();
+    void ConsumeMsrTopReadbacks();
     vk::ShaderModule msr_shader{};
     vk::Pipeline msr_pipeline{};
     Frame msr_probe{};
     std::array<MsrReadback, 3> msr_readbacks{};
     u32 msr_readback_next = 0;
+    /// Developer: topseq.trigger writes the next frames of the top screen, to find frames drawn
+    /// differently from their neighbours (flicker).
+    Frame msr_top_probe{};
+    std::array<MsrReadback, 6> msr_top_readbacks{};
+    u32 msr_top_next = 0;
+    u32 msr_top_left = 0;
+    u32 msr_top_sequence = 0;
     int msr_candidate = -1;
     int msr_candidate_frames = 0;
     s64 msr_candidate_since_us = 0; ///< Emulated time the candidate was first read
@@ -202,6 +215,8 @@ private:
     bool msr_paused = false;       ///< The pause menu Start opened is up
     s64 msr_prompt_since_us = 0;   ///< When the classifier last turned to Prompt
     s64 msr_prompt_seen_us = 0;    ///< When the classifier last saw a prompt
+    bool msr_in_play = false;      ///< A file is being played: the camera zoom applies
+    f32 msr_zoom = 1.f;            ///< The camera zoom in effect, easing toward the setting
     /// A prompt's text on the bottom screen, as last read; the card behind it, which grows with
     /// the text and follows a smaller page once it has held (msr_prompt_card_us: since when it
     /// matches the text, 0 while no prompt shows), and the card as drawn, easing to it.

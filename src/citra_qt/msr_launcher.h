@@ -10,6 +10,7 @@
 #include <memory>
 #include <vector>
 #include <QWidget>
+#include "citra_qt/msr_randovania.h"
 #include "core/frontend/input.h"
 
 class QCheckBox;
@@ -63,14 +64,37 @@ private:
         QPushButton* button;
     };
 
+    struct ModRow {
+        QString name;
+        QString detail;
+        bool enabled;
+    };
+
     QWidget* BuildDisplayTab();
     QWidget* BuildHudTab();
     QWidget* BuildControlsTab();
     QWidget* BuildGameTab();
     QWidget* BuildModsTab();
+    QWidget* BuildRandomizerTab();
+    QWidget* BuildTexturesTab();
     QWidget* BuildCheatsTab();
-    /// Rebuilds the texture pack rows from disk.
+    /// Rebuilds the game mod and texture pack rows from disk.
     void RefreshMods();
+    /// The Randomizer tab: Randovania's state, the presets, what can run now.
+    void RefreshRandomizer();
+    /// Starts or stops making a seed.
+    void GenerateSeed();
+    /// A Randovania job ended (msr_randovania.h).
+    void RandomizerFinished(const QString& error, const QString& name, const QString& detail);
+    void ShowRandomizerStatus(const QString& text, const char* color);
+    /// The Fusion suit setting, kept off while a randomizer mod is on.
+    void UpdateFusionSuit();
+    /// One row per entry in `list`: enable it, move it up or down the list. `widgets` gets the
+    /// rows' focusable widgets, in order.
+    void FillModList(QWidget* list, std::vector<QWidget*>& widgets,
+                     const std::vector<ModRow>& entries, const QString& empty_text,
+                     std::function<void(const QString&, bool)> enable,
+                     std::function<void(const QString&, int)> move);
     /// Up and down (and Tab) walk the options top to bottom, mod rows included.
     void UpdateFocusOrder();
     QCheckBox* AddCheck(QGridLayout* grid, const QString& label,
@@ -108,6 +132,7 @@ private:
     // Settings widgets, filled by Load()
     QCheckBox* fullscreen = nullptr;
     QCheckBox* widescreen = nullptr;
+    QSlider* camera_zoom = nullptr;
     QComboBox* resolution = nullptr;
     QCheckBox* vsync = nullptr;
     QCheckBox* show_fps = nullptr;
@@ -126,12 +151,32 @@ private:
     QCheckBox* unlock_galleries = nullptr;
     QCheckBox* unlock_fusion_mode = nullptr;
     QCheckBox* fusion_suit = nullptr;
+    QLabel* fusion_note = nullptr;
     QCheckBox* infinite_energy = nullptr;
     QCheckBox* infinite_missiles = nullptr;
     QCheckBox* infinite_aeion = nullptr;
     QPushButton* import_saves = nullptr;
     QPushButton* open_saves = nullptr;
     QComboBox* frame_rate = nullptr;
+    QComboBox* language = nullptr;
+    QWidget* mod_list = nullptr;
+    QScrollArea* mods_area = nullptr;
+    QPushButton* open_game_mods = nullptr;
+    QPushButton* refresh_game_mods = nullptr;
+    std::vector<QWidget*> mod_widgets; ///< Focusable widgets of the game mod rows, in order
+    QWidget* rando_page = nullptr;
+    QLabel* rando_state = nullptr;
+    QPushButton* rando_download = nullptr;
+    QPushButton* rando_locate = nullptr;
+    QComboBox* rando_preset = nullptr;
+    QPushButton* rando_edit = nullptr;
+    QLabel* rando_preset_info = nullptr;
+    QLineEdit* rando_permalink = nullptr;
+    QPushButton* rando_generate = nullptr;
+    QPushButton* rando_open_seed = nullptr;
+    QLabel* rando_status = nullptr;
+    Randovania::Task* rando_task = nullptr;
+    std::vector<Randovania::Preset> rando_presets; ///< rando_preset's entries
     QWidget* pack_list = nullptr;
     QScrollArea* packs = nullptr;
     QPushButton* open_mods = nullptr;

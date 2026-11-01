@@ -310,6 +310,10 @@ private:
     std::string GetPLFile(u64 title_id, bool is_temp) const;
 
     bool RecreateCache(CacheFile& file, CacheFileType type);
+    static u64 ConfigStructHash(CacheFileType type);
+
+    /// Adds the entries of a cache that ships with the game (MSR::ShaderSeed) missing from `path`.
+    void MergeSeed(const std::string& seed_path, const std::string& path, CacheFileType type);
 
     bool InitVSCache(const std::atomic_bool& stop_loading,
                      const VideoCore::DiskResourceLoadCallback& callback);

@@ -45,6 +45,7 @@ struct GPU::Impl {
         Step step = Step::Idle;
         bool target = false;    ///< The family being switched to
         int given_up = -1;      ///< The family a swap failed to reach (-1: none)
+        int stub_room = -1;     ///< The stub's place: free (1), other code's (0), unchecked (-1)
         u32 runs = 0;           ///< The stub's count before the command out
         s64 since_us = 0;       ///< When the command went out, or the wait started
         s64 next_scan_us = 0;   ///< When to look for the components again

@@ -20,8 +20,10 @@
 namespace MSR::SuitSwap {
 
 /// The stub and its mailbox, in the zeros between the end of the code (0x6C4848) and the
-/// read-only data (0x6C5000). tools/msr/suit_swap/assemble.py links the stub at this address.
-inline constexpr u32 StubAddress = 0x6C4880;
+/// read-only data (0x6C5000), past the loader Randovania's randomizer (open-samus-returns-rando)
+/// adds at the end of the code (0x6C4850-0x6C49E8). tools/msr/suit_swap/assemble.py links the
+/// stub at this address; it is written only over zeros or itself.
+inline constexpr u32 StubAddress = 0x6C4A00;
 inline constexpr u32 Mailbox = 0x6C4F00;
 
 /// The frame limiter's first instruction (push {r4, r5, r6, lr}), once per frame on the game

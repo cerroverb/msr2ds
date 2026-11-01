@@ -13,6 +13,7 @@
 #include <boost/icl/interval_map.hpp>
 #include <tsl/robin_map.h>
 
+#include "msr/button_glyphs.h"
 #include "video_core/rasterizer_cache/framebuffer_base.h"
 #include "video_core/rasterizer_cache/sampler_params.h"
 #include "video_core/rasterizer_cache/surface_params.h"
@@ -37,6 +38,8 @@ enum class TextureFilter : u32;
 }
 
 namespace VideoCore {
+
+struct Material;
 
 enum class ScaleMatch {
     Exact,   ///< Only accept same res scale
@@ -185,6 +188,16 @@ private:
     /// Uploads a custom texture identified with hash to the target surface
     bool UploadCustomSurface(SurfaceId surface_id, SurfaceInterval interval);
 
+    /// Samus Returns: the face button icon sheet `load_info` holds, if any. Its region is kept to
+    /// upload it again when the icons change (msr/button_glyphs.h).
+    const MSR::ButtonGlyphs::Sheet* FindMsrGlyphSheet(const Surface& surface,
+                                                      const SurfaceParams& load_info,
+                                                      std::span<u8> upload_data);
+
+    /// Samus Returns: shows the face button icons as the connected pad labels them in a texture
+    /// pack's replacement of an icon sheet.
+    void PatchMsrCustomGlyphs(const MSR::ButtonGlyphs::Sheet& sheet, Material* material);
+
     /// Copies pixel data in interval from the host GPU surface to the guest VRAM
     void DownloadSurface(Surface& surface, SurfaceInterval interval);
 
@@ -231,6 +244,11 @@ private:
     Settings::TextureFilter filter;
     bool dump_textures;
     bool use_custom_textures;
+    u32 msr_glyphs = MSR::ButtonGlyphs::Identity; ///< The icons the textures below were given
+    std::vector<std::pair<PAddr, u32>> msr_glyph_regions; ///< Where those textures were found
+    /// Texture pack replacements of the sheets: the icons shown in them, and their own icons
+    std::unordered_map<const Material*, std::pair<u32, MSR::ButtonGlyphs::Icons>>
+        msr_glyph_materials;
 };
 
 } // namespace VideoCore

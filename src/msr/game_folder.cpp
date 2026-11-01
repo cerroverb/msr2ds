@@ -78,14 +78,23 @@ QString User() {
     return user;
 }
 
-QString BuiltInTextures() {
-    for (const QString& folder : {Root() + QStringLiteral("/textures/"),
-                                  Root() + QStringLiteral("/../share/samus-returns-recomp/textures/")}) {
+static QString BuiltIn(const QString& name) {
+    for (const QString& folder :
+         {Root() + QLatin1Char('/') + name + QLatin1Char('/'),
+          Root() + QStringLiteral("/../share/samus-returns-recomp/") + name + QLatin1Char('/')}) {
         if (QFileInfo(folder).isDir()) {
             return QDir::cleanPath(folder) + QLatin1Char('/');
         }
     }
     return {};
+}
+
+QString BuiltInTextures() {
+    return BuiltIn(QStringLiteral("textures"));
+}
+
+QString BuiltInShaders() {
+    return BuiltIn(QStringLiteral("shaders"));
 }
 
 void Prepare() {

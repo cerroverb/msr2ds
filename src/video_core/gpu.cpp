@@ -560,9 +560,21 @@ void GPU::ApplyMsrCheats() {
     namespace Cheats = MSR::Cheats;
     const auto process = impl->system.Kernel().GetCurrentProcess();
     auto& memory = impl->memory;
-    const u32 enabled = Cheats::enabled.load(std::memory_order_relaxed);
+    if (!process || !memory.IsValidVirtualAddress(*process, Cheats::RandomizerHook)) {
+        return;
+    }
+    // A randomizer's call where the game reads the Fusion flag: the Fusion suit stays off.
+    if (!Cheats::randomizer.load(std::memory_order_relaxed) &&
+        (memory.Read32(Cheats::RandomizerHook) & 0xFF000000u) == 0xEB000000u) { // bl
+        Cheats::randomizer = true;
+        LOG_INFO(HW_GPU, "Randomizer code found: the Fusion suit setting stays off");
+    }
+    u32 enabled = Cheats::enabled.load(std::memory_order_relaxed);
+    if (Cheats::randomizer.load(std::memory_order_relaxed)) {
+        enabled &= ~Cheats::FusionSuit;
+    }
     for (const auto& patch : Cheats::Patches) {
-        if (!process || !memory.IsValidVirtualAddress(*process, patch.address)) {
+        if (!memory.IsValidVirtualAddress(*process, patch.address)) {
             return;
         }
         // Only where the game's instruction or its replacement is found, as for the frame limit.
@@ -912,12 +924,30 @@ void GPU::ApplyMsrSuitSwap() {
     if (hook != Swap::HookOriginal && hook != Swap::HookBranch) {
         return;
     }
+    // The stub's place holds zeros, or the stub; anything else is a code mod's, and then the
+    // swaps and the cheats' calls stay off rather than overwrite it.
+    if (swap.stub_room < 0) {
+        bool free = true;
+        for (std::size_t i = 0; i < Swap::Stub.size(); ++i) {
+            const u32 word = memory.Read32(Swap::StubAddress + static_cast<u32>(i) * 4);
+            free &= word == 0 || word == Swap::Stub[i];
+        }
+        swap.stub_room = free ? 1 : 0;
+        if (!free) {
+            LOG_WARNING(HW_GPU, "Code found at {:#X}, where the suit swap stub goes: no live "
+                                "Fusion suit switch or cheats", Swap::StubAddress);
+        }
+    }
+    if (swap.stub_room == 0) {
+        return;
+    }
     const u32 game = memory.Read32(Swap::GamePointer);
     if (game == 0 || !memory.IsValidVirtualAddress(*process, game + Swap::ForceFusionOffset)) {
         return;
     }
     const bool fusion =
-        (MSR::Cheats::enabled.load(std::memory_order_relaxed) & MSR::Cheats::FusionSuit) != 0 ||
+        ((MSR::Cheats::enabled.load(std::memory_order_relaxed) & MSR::Cheats::FusionSuit) != 0 &&
+         !MSR::Cheats::randomizer.load(std::memory_order_relaxed)) ||
         memory.Read8(game + Swap::FusionModeOffset) != 0 ||
         memory.Read8(game + Swap::ForceFusionOffset) != 0;
     const s64 now_us = impl->timing.GetGlobalTimeUs().count();

@@ -24,6 +24,14 @@ inline constexpr float NativeAspect = 400.f / 240.f;
 inline constexpr float WideAspect = 16.f / 9.f;
 inline constexpr float WideScale = NativeAspect / WideAspect; // 15/16
 
+/// The player's camera zoom: above 1 closer, below 1 wider. It scales the top screen's world draws
+/// (the depth-tested draws the widescreen squeeze takes; the sky and other backdrops, drawn
+/// without depth test, keep filling the screen) and leaves 2D layers and the HUD as they are.
+inline std::atomic<float> zoom{1.f};
+/// The scale in effect, set by the renderer each frame: the zoom in play, eased in and out, and
+/// 1 on the title screens (renderer_vulkan.cpp DrawMsrScreens).
+inline std::atomic<float> world_zoom{1.f};
+
 /// HUD element size relative to the game's own pixels (1 = same size as on the 3DS).
 inline std::atomic<float> hud_scale{.6f};
 inline std::atomic<float> hud_opacity{1.f};

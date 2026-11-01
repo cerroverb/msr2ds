@@ -15,7 +15,6 @@ void ApplyFirstRun() {
     // 9x renders the top screen at 2160 lines: 4K at 16:9.
     values.resolution_factor = 9;
     values.use_vsync = true;
-    values.async_shader_compilation = true;
     values.use_disk_shader_cache = true;
 
     // The top screen is the game; the bottom screen carries the map and Aeion gauge. Keep it
@@ -36,6 +35,11 @@ void ApplyEveryLaunch() {
         Settings::values.layout_option = Settings::LayoutOption::LargeScreen;
     }
     Settings::values.render_3d = Settings::StereoRenderOption::Off;
+    // Draws wait for their pipeline. Built asynchronously, a draw whose pipeline is still building
+    // is skipped: the game keeps loading shader programs as effects come and go, and the frame
+    // went out without its fog, dust or an enemy (texture flicker). Earlier versions turned this
+    // on at first run, so it is set every launch.
+    Settings::values.async_shader_compilation = false;
 }
 
 } // namespace MSR::Defaults

@@ -15,6 +15,7 @@ target_link_libraries(msr_imgui PUBLIC vulkan-headers)
 
 add_library(msr_frontend STATIC
     bottom_classifier.h
+    button_glyphs.h
     code_coverage.h
     controller_autoconfig.h
     defaults.cpp
@@ -23,6 +24,7 @@ add_library(msr_frontend STATIC
     frame_rate.h
     game_folder.cpp
     game_folder.h
+    game_mods.h
     input_bridge.cpp
     input_bridge.h
     mods.cpp
@@ -33,6 +35,7 @@ add_library(msr_frontend STATIC
     presentation.h
     saves.cpp
     saves.h
+    shader_seed.h
     texture_packs.h
     touch_nav.cpp
     touch_nav.h

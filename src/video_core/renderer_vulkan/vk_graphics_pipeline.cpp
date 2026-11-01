@@ -32,9 +32,9 @@ vk::ShaderStageFlagBits MakeShaderStage(std::size_t index) {
     return vk::ShaderStageFlagBits::eVertex;
 }
 
-u64 StaticPipelineInfo::OptimizedHash(const Instance& instance) const {
+u64 StaticPipelineInfo::OptimizedHash(const Instance& instance, u64 vs_module) const {
     u64 info_hash = Common::HashCombine(
-        shader_ids[0], shader_ids[1], shader_ids[2], Common::ComputeStructHash64(vertex_layout),
+        vs_module, shader_ids[1], shader_ids[2], Common::ComputeStructHash64(vertex_layout),
         Common::ComputeStructHash64(attachments), Common::ComputeStructHash64(blending));
 
     if (!instance.IsExtendedDynamicStateSupported()) {

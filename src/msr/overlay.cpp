@@ -13,6 +13,7 @@
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
 #include "common/logging/log.h"
+#include "msr/button_glyphs.h"
 #include "msr/cheats.h"
 #include "msr/frame_rate.h"
 #include "msr/overlay.h"
@@ -42,8 +43,8 @@ void CheckResult(VkResult result) {
     }
 }
 
-/// A control reminder: the game's buttons by their 3DS names, as the game shows them; the
-/// port's own by gamepad / keyboard.
+/// A control reminder: the game's buttons by their 3DS names, shown as the game's icons name them
+/// (an Xbox pad's labels, msr/button_glyphs.h); the port's own by gamepad / keyboard.
 struct ControlHint {
     const char* keys;
     const char* action;
@@ -150,6 +151,8 @@ float NoteHeight(const char* text) {
 void PlayerSettings::Load(const QString& path) {
     QSettings file(path, QSettings::IniFormat);
     widescreen = file.value(QStringLiteral("widescreen"), widescreen).toBool();
+    camera_zoom = std::clamp(file.value(QStringLiteral("camera_zoom"), camera_zoom).toFloat(),
+                             CameraZoomMin, CameraZoomMax);
     hud_scale = file.value(QStringLiteral("hud_scale"), hud_scale).toFloat();
     hud_opacity = file.value(QStringLiteral("hud_opacity"), hud_opacity).toFloat();
     show_minimap = file.value(QStringLiteral("show_minimap"), show_minimap).toBool();
@@ -179,6 +182,7 @@ void PlayerSettings::Load(const QString& path) {
 void PlayerSettings::Save(const QString& path) const {
     QSettings file(path, QSettings::IniFormat);
     file.setValue(QStringLiteral("widescreen"), widescreen);
+    file.setValue(QStringLiteral("camera_zoom"), camera_zoom);
     file.setValue(QStringLiteral("hud_scale"), hud_scale);
     file.setValue(QStringLiteral("hud_opacity"), hud_opacity);
     file.setValue(QStringLiteral("show_minimap"), show_minimap);
@@ -203,6 +207,7 @@ void PlayerSettings::Save(const QString& path) const {
 void PlayerSettings::Publish() const {
     namespace P = Presentation;
     P::widescreen = widescreen;
+    P::zoom = camera_zoom;
     P::hud_scale = hud_scale;
     P::hud_opacity = hud_opacity;
     P::show_minimap = show_minimap;
@@ -558,10 +563,14 @@ void Overlay::DrawControlHints(float width, float height) {
     const float text_w = box_w - 2.f * pad;
     auto* font = ImGui::GetFont();
     const auto hints = HintSets[hint_set];
-    float box_h = pad * 2.f;
+    std::vector<std::string> keys;
     for (const auto& hint : hints) {
-        box_h += font->CalcTextSizeA(size, FLT_MAX, text_w, hint.keys).y +
-                 font->CalcTextSizeA(size, FLT_MAX, text_w, hint.action).y + size * .5f;
+        keys.push_back(ButtonGlyphs::Rename(hint.keys, ButtonGlyphs::shown.load()));
+    }
+    float box_h = pad * 2.f;
+    for (std::size_t i = 0; i < hints.size(); ++i) {
+        box_h += font->CalcTextSizeA(size, FLT_MAX, text_w, keys[i].c_str()).y +
+                 font->CalcTextSizeA(size, FLT_MAX, text_w, hints[i].action).y + size * .5f;
     }
     box_h -= size * .5f;
     const float x = beside ? x1 + gap : width - gap - box_w;
@@ -574,13 +583,13 @@ void Overlay::DrawControlHints(float width, float height) {
     draw->AddRectFilled({x, y + size * .4f}, {x + size * .12f, y + box_h - size * .4f},
                         IM_COL32(60, 170, 220, alpha(255)));
     float line_y = y + pad;
-    for (const auto& hint : hints) {
-        draw->AddText(font, size, {x + pad, line_y}, IM_COL32(110, 205, 250, alpha(255)), hint.keys,
-                      nullptr, text_w);
-        line_y += font->CalcTextSizeA(size, FLT_MAX, text_w, hint.keys).y;
+    for (std::size_t i = 0; i < hints.size(); ++i) {
+        draw->AddText(font, size, {x + pad, line_y}, IM_COL32(110, 205, 250, alpha(255)),
+                      keys[i].c_str(), nullptr, text_w);
+        line_y += font->CalcTextSizeA(size, FLT_MAX, text_w, keys[i].c_str()).y;
         draw->AddText(font, size, {x + pad, line_y}, IM_COL32(220, 240, 255, alpha(255)),
-                      hint.action, nullptr, text_w);
-        line_y += font->CalcTextSizeA(size, FLT_MAX, text_w, hint.action).y + size * .5f;
+                      hints[i].action, nullptr, text_w);
+        line_y += font->CalcTextSizeA(size, FLT_MAX, text_w, hints[i].action).y + size * .5f;
     }
 }
 
@@ -641,20 +650,122 @@ void Overlay::DrawControls(float scale, float label_width,
     }
 }
 
-void Overlay::DrawMods(float label_width, const std::function<void()>& default_focus) {
-    ModsSnapshot snapshot;
-    {
-        std::scoped_lock lock{mutex};
-        snapshot = mods;
-    }
-    // Changes show at once; the Qt thread applies them and sends a fresh snapshot.
-    const auto change = [&](OverlayAction::Kind kind, int index,
-                            const std::function<void(ModsSnapshot&)>& edit) {
-        std::scoped_lock lock{mutex};
-        edit(mods);
-        actions.push_back({kind, emulator, index});
-    };
+ModsSnapshot Overlay::ModsCopy() {
+    std::scoped_lock lock{mutex};
+    return mods;
+}
 
+void Overlay::ChangeMods(OverlayAction::Kind kind, int value,
+                         const std::function<void(ModsSnapshot&)>& edit) {
+    std::scoped_lock lock{mutex};
+    edit(mods);
+    actions.push_back({kind, emulator, value});
+}
+
+int Overlay::DrawModList(const ModsSnapshot& snapshot,
+                         std::vector<ModsSnapshot::Entry> ModsSnapshot::*list,
+                         OverlayAction::Kind toggle, OverlayAction::Kind up,
+                         OverlayAction::Kind down, const std::function<void()>& default_focus) {
+    const auto& entries = snapshot.*list;
+    const int count = static_cast<int>(entries.size());
+    for (int i = 0; i < count; ++i) {
+        const auto& entry = entries[i];
+        // By name, so the cursor stays with an entry as it moves.
+        ImGui::PushID(entry.name.c_str());
+        bool enabled = entry.enabled;
+        if (ImGui::Checkbox(entry.name.c_str(), &enabled)) {
+            ChangeMods(toggle, i,
+                       [list, i, enabled](ModsSnapshot& m) { (m.*list)[i].enabled = enabled; });
+        }
+        if (i == 0) {
+            default_focus();
+        }
+        // The details follow the name when they fit before the arrows, else go under it.
+        const auto& style = ImGui::GetStyle();
+        const float arrows_x =
+            ImGui::GetContentRegionMax().x - ImGui::GetFrameHeight() * 2.f - style.ItemSpacing.x;
+        ImGui::SameLine();
+        const float detail_end =
+            ImGui::GetCursorPosX() + ImGui::CalcTextSize(entry.detail.c_str()).x;
+        const bool beside = detail_end + style.ItemSpacing.x <= arrows_x;
+        if (beside) {
+            ImGui::TextDisabled("%s", entry.detail.c_str());
+            ImGui::SameLine();
+        }
+        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), arrows_x));
+        ImGui::BeginDisabled(i == 0);
+        if (ImGui::ArrowButton("##up", ImGuiDir_Up)) {
+            ChangeMods(up, i, [list, i](ModsSnapshot& m) {
+                std::swap((m.*list)[i], (m.*list)[i - 1]);
+            });
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(i + 1 == count);
+        if (ImGui::ArrowButton("##down", ImGuiDir_Down)) {
+            ChangeMods(down, i, [list, i](ModsSnapshot& m) {
+                std::swap((m.*list)[i], (m.*list)[i + 1]);
+            });
+        }
+        ImGui::EndDisabled();
+        if (!beside) {
+            const float indent = ImGui::GetFrameHeight() + style.ItemInnerSpacing.x;
+            ImGui::Indent(indent);
+            ImGui::PushTextWrapPos(arrows_x - style.ItemSpacing.x);
+            Note(entry.detail.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::Unindent(indent);
+        }
+        ImGui::PopID();
+    }
+    return count;
+}
+
+void Overlay::DrawModsFooter(const ModsSnapshot& snapshot, const char* note) {
+    if (snapshot.restart_needed) {
+        ImGui::TextColored({.53f, .89f, .6f, 1.f}, "Restart the game to load the changes.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Restart now")) {
+            Act(OverlayAction::Kind::Restart);
+            SetVisible(false);
+        }
+    } else {
+        Note(note);
+    }
+}
+
+void Overlay::DrawGameMods(const std::function<void()>& default_focus) {
+    const ModsSnapshot snapshot = ModsCopy();
+    Note("Game mods, as 3DS emulators take them: romfs, exefs, code patches. The first one listed "
+         "wins where mods overlap.");
+    // Below the list: the folder button and a line about restarting.
+    const char* const mods_note = "Mods load when the game starts.";
+    const float footer =
+        ImGui::GetFrameHeightWithSpacing() +
+        (snapshot.restart_needed ? ImGui::GetTextLineHeightWithSpacing() : NoteHeight(mods_note));
+    const float height = std::max(ImGui::GetFrameHeightWithSpacing() * 2.f,
+                                  ImGui::GetContentRegionAvail().y - footer);
+    ImGui::BeginChild("##mods", {0.f, height}, ImGuiChildFlags_NavFlattened);
+    if (snapshot.mods.empty()) {
+        ImGui::TextWrapped("No mods yet. Put each mod in its own folder in %s",
+                           snapshot.mod_folder.c_str());
+    }
+    const int count = DrawModList(snapshot, &ModsSnapshot::mods, OverlayAction::Kind::GameMod,
+                                  OverlayAction::Kind::GameModUp, OverlayAction::Kind::GameModDown,
+                                  default_focus);
+    ImGui::EndChild();
+
+    if (ImGui::Button("Open the mods folder", {-FLT_MIN, 0.f})) {
+        Act(OverlayAction::Kind::GameModsFolder);
+    }
+    if (count == 0) {
+        default_focus();
+    }
+    DrawModsFooter(snapshot, mods_note);
+}
+
+void Overlay::DrawTexturePacks(float label_width, const std::function<void()>& default_focus) {
+    const ModsSnapshot snapshot = ModsCopy();
     Note("Texture packs: the first one listed wins where packs overlap.");
     // Below the list: the folder button, two options and a line about restarting.
     const char* const packs_note =
@@ -669,54 +780,9 @@ void Overlay::DrawMods(float label_width, const std::function<void()>& default_f
         ImGui::TextWrapped("No texture packs yet. Put each pack in its own folder in %s",
                            snapshot.folder.c_str());
     }
-    const int count = static_cast<int>(snapshot.packs.size());
-    for (int i = 0; i < count; ++i) {
-        const auto& pack = snapshot.packs[i];
-        // By name, so the cursor stays with a pack as it moves.
-        ImGui::PushID(pack.name.c_str());
-        bool enabled = pack.enabled;
-        if (ImGui::Checkbox(pack.name.c_str(), &enabled)) {
-            change(OverlayAction::Kind::TexturePack, i,
-                   [i, enabled](ModsSnapshot& m) { m.packs[i].enabled = enabled; });
-        }
-        if (i == 0) {
-            default_focus();
-        }
-        // The details follow the name when they fit before the arrows, else go under it.
-        const auto& style = ImGui::GetStyle();
-        const float arrows_x =
-            ImGui::GetContentRegionMax().x - ImGui::GetFrameHeight() * 2.f - style.ItemSpacing.x;
-        ImGui::SameLine();
-        const float detail_end = ImGui::GetCursorPosX() + ImGui::CalcTextSize(pack.detail.c_str()).x;
-        const bool beside = detail_end + style.ItemSpacing.x <= arrows_x;
-        if (beside) {
-            ImGui::TextDisabled("%s", pack.detail.c_str());
-            ImGui::SameLine();
-        }
-        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), arrows_x));
-        ImGui::BeginDisabled(i == 0);
-        if (ImGui::ArrowButton("##up", ImGuiDir_Up)) {
-            change(OverlayAction::Kind::TexturePackUp, i,
-                   [i](ModsSnapshot& m) { std::swap(m.packs[i], m.packs[i - 1]); });
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::BeginDisabled(i + 1 == count);
-        if (ImGui::ArrowButton("##down", ImGuiDir_Down)) {
-            change(OverlayAction::Kind::TexturePackDown, i,
-                   [i](ModsSnapshot& m) { std::swap(m.packs[i], m.packs[i + 1]); });
-        }
-        ImGui::EndDisabled();
-        if (!beside) {
-            const float indent = ImGui::GetFrameHeight() + style.ItemInnerSpacing.x;
-            ImGui::Indent(indent);
-            ImGui::PushTextWrapPos(arrows_x - style.ItemSpacing.x);
-            Note(pack.detail.c_str());
-            ImGui::PopTextWrapPos();
-            ImGui::Unindent(indent);
-        }
-        ImGui::PopID();
-    }
+    const int count = DrawModList(snapshot, &ModsSnapshot::packs, OverlayAction::Kind::TexturePack,
+                                  OverlayAction::Kind::TexturePackUp,
+                                  OverlayAction::Kind::TexturePackDown, default_focus);
     ImGui::EndChild();
 
     if (ImGui::Button("Open the texture packs folder", {-FLT_MIN, 0.f})) {
@@ -729,23 +795,14 @@ void Overlay::DrawMods(float label_width, const std::function<void()>& default_f
                             bool ModsSnapshot::*field) {
         Label(label, label_width);
         if (ImGui::Checkbox(id, &value)) {
-            change(kind, value ? 1 : 0, [field, value](ModsSnapshot& m) { m.*field = value; });
+            ChangeMods(kind, value ? 1 : 0, [field, value](ModsSnapshot& m) { m.*field = value; });
         }
     };
     toggle("Preload textures", "##preload", snapshot.preload, OverlayAction::Kind::PreloadTextures,
            &ModsSnapshot::preload);
     toggle("Dump game textures", "##dump", snapshot.dump, OverlayAction::Kind::DumpTextures,
            &ModsSnapshot::dump);
-    if (snapshot.restart_needed) {
-        ImGui::TextColored({.53f, .89f, .6f, 1.f}, "Restart the game to load the changes.");
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Restart now")) {
-            Act(OverlayAction::Kind::Restart);
-            SetVisible(false);
-        }
-    } else {
-        Note(packs_note);
-    }
+    DrawModsFooter(snapshot, packs_note);
 }
 
 void Overlay::DrawFps(float scale, float width) {
@@ -775,7 +832,7 @@ void Overlay::DrawMenu(float scale, bool appearing) {
     bool player_changed = false;
     bool emulator_changed = false;
 
-    constexpr int TabCount = 6;
+    constexpr int TabCount = 7;
     if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false)) {
         requested_tab = (tab + TabCount - 1) % TabCount;
     }
@@ -830,8 +887,17 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             row("Unlock Fusion Mode");
             player_changed |= ImGui::Checkbox("##fusionmode", &p.unlock_fusion_mode);
             row("Fusion suit, any difficulty");
-            player_changed |= ImGui::Checkbox("##fusionsuit", &p.fusion_suit);
-            Note("Fusion Mode: a save's New Game. The suit switches at once.");
+            if (Cheats::randomizer.load(std::memory_order_relaxed)) {
+                // The randomizer has its own Fusion suit option (msr/cheats.h): kept off.
+                bool off = false;
+                ImGui::BeginDisabled();
+                ImGui::Checkbox("##fusionsuit", &off);
+                ImGui::EndDisabled();
+                Note("Off with the randomizer. Fusion Mode: a save's New Game.");
+            } else {
+                player_changed |= ImGui::Checkbox("##fusionsuit", &p.fusion_suit);
+                Note("Fusion Mode: a save's New Game. The suit switches at once.");
+            }
             ImGui::Spacing();
             const ImVec2 button{-FLT_MIN, 0.f};
             if (ImGui::Button("Resume", button)) {
@@ -861,6 +927,9 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             default_focus();
             row("Widescreen (16:9)");
             player_changed |= ImGui::Checkbox("##widescreen", &p.widescreen);
+            row("Camera zoom");
+            player_changed |= ImGui::SliderFloat("##zoom", &p.camera_zoom, CameraZoomMin,
+                                                 CameraZoomMax, "%.2f");
             row("Internal resolution");
             int resolution = std::clamp(e.resolution, 0, static_cast<int>(ResolutionNames.size()) - 1);
             if (ImGui::Combo("##resolution", &resolution, ResolutionNames.data(),
@@ -916,10 +985,14 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             end_tab_item();
         }
         if (tab_item("Mods", 4)) {
-            DrawMods(label_width, default_focus);
+            DrawGameMods(default_focus);
             end_tab_item();
         }
-        if (tab_item("Cheats", 5)) {
+        if (tab_item("Textures", 5)) {
+            DrawTexturePacks(label_width, default_focus);
+            end_tab_item();
+        }
+        if (tab_item("Cheats", 6)) {
             row("Infinite energy");
             player_changed |= ImGui::Checkbox("##energy", &p.infinite_energy);
             default_focus();
@@ -936,7 +1009,9 @@ void Overlay::DrawMenu(float scale, bool appearing) {
     requested_tab = -1;
 
     ImGui::Separator();
-    ImGui::TextDisabled("A choose   B back   LB / RB tabs   Select or F1 close");
+    const std::string help = ButtonGlyphs::Rename(
+        "A choose   B back   LB / RB tabs   Select or F1 close", ButtonGlyphs::shown.load());
+    ImGui::TextDisabled("%s", help.c_str());
     ImGui::End();
 
     {

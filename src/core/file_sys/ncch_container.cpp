@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <span>
@@ -19,6 +20,7 @@
 #include "core/hw/aes/key.h"
 #include "core/hw/unique_data.h"
 #include "core/loader/loader.h"
+#include "msr/game_mods.h"
 
 namespace FileSys {
 
@@ -31,6 +33,17 @@ u64 GetModId(u64 program_id) {
         return program_id & ~UPDATE_MASK;
     }
     return program_id;
+}
+
+/// The folders holding the title's mods, highest priority first: the emulator's
+/// load/mods/<title>, or for Samus Returns the mods the player enabled (msr/game_mods.h).
+static std::vector<std::string> ModFolders(u64 program_id) {
+    const u64 mod_id = GetModId(program_id);
+    if (MSR::GameMods::Applies(mod_id)) {
+        return MSR::GameMods::Folders();
+    }
+    return {fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),
+                        mod_id)};
 }
 
 /**
@@ -285,13 +298,11 @@ Loader::ResultStatus NCCHContainer::Load() {
                 return Loader::ResultStatus::Error;
             }
 
-            const auto mods_path =
-                fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),
-                            GetModId(ncch_header.program_id));
-            const std::array<std::string, 2> exheader_override_paths{{
-                mods_path + "exheader.bin",
-                filepath + ".exheader",
-            }};
+            std::vector<std::string> exheader_override_paths;
+            for (const auto& mods_path : ModFolders(ncch_header.program_id)) {
+                exheader_override_paths.push_back(mods_path + "exheader.bin");
+            }
+            exheader_override_paths.push_back(filepath + ".exheader");
 
             bool has_exheader_override = false;
             for (const auto& path : exheader_override_paths) {
@@ -510,9 +521,47 @@ Loader::ResultStatus NCCHContainer::ApplyCodePatch(std::vector<u8>& code) const 
         Loader::ResultStatus (*patch_fn)(const std::vector<u8>& patch, std::vector<u8>& code);
     };
 
-    const auto mods_path =
-        fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),
-                    GetModId(ncch_header.program_id));
+    const auto apply = [&code](const PatchLocation& info) {
+        FileUtil::IOFile patch_file{info.path, "rb"};
+        std::vector<u8> patch(patch_file.GetSize());
+        if (patch_file.ReadBytes(patch.data(), patch.size()) != patch.size())
+            return Loader::ResultStatus::ErrorPatches;
+
+        LOG_INFO(Service_FS, "File {} patching code.bin", info.path);
+        return info.patch_fn(patch, code);
+    };
+
+    // Each mod's patch, the first of these it has. Several mods' patches all apply: BPS ones
+    // first, as they only fit the code they were made from, then IPS ones from the lowest
+    // priority up, so the first mod listed wins where they overlap.
+    std::vector<PatchLocation> mod_patches;
+    const auto mod_folders = ModFolders(ncch_header.program_id);
+    for (auto mods_path = mod_folders.rbegin(); mods_path != mod_folders.rend(); ++mods_path) {
+        const std::array<PatchLocation, 4> mod_paths{{
+            {*mods_path + "exefs/code.ips", Patch::ApplyIpsPatch},
+            {*mods_path + "exefs/code.bps", Patch::ApplyBpsPatch},
+            {*mods_path + "code.ips", Patch::ApplyIpsPatch},
+            {*mods_path + "code.bps", Patch::ApplyBpsPatch},
+        }};
+        const auto found = std::find_if(mod_paths.begin(), mod_paths.end(), [](const auto& info) {
+            return FileUtil::Exists(info.path);
+        });
+        if (found != mod_paths.end()) {
+            mod_patches.push_back(*found);
+        }
+    }
+    if (!mod_patches.empty()) {
+        std::stable_partition(mod_patches.begin(), mod_patches.end(), [](const auto& info) {
+            return info.patch_fn == Patch::ApplyBpsPatch;
+        });
+        for (const PatchLocation& info : mod_patches) {
+            if (const auto result = apply(info); result != Loader::ResultStatus::Success) {
+                LOG_ERROR(Service_FS, "File {} does not fit the game's code", info.path);
+                return result;
+            }
+        }
+        return Loader::ResultStatus::Success;
+    }
 
     constexpr u32 system_module_tid_high = 0x00040130;
 
@@ -527,31 +576,16 @@ Loader::ResultStatus NCCHContainer::ApplyCodePatch(std::vector<u8>& code) const 
             fmt::format("{}luma/titles/{:016X}/code.ips",
                         FileUtil::GetUserPath(FileUtil::UserPath::SDMCDir), ncch_header.program_id);
     }
-    const std::array<PatchLocation, 7> patch_paths{{
-        {mods_path + "exefs/code.ips", Patch::ApplyIpsPatch},
-        {mods_path + "exefs/code.bps", Patch::ApplyBpsPatch},
-        {mods_path + "code.ips", Patch::ApplyIpsPatch},
-        {mods_path + "code.bps", Patch::ApplyBpsPatch},
+    const std::array<PatchLocation, 3> patch_paths{{
         {luma_ips_location, Patch::ApplyIpsPatch},
         {filepath + ".exefsdir/code.ips", Patch::ApplyIpsPatch},
         {filepath + ".exefsdir/code.bps", Patch::ApplyBpsPatch},
     }};
 
     for (const PatchLocation& info : patch_paths) {
-        FileUtil::IOFile patch_file{info.path, "rb"};
-        if (!patch_file)
-            continue;
-
-        std::vector<u8> patch(patch_file.GetSize());
-        if (patch_file.ReadBytes(patch.data(), patch.size()) != patch.size())
-            return Loader::ResultStatus::ErrorPatches;
-
-        LOG_INFO(Service_FS, "File {} patching code.bin", info.path);
-        auto patch_result = info.patch_fn(patch, code);
-        if (patch_result != Loader::ResultStatus::Success)
-            return patch_result;
-
-        return Loader::ResultStatus::Success;
+        if (FileUtil::IOFile{info.path, "rb"}) {
+            return apply(info);
+        }
     }
     return Loader::ResultStatus::ErrorNotUsed;
 }
@@ -572,14 +606,12 @@ Loader::ResultStatus NCCHContainer::LoadOverrideExeFSSection(const char* name,
     else
         return Loader::ResultStatus::Error;
 
-    const auto mods_path =
-        fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),
-                    GetModId(ncch_header.program_id));
-    const std::array<std::string, 3> override_paths{{
-        mods_path + "exefs/" + override_name,
-        mods_path + override_name,
-        filepath + ".exefsdir/" + override_name,
-    }};
+    std::vector<std::string> override_paths;
+    for (const auto& mods_path : ModFolders(ncch_header.program_id)) {
+        override_paths.push_back(mods_path + "exefs/" + override_name);
+        override_paths.push_back(mods_path + override_name);
+    }
+    override_paths.push_back(filepath + ".exefsdir/" + override_name);
 
     for (const auto& path : override_paths) {
         FileUtil::IOFile section_file(path, "rb");
@@ -637,14 +669,16 @@ Loader::ResultStatus NCCHContainer::ReadRomFS(std::shared_ptr<RomFSReader>& romf
         std::make_shared<DirectRomFSReader>(std::make_unique<FileUtil::SubIOFile>(
             std::move(romfs_file_inner), romfs_offset, romfs_size));
 
-    const auto path =
-        fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),
-                    GetModId(ncch_header.program_id));
-    if (!is_proto && use_layered_fs &&
-        (FileUtil::Exists(path + "romfs/") || FileUtil::Exists(path + "romfs_ext/"))) {
-
-        romfs_file = std::make_shared<LayeredFS>(std::move(direct_romfs), path + "romfs/",
-                                                 path + "romfs_ext/");
+    std::vector<LayeredFS::Layer> layers;
+    if (!is_proto && use_layered_fs) {
+        for (const auto& path : ModFolders(ncch_header.program_id)) {
+            if (FileUtil::Exists(path + "romfs/") || FileUtil::Exists(path + "romfs_ext/")) {
+                layers.push_back({path + "romfs/", path + "romfs_ext/"});
+            }
+        }
+    }
+    if (!layers.empty()) {
+        romfs_file = std::make_shared<LayeredFS>(std::move(direct_romfs), std::move(layers));
     } else {
         romfs_file = std::move(direct_romfs);
     }

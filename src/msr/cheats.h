@@ -34,6 +34,14 @@ enum Flag : u32 {
 /// The flags chosen by the player.
 inline std::atomic<u32> enabled{0};
 
+/// A randomizer runs (Randovania's, open-samus-returns-rando). It has a Fusion suit option of its
+/// own, read through calls it puts where FusionSuit rewrites the game, so FusionSuit stays off
+/// with it. Set when the game boots with a randomizer mod (msr/mods.h), or when the emulator finds
+/// that call at RandomizerHook (video_core/gpu.cpp).
+inline std::atomic<bool> randomizer{false};
+/// A read of the Fusion flag in Samus's model registration, a bl to its own code in the randomizer.
+inline constexpr u32 RandomizerHook = 0x404080;
+
 /// The instructions rewritten in the game (USA) while a flag is on; the originals come back when
 /// it is off. The recompiled code checks these words and hands them to the JIT when they differ
 /// (tools/msr/recomp/patchable.txt).

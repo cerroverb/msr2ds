@@ -123,10 +123,12 @@
 #include "msr/frame_rate.h"
 #include "msr/game_folder.h"
 #include "msr/input_bridge.h"
+#include "msr/button_glyphs.h"
 #include "msr/mods.h"
 #include "msr/overlay.h"
 #include "msr/overlay_hook.h"
 #include "msr/presentation.h"
+#include "msr/shader_seed.h"
 #include "msr/version.h"
 #include "core/loader/smdh.h"
 #endif
@@ -1110,6 +1112,11 @@ void GMainWindow::InitializeMsrGameFolder() {
     });
     overlay_timer->start(16);
 
+    auto* glyph_timer = new QTimer(this);
+    connect(glyph_timer, &QTimer::timeout, this, &GMainWindow::UpdateMsrButtonGlyphs);
+    glyph_timer->start(1000);
+    UpdateMsrButtonGlyphs();
+
     // Automated tests (MSR_TEST=1): the default keyboard layout whatever pads are connected.
     if (qEnvironmentVariableIntValue("MSR_TEST") != 0) {
         MSR::Controls::ApplyKeyboardLayout();
@@ -1177,6 +1184,11 @@ void GMainWindow::RefreshMsrOverlaySettings() {
 
 void GMainWindow::RefreshMsrMods() {
     MSR::ModsSnapshot snapshot;
+    for (const auto& mod : MSR::Mods::GameMods()) {
+        snapshot.mods.push_back({mod.name.toStdString(), MSR::Mods::Describe(mod).toStdString(),
+                                 mod.enabled});
+    }
+    snapshot.mod_folder = QDir::toNativeSeparators(MSR::Mods::GameModFolder()).toStdString();
     for (const auto& pack : MSR::Mods::TexturePacks()) {
         snapshot.packs.push_back({pack.name.toStdString(), MSR::Mods::Describe(pack).toStdString(),
                                   pack.enabled});
@@ -1235,6 +1247,24 @@ void GMainWindow::RunMsrOverlayActions() {
             // The CPU clock follows the frame rate (core.cpp); presentation checks the monitor.
             UpdateMsrDisplayRefresh();
             system.ApplySettings();
+            break;
+        case Kind::GameMod:
+        case Kind::GameModUp:
+        case Kind::GameModDown: {
+            const auto mods = MSR::Mods::GameMods();
+            if (action.value >= 0 && action.value < static_cast<int>(mods.size())) {
+                const auto& mod = mods[action.value];
+                if (action.kind == Kind::GameMod) {
+                    MSR::Mods::SetModEnabled(mod.name, !mod.enabled);
+                } else {
+                    MSR::Mods::MoveMod(mod.name, action.kind == Kind::GameModUp ? -1 : 1);
+                }
+            }
+            RefreshMsrMods();
+            break;
+        }
+        case Kind::GameModsFolder:
+            MSR::Mods::OpenModFolder();
             break;
         case Kind::TexturePack:
         case Kind::TexturePackUp:
@@ -1380,6 +1410,33 @@ void GMainWindow::ApplyMsrLayout(bool gamepad) {
         MSR::Controls::ApplyKeyboardLayout();
     }
     ApplyMsrInputProfile();
+}
+
+void GMainWindow::UpdateMsrButtonGlyphs() {
+    namespace Glyphs = MSR::ButtonGlyphs;
+    u32 mapping = Glyphs::Identity;
+    const auto pads = InputCommon::GetConnectedGameControllers();
+    const bool xbox = std::any_of(pads.begin(), pads.end(), [](const Common::ParamPackage& pad) {
+        return pad.Get("type", "") == "xbox";
+    });
+    if (qEnvironmentVariable("MSR_BUTTON_ICONS") == QStringLiteral("xbox")) {
+        // Tests: the usual bindings on an Xbox pad, whatever is connected.
+        mapping = Glyphs::XboxPositional;
+    } else if (xbox) {
+        // Each face button shows the Xbox label of the pad's face button bound to it.
+        for (u32 face = 0; face < Glyphs::FaceCount; ++face) {
+            const Common::ParamPackage binding(Settings::values.current_input_profile.buttons[face]);
+            const int button = binding.Get("button", -1);
+            if (binding.Get("engine", "") == "sdl" && binding.Get("api", "") == "controller" &&
+                button >= 0 && button < static_cast<int>(Glyphs::FaceCount)) {
+                mapping = (mapping & ~(3u << (face * 2))) | static_cast<u32>(button) << (face * 2);
+            }
+        }
+    }
+    if (Glyphs::shown.exchange(mapping) != mapping) {
+        LOG_INFO(Frontend, "Face button icons: {}",
+                 mapping == Glyphs::Identity ? "the game's" : "an Xbox pad's labels");
+    }
 }
 
 void GMainWindow::AutoConfigureMsrController() {
@@ -2016,9 +2073,10 @@ void GMainWindow::BootGame(const QString& filename) {
         QtConfig per_game_config(config_file_name, QtConfig::ConfigType::PerGameConfig);
     }
 #ifdef ENABLE_MSR_GAME_FOLDER
-    // The player's texture packs load at boot; the frame rate's presentation needs the monitor's
-    // refresh rate.
-    msr_booted_mods = MSR::Mods::Publish();
+    // The player's game mods and texture packs load at boot, and the shaders that ship with the
+    // game join the shader cache; the frame rate's presentation needs the monitor's refresh rate.
+    msr_booted_mods = MSR::Mods::Publish(title_id);
+    MSR::ShaderSeed::SetFolder(MSR::GameFolder::BuiltInShaders().toStdString());
     UpdateMsrDisplayRefresh();
 #endif
 

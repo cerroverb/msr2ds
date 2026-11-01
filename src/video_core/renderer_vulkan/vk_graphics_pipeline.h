@@ -240,7 +240,9 @@ struct StaticPipelineInfo {
     RasterizationState rasterization;
     DepthStencilState depth_stencil;
 
-    [[nodiscard]] u64 OptimizedHash(const Instance& instance) const;
+    /// Key of the pipeline object these states build. `vs_module` identifies the vertex shader
+    /// module and stands in for shader_ids[VS] (see ShaderDiskCache::GetPipeline).
+    [[nodiscard]] u64 OptimizedHash(const Instance& instance, u64 vs_module) const;
 
     static consteval u64 StructHash() {
         constexpr u64 STRUCT_VERSION = 0;

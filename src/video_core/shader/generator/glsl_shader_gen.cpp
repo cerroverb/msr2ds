@@ -35,6 +35,7 @@ layout (binding = 1, std140) uniform vs_data {
     bool enable_clip1;
     bool flip_viewport;
     float clip_scale_y;
+    float clip_scale_x;
     vec4 clip_coef;
 };
 
@@ -124,7 +125,7 @@ void main() {
     if (flip_viewport) {
         vtx_pos.y = -vtx_pos.y;
     }
-    gl_Position = vec4(vtx_pos.x, vtx_pos.y * clip_scale_y, -vtx_pos.z, vtx_pos.w);
+    gl_Position = vec4(vtx_pos.x * clip_scale_x, vtx_pos.y * clip_scale_y, -vtx_pos.z, vtx_pos.w);
 )";
     if (use_clip_planes) {
         out += R"(
@@ -246,7 +247,7 @@ std::string GenerateVertexShader(const ShaderSetup& setup, const PicaVSConfig& c
         out += "    if (flip_viewport) {\n";
         out += "        vtx_pos.y = -vtx_pos.y;\n";
         out += "    }\n";
-        out += "    gl_Position = vec4(vtx_pos.x, vtx_pos.y * clip_scale_y, -vtx_pos.z, vtx_pos.w);\n";
+        out += "    gl_Position = vec4(vtx_pos.x * clip_scale_x, vtx_pos.y * clip_scale_y, -vtx_pos.z, vtx_pos.w);\n";
         if (extra.use_clip_planes) {
             out += "    gl_ClipDistance[0] = -vtx_pos.z;\n"; // fixed PICA clipping plane z <= 0
             out += "    if (enable_clip1) {\n";
@@ -348,7 +349,7 @@ struct Vertex {
     out += "    if (flip_viewport) {\n";
     out += "        vtx_pos.y = -vtx_pos.y;\n";
     out += "    }\n";
-    out += "    gl_Position = vec4(vtx_pos.x, vtx_pos.y * clip_scale_y, -vtx_pos.z, vtx_pos.w);\n";
+    out += "    gl_Position = vec4(vtx_pos.x * clip_scale_x, vtx_pos.y * clip_scale_y, -vtx_pos.z, vtx_pos.w);\n";
     if (extra.use_clip_planes) {
         out += "    gl_ClipDistance[0] = -vtx_pos.z;\n"; // fixed PICA clipping plane z <= 0
         out += "    if (enable_clip1) {\n";

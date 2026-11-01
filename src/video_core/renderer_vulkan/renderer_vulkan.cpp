@@ -8,6 +8,7 @@
 #include "common/memory_detect.h"
 #include "common/microprofile.h"
 #include "common/settings.h"
+#include "core/3ds.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/frontend/emu_window.h"
@@ -1695,15 +1696,21 @@ void RendererVulkan::DestroyMsrCompositor() {
     }
     device.destroyPipeline(msr_pipeline);
     device.destroyShaderModule(msr_shader);
-    for (auto& readback : msr_readbacks) {
-        if (readback.buffer) {
-            vmaDestroyBuffer(instance.GetAllocator(), readback.buffer, readback.allocation);
+    const auto destroy_readbacks = [this](auto& readbacks) {
+        for (auto& readback : readbacks) {
+            if (readback.buffer) {
+                vmaDestroyBuffer(instance.GetAllocator(), readback.buffer, readback.allocation);
+            }
         }
-    }
-    if (msr_probe.framebuffer) {
-        device.destroyFramebuffer(msr_probe.framebuffer);
-        device.destroyImageView(msr_probe.image_view);
-        vmaDestroyImage(instance.GetAllocator(), msr_probe.image, msr_probe.allocation);
+    };
+    destroy_readbacks(msr_readbacks);
+    destroy_readbacks(msr_top_readbacks);
+    for (Frame* probe : {&msr_probe, &msr_top_probe}) {
+        if (probe->framebuffer) {
+            device.destroyFramebuffer(probe->framebuffer);
+            device.destroyImageView(probe->image_view);
+            vmaDestroyImage(instance.GetAllocator(), probe->image, probe->allocation);
+        }
     }
 }
 
@@ -1834,6 +1841,25 @@ void RendererVulkan::DrawMsrScreens(Frame* frame, const Layout::FramebufferLayou
     } else {
         msr_prompt_seen_us = now_us;
     }
+    // The camera zoom holds in play: from the HUD until the title prompt (held 0.3 s, as menus
+    // fading can read as a prompt for a moment) or the file select, so the pause menu and
+    // cutscenes keep it and the title screens are never zoomed. It eases in and out.
+    const auto page = static_cast<P::Page>(P::page.load(std::memory_order_relaxed));
+    if (state == P::Bottom::Hud) {
+        msr_in_play = true;
+    } else if ((state == P::Bottom::Prompt && now_us - msr_prompt_since_us >= 300'000) ||
+               (state == P::Bottom::Menu &&
+                (page == P::Page::FileList || page == P::Page::FileOpen ||
+                 page == P::Page::Gallery))) {
+        msr_in_play = false;
+    }
+    const f32 zoom_target = msr_in_play ? P::zoom.load(std::memory_order_relaxed) : 1.f;
+    msr_zoom += (zoom_target - msr_zoom) * (1.f - std::exp(-8.f * seconds));
+    if (std::abs(zoom_target - msr_zoom) < .001f) {
+        msr_zoom = zoom_target;
+    }
+    P::world_zoom.store(msr_zoom, std::memory_order_relaxed);
+
     const bool prompt_on = msr_prompt_alpha > 0.f;
     const bool prompt =
         (state == P::Bottom::Prompt &&
@@ -2186,6 +2212,7 @@ void RendererVulkan::DrawMsrScreens(Frame* frame, const Layout::FramebufferLayou
     scheduler.Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRenderPass(); });
 
     ReadBackMsrBottom();
+    ReadBackMsrTop();
 }
 
 void RendererVulkan::ReadBackMsrBottom() {
@@ -2193,10 +2220,64 @@ void RendererVulkan::ReadBackMsrBottom() {
     if (readback.pending) {
         return; // The GPU has not finished with this slot yet; classify a little later.
     }
+    if (RecordMsrReadback(readback, msr_probe, 2, MsrProbeWidth, MsrProbeHeight)) {
+        msr_readback_next = (msr_readback_next + 1) % static_cast<u32>(msr_readbacks.size());
+    }
+}
+
+void RendererVulkan::ReadBackMsrTop() {
+    ConsumeMsrTopReadbacks();
+    if (msr_top_left == 0) {
+        return;
+    }
+    auto& readback = msr_top_readbacks[msr_top_next];
+    if (readback.pending) {
+        // Every frame is wanted: wait for the oldest copy rather than skip this one.
+        scheduler.Finish();
+        ConsumeMsrTopReadbacks();
+    }
+    if (RecordMsrReadback(readback, msr_top_probe, 0, Core::kScreenTopWidth,
+                          Core::kScreenTopHeight)) {
+        readback.frame = MSR::DrawProbe::frame;
+        --msr_top_left;
+        msr_top_next = (msr_top_next + 1) % static_cast<u32>(msr_top_readbacks.size());
+    }
+}
+
+void RendererVulkan::ConsumeMsrTopReadbacks() {
+    const vk::Format format = main_present_window.GetSurfaceFormat();
+    const bool bgr = format == vk::Format::eB8G8R8A8Unorm || format == vk::Format::eB8G8R8A8Srgb;
+    constexpr u32 width = Core::kScreenTopWidth, height = Core::kScreenTopHeight;
+    for (auto& readback : msr_top_readbacks) {
+        if (!readback.pending || !scheduler.IsFree(readback.tick)) {
+            continue;
+        }
+        readback.pending = false;
+        vmaInvalidateAllocation(instance.GetAllocator(), readback.allocation, 0, VK_WHOLE_SIZE);
+        const auto* pixels = static_cast<const u8*>(readback.mapped);
+        std::vector<u8> rgb(width * height * 3);
+        for (u32 i = 0; i < width * height; ++i) {
+            rgb[i * 3] = pixels[i * 4 + (bgr ? 2 : 0)];
+            rgb[i * 3 + 1] = pixels[i * 4 + 1];
+            rgb[i * 3 + 2] = pixels[i * 4 + (bgr ? 0 : 2)];
+        }
+        const auto path = std::filesystem::path(MSR::DrawProbe::directory) /
+                          fmt::format("top-{}-f{:06}-t{}.ppm", msr_top_sequence, readback.frame,
+                                      readback.emulated_us / 1000);
+        if (std::FILE* file = std::fopen(path.string().c_str(), "wb")) {
+            std::fprintf(file, "P6\n%u %u\n255\n", width, height);
+            std::fwrite(rgb.data(), 1, rgb.size(), file);
+            std::fclose(file);
+        }
+    }
+}
+
+bool RendererVulkan::RecordMsrReadback(MsrReadback& readback, Frame& probe, u32 screen_id,
+                                       u32 width, u32 height) {
     if (!readback.buffer) {
         const VkBufferCreateInfo buffer_info = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = MsrProbeWidth * MsrProbeHeight * 4,
+            .size = width * height * 4,
             .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         };
         const VmaAllocationCreateInfo alloc_info = {
@@ -2207,25 +2288,26 @@ void RendererVulkan::ReadBackMsrBottom() {
         VmaAllocationInfo info{};
         if (vmaCreateBuffer(instance.GetAllocator(), &buffer_info, &alloc_info, &buffer,
                             &readback.allocation, &info) != VK_SUCCESS) {
-            return;
+            return false;
         }
         readback.buffer = buffer;
         readback.mapped = info.pMappedData;
     }
-    if (!msr_probe.framebuffer) {
-        main_present_window.RecreateFrame(&msr_probe, MsrProbeWidth, MsrProbeHeight);
+    if (!probe.framebuffer) {
+        main_present_window.RecreateFrame(&probe, width, height);
     }
 
-    const Layout::FramebufferLayout probe_layout{MsrProbeWidth, MsrProbeHeight, false, true, {},
-                                                 {0, 0, MsrProbeWidth, MsrProbeHeight}, true};
-    PrepareDraw(&msr_probe, probe_layout);
+    const Layout::FramebufferLayout probe_layout{width, height, false, true, {},
+                                                 {0, 0, width, height}, true};
+    PrepareDraw(&probe, probe_layout);
     // Pipelines with static blend state (the overlay's) reset the blend constants the present
     // pipeline blends with; set them again or the probe draws nothing.
     ApplySecondLayerOpacity(1.0f);
-    draw_info.modelview = MakeOrthographicMatrix(MsrProbeWidth, MsrProbeHeight);
-    DrawSingleScreen(2, 0.f, 0.f, MsrProbeWidth, MsrProbeHeight,
+    draw_info.modelview = MakeOrthographicMatrix(width, height);
+    DrawSingleScreen(screen_id, 0.f, 0.f, static_cast<f32>(width), static_cast<f32>(height),
                      Layout::DisplayOrientation::Landscape);
-    scheduler.Record([image = msr_probe.image, buffer = readback.buffer](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([image = probe.image, buffer = readback.buffer, width,
+                      height](vk::CommandBuffer cmdbuf) {
         cmdbuf.endRenderPass();
         const vk::ImageMemoryBarrier read_barrier = {
             .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
@@ -2251,7 +2333,7 @@ void RendererVulkan::ReadBackMsrBottom() {
             .bufferImageHeight = 0,
             .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
             .imageOffset = {0, 0, 0},
-            .imageExtent = {MsrProbeWidth, MsrProbeHeight, 1},
+            .imageExtent = {width, height, 1},
         };
         cmdbuf.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal, buffer, copy);
         const vk::MemoryBarrier host_barrier = {
@@ -2264,7 +2346,7 @@ void RendererVulkan::ReadBackMsrBottom() {
     readback.tick = scheduler.CurrentTick();
     readback.emulated_us = system.CoreTiming().GetGlobalTimeUs().count();
     readback.pending = true;
-    msr_readback_next = (msr_readback_next + 1) % static_cast<u32>(msr_readbacks.size());
+    return true;
 }
 
 void RendererVulkan::ConsumeMsrReadbacks() {
@@ -2415,18 +2497,26 @@ void RendererVulkan::ConsumeMsrReadbacks() {
                               fmt::format("bottom-{}-s{}.ppm", ++msr_dumps, state);
             MSR::BottomClassifier::WritePpm(image, path.string());
         }
-        const auto sequence = std::filesystem::path(MSR::DrawProbe::directory) / "bottomseq.trigger";
-        if (std::filesystem::exists(sequence, ec)) {
-            // The file may hold the number of frames to write.
-            u32 count = 150;
-            if (std::FILE* file = std::fopen(sequence.string().c_str(), "r")) {
+        // The sequence triggers may hold the number of frames to write.
+        const auto take_count = [&ec](const std::filesystem::path& trigger, u32 fallback) {
+            u32 count = fallback;
+            if (std::FILE* file = std::fopen(trigger.string().c_str(), "r")) {
                 if (std::fscanf(file, "%u", &count) != 1 || count == 0) {
-                    count = 150;
+                    count = fallback;
                 }
                 std::fclose(file);
             }
-            std::filesystem::remove(sequence, ec);
-            msr_sequence_left = std::min(count, 2000u);
+            std::filesystem::remove(trigger, ec);
+            return std::min(count, 2000u);
+        };
+        const auto top_sequence = std::filesystem::path(MSR::DrawProbe::directory) / "topseq.trigger";
+        if (std::filesystem::exists(top_sequence, ec)) {
+            msr_top_left = take_count(top_sequence, 120);
+            ++msr_top_sequence;
+        }
+        const auto sequence = std::filesystem::path(MSR::DrawProbe::directory) / "bottomseq.trigger";
+        if (std::filesystem::exists(sequence, ec)) {
+            msr_sequence_left = take_count(sequence, 150);
             msr_sequence_total = msr_sequence_left;
             ++msr_sequence;
         }

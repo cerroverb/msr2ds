@@ -124,6 +124,15 @@ void RasterizerCache<T>::TickFrame() {
         }
         UnregisterAll();
     }
+
+    // Samus Returns: another pad or other bindings show other button icons; the textures holding
+    // them upload again (PatchMsrButtonGlyphs).
+    if (const u32 glyphs = MSR::ButtonGlyphs::shown.load(); glyphs != msr_glyphs) [[unlikely]] {
+        msr_glyphs = glyphs;
+        for (const auto& [addr, size] : msr_glyph_regions) {
+            InvalidateRegion(addr, size);
+        }
+    }
 }
 
 template <class T>
@@ -1060,6 +1069,15 @@ void RasterizerCache<T>::UploadSurface(Surface& surface, SurfaceInterval interva
     const auto upload_data = source_ptr.GetWriteBytes(load_info.end - load_info.addr);
     DecodeTexture(load_info, load_info.addr, load_info.end, upload_data, staging.mapped,
                   runtime.NeedsConversion(surface));
+    if (const auto* sheet = FindMsrGlyphSheet(surface, load_info, upload_data)) {
+        namespace Glyphs = MSR::ButtonGlyphs;
+        const Glyphs::Image image{staging.mapped.data(), load_info.width, load_info.height,
+                                  surface.GetInternalBytesPerPixel()};
+        if (const u32 mapping = Glyphs::shown.load(); mapping != Glyphs::Identity &&
+            staging.mapped.size() >= std::size_t{image.width} * image.height * image.bpp) {
+            Glyphs::Write(*sheet, image, Glyphs::Read(*sheet, image), mapping);
+        }
+    }
 
     const bool should_dump = False(surface.flags & SurfaceFlagBits::Custom) &&
                              False(surface.flags & SurfaceFlagBits::RenderTarget);
@@ -1094,6 +1112,55 @@ u64 RasterizerCache<T>::ComputeHash(const SurfaceParams& load_info, std::span<u8
 }
 
 template <class T>
+const MSR::ButtonGlyphs::Sheet* RasterizerCache<T>::FindMsrGlyphSheet(
+    const Surface& surface, const SurfaceParams& load_info, std::span<u8> upload_data) {
+    for (const MSR::ButtonGlyphs::Sheet& sheet : MSR::ButtonGlyphs::Sheets) {
+        // A whole texture of the sheet's size and format, then its contents.
+        if (load_info.addr != surface.addr || load_info.width != sheet.width ||
+            load_info.height != sheet.height ||
+            static_cast<u32>(load_info.pixel_format) != sheet.format ||
+            Common::ComputeHash64<Common::HashAlgo64::CityHash>(
+                upload_data.data(), upload_data.size()) != sheet.hash) {
+            continue;
+        }
+        const std::pair<PAddr, u32> region{load_info.addr, load_info.end - load_info.addr};
+        if (std::find(msr_glyph_regions.begin(), msr_glyph_regions.end(), region) ==
+            msr_glyph_regions.end()) {
+            msr_glyph_regions.push_back(region);
+        }
+        return &sheet;
+    }
+    return nullptr;
+}
+
+template <class T>
+void RasterizerCache<T>::PatchMsrCustomGlyphs(const MSR::ButtonGlyphs::Sheet& sheet,
+                                              Material* material) {
+    namespace Glyphs = MSR::ButtonGlyphs;
+    // A PNG, decoded to RGBA8; compressed replacements keep the pack's icons.
+    CustomTexture* texture = material->Map(MapType::Color);
+    if (!texture || texture->format != CustomPixelFormat::RGBA8 || texture->data.empty()) {
+        return;
+    }
+    const Glyphs::Image image{texture->data.data(), texture->width, texture->height, 4};
+    if (!Glyphs::Fits(sheet, image) ||
+        texture->data.size() < std::size_t{image.width} * image.height * image.bpp) {
+        return;
+    }
+    // The pack's own icons are kept the first time, as the shown ones change with the pad.
+    auto [entry, added] = msr_glyph_materials.try_emplace(material);
+    auto& [shown, icons] = entry->second;
+    if (added) {
+        shown = Glyphs::Identity;
+        icons = Glyphs::Read(sheet, image);
+    }
+    if (const u32 mapping = Glyphs::shown.load(); mapping != shown) {
+        Glyphs::Write(sheet, image, icons, mapping);
+        shown = mapping;
+    }
+}
+
+template <class T>
 bool RasterizerCache<T>::UploadCustomSurface(SurfaceId surface_id, SurfaceInterval interval) {
     MICROPROFILE_SCOPE(RasterizerCache_UploadSurface);
 
@@ -1120,8 +1187,9 @@ bool RasterizerCache<T>::UploadCustomSurface(SurfaceId surface_id, SurfaceInterv
     }
 
     surface.flags |= SurfaceFlagBits::Custom;
+    const auto* glyph_sheet = FindMsrGlyphSheet(surface, load_info, upload_data);
 
-    const auto upload = [this, level, surface_id, material]() -> bool {
+    const auto upload = [this, level, surface_id, material, glyph_sheet]() -> bool {
         ASSERT_MSG(True(slot_surfaces[surface_id].flags & SurfaceFlagBits::Custom),
                    "Surface is not suitable for custom upload, aborting!");
         if (!slot_surfaces[surface_id].IsCustom()) {
@@ -1132,6 +1200,9 @@ bool RasterizerCache<T>::UploadCustomSurface(SurfaceId surface_id, SurfaceInterv
             sentenced.emplace_back(old_id, runtime.GetResourceTick());
         }
         Surface& surface = slot_surfaces[surface_id];
+        if (glyph_sheet && level == 0) {
+            PatchMsrCustomGlyphs(*glyph_sheet, material);
+        }
         surface.UploadCustom(material, level);
         if (custom_tex_manager.SkipMipmaps()) {
             runtime.GenerateMipmaps(surface);

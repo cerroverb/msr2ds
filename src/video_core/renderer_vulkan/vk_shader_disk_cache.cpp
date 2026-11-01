@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <set>
 #include "common/common_paths.h"
 #include "common/file_util.h"
 #include "common/scm_rev.h"
@@ -16,6 +17,7 @@
 #include "video_core/shader/generator/glsl_shader_gen.h"
 #include "video_core/shader/generator/shader_gen.h"
 #include "video_core/shader/generator/spv_fs_shader_gen.h"
+#include "msr/shader_seed.h"
 
 #define MALFORMED_DISK_CACHE                                                                       \
     do {                                                                                           \
@@ -37,6 +39,14 @@ namespace Vulkan {
 
 using namespace Pica::Shader::Generator;
 using namespace Pica::Shader;
+
+// A vertex shader config hash covers the whole PICA program memory, which games rewrite as they
+// load other programs, so many configs generate the same module. Pipelines are keyed by the
+// module: a new config for a known program must not build its pipelines again (while they build,
+// draws wait or, with asynchronous building, are skipped). Modules live as long as this cache.
+static u64 VertexModuleKey(const Shader* vertex_shader) {
+    return static_cast<u64>(reinterpret_cast<std::uintptr_t>(vertex_shader));
+}
 
 static VideoCore::DiskResourceLoadCallback MakeThrottledCallback(
     VideoCore::DiskResourceLoadCallback original) {
@@ -63,6 +73,16 @@ void ShaderDiskCache::Init(const std::atomic_bool& stop_loading,
         return;
 
     auto new_callback = MakeThrottledCallback(callback);
+
+    if (const std::string seed = MSR::ShaderSeed::Folder(); !seed.empty()) {
+        const auto name = [this](const char* kind) {
+            return fmt::format("{:016X}_{}.vkch", title_id, kind);
+        };
+        MergeSeed(seed + name("vs"), GetVSFile(title_id, false), CacheFileType::VS_CACHE);
+        MergeSeed(seed + name("fs"), GetFSFile(title_id, false), CacheFileType::FS_CACHE);
+        MergeSeed(seed + name("gs"), GetGSFile(title_id, false), CacheFileType::GS_CACHE);
+        MergeSeed(seed + name("pl"), GetPLFile(title_id, false), CacheFileType::PL_CACHE);
+    }
 
     if (!stop_loading && !InitVSCache(stop_loading, new_callback)) {
         RecreateCache(vs_cache, CacheFileType::VS_CACHE);
@@ -238,7 +258,8 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseFixedGeometrySh
 GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
 
     u64 hash = info.Hash();
-    u64 optimized_hash = info.state.OptimizedHash(parent.instance);
+    u64 optimized_hash = info.state.OptimizedHash(
+        parent.instance, VertexModuleKey(parent.current_shaders[ProgramType::VS]));
 
     auto [it, new_pipeline] = graphics_pipelines.try_emplace(optimized_hash);
     if (new_pipeline) {
@@ -536,26 +557,10 @@ bool ShaderDiskCache::RecreateCache(CacheFile& file, CacheFileType type) {
     size_t name_len = std::strlen(Common::g_build_fullname);
     memcpy(build_name.data(), Common::g_build_fullname, std::min(name_len, build_name.size()));
 
-    auto get_hash = [](CacheFileType type) {
-        switch (type) {
-        case CacheFileType::VS_CACHE:
-            return PicaVSConfigState::StructHash();
-        case CacheFileType::FS_CACHE:
-            return FSConfig::StructHash();
-        case CacheFileType::GS_CACHE:
-            return PicaGSConfigState::StructHash();
-        case CacheFileType::PL_CACHE:
-            return StaticPipelineInfo::StructHash();
-        default:
-            UNREACHABLE();
-            return u64{};
-        };
-    };
-
     FileInfoEntry entry{
         .cache_magic = FileInfoEntry::CACHE_FILE_MAGIC,
         .file_version = FileInfoEntry::CACHE_FILE_VERSION,
-        .config_struct_hash = get_hash(type),
+        .config_struct_hash = ConfigStructHash(type),
         .file_type = type,
         .source_hash = GetSourceFileCacheVersionHash(),
         .build_name = build_name,
@@ -564,6 +569,124 @@ bool ShaderDiskCache::RecreateCache(CacheFile& file, CacheFileType type) {
 
     file.Append(CacheEntryType::FILE_INFO, 0, entry, false);
     return true;
+}
+
+u64 ShaderDiskCache::ConfigStructHash(CacheFileType type) {
+    switch (type) {
+    case CacheFileType::VS_CACHE:
+        return PicaVSConfigState::StructHash();
+    case CacheFileType::FS_CACHE:
+        return FSConfig::StructHash();
+    case CacheFileType::GS_CACHE:
+        return PicaGSConfigState::StructHash();
+    case CacheFileType::PL_CACHE:
+        return StaticPipelineInfo::StructHash();
+    default:
+        UNREACHABLE();
+        return u64{};
+    };
+}
+
+void ShaderDiskCache::MergeSeed(const std::string& seed_path, const std::string& path,
+                                CacheFileType type) {
+    if (!FileUtil::Exists(seed_path)) {
+        return;
+    }
+    const auto is_spirv = [](CacheEntryType entry) {
+        return entry == CacheEntryType::VS_SPIRV || entry == CacheEntryType::FS_SPIRV ||
+               entry == CacheEntryType::GS_SPIRV;
+    };
+    // The file's info entry, if the file was written for this build's config structures.
+    const auto read_info = [type](CacheFile& file) -> std::optional<CacheEntry> {
+        if (!file.SwitchMode(CacheFile::CacheOpMode::READ) ||
+            file.GetTotalEntries() == SIZE_MAX || file.GetTotalEntries() == 0) {
+            return std::nullopt;
+        }
+        CacheEntry first = file.ReadFirst();
+        const FileInfoEntry* info = first.Valid() && first.Type() == CacheEntryType::FILE_INFO
+                                        ? first.Payload<FileInfoEntry>()
+                                        : nullptr;
+        if (!info || info->cache_magic != FileInfoEntry::CACHE_FILE_MAGIC ||
+            info->file_version != FileInfoEntry::CACHE_FILE_VERSION ||
+            info->file_type != type || info->config_struct_hash != ConfigStructHash(type)) {
+            return std::nullopt;
+        }
+        return first;
+    };
+
+    CacheFile seed{seed_path};
+    const auto seed_info = read_info(seed);
+    if (!seed_info) {
+        LOG_WARNING(Render_Vulkan, "{} does not match this build's shader cache", seed_path);
+        return;
+    }
+    // None: no cache yet, or one the loader would reset.
+    CacheFile current{path};
+    const auto current_info = read_info(current);
+
+    std::set<std::pair<CacheEntryType, u64>> known;
+    const auto scan = [](CacheFile& file, const CacheEntry& info, auto&& visit) {
+        auto header = info.Header();
+        size_t position = info.Position();
+        for (size_t i = 1; i < file.GetTotalEntries(); ++i) {
+            std::tie(position, header) = file.ReadNextHeader(header, position);
+            if (!header.Valid()) {
+                break;
+            }
+            visit(header, position);
+        }
+    };
+    if (current_info) {
+        scan(current, *current_info, [&known](const auto& header, size_t) {
+            known.emplace(header.Type(), header.Id());
+        });
+    }
+    std::vector<size_t> added;
+    scan(seed, *seed_info, [&](const auto& header, size_t position) {
+        if (!is_spirv(header.Type()) && known.emplace(header.Type(), header.Id()).second) {
+            added.push_back(position);
+        }
+    });
+    if (added.empty()) {
+        return;
+    }
+
+    // The file is written again under the seed's info entry, whose blank source hash makes the
+    // loader regenerate the shaders for this machine; SPIR-V is left out, as it is made again.
+    const std::string temp = path + ".seed";
+    {
+        CacheFile merged{temp};
+        if (!FileUtil::CreateEmptyFile(temp) ||
+            !merged.SwitchMode(CacheFile::CacheOpMode::APPEND)) {
+            LOG_ERROR(Render_Vulkan, "Could not write {}", temp);
+            return;
+        }
+        const auto append = [&merged](const CacheEntry& entry) {
+            merged.Append(entry.Type(), entry.Id(), entry.Data(), entry.Header().zstd_compressed);
+        };
+        append(*seed_info);
+        if (current_info) {
+            CacheEntry entry = *current_info;
+            for (size_t i = 1; i < current.GetTotalEntries(); ++i) {
+                entry = current.ReadNext(entry);
+                if (!entry.Valid()) {
+                    break;
+                }
+                if (!is_spirv(entry.Type())) {
+                    append(entry);
+                }
+            }
+        }
+        for (const size_t position : added) {
+            append(seed.ReadAt(position));
+        }
+    }
+    current.SwitchMode(CacheFile::CacheOpMode::DELETE);
+    if (!FileUtil::Rename(temp, path)) {
+        LOG_ERROR(Render_Vulkan, "Could not replace {}", path);
+        return;
+    }
+    LOG_INFO(Render_Vulkan, "Added {} entries that ship with the game to {}", added.size(), path);
 }
 
 bool ShaderDiskCache::InitVSCache(const std::atomic_bool& stop_loading,
@@ -1393,13 +1516,6 @@ bool ShaderDiskCache::InitPLCache(const std::atomic_bool& stop_loading,
             }
 
             known_graphic_pipelines.emplace(curr.Id());
-            auto pl_hash_opt = entry->pl_info.OptimizedHash(parent.instance);
-
-            if (graphics_pipelines.find(pl_hash_opt) != graphics_pipelines.end()) {
-                // Multiple entries can have the same optimized hash. Skip if that's the case.
-                LOG_DEBUG(Render_Vulkan, "    skipping.", curr.Id());
-                continue;
-            }
 
             // Fetch all the shaders used in the pipeline,
             // if any is missing we cannot build it.
@@ -1421,6 +1537,16 @@ bool ShaderDiskCache::InitPLCache(const std::atomic_bool& stop_loading,
                 shaders[ProgramType::VS] = it_vs->second;
             } else {
                 shaders[ProgramType::VS] = &parent.trivial_vertex_shader;
+            }
+
+            // Keyed by the vertex shader module, like GetPipeline.
+            auto pl_hash_opt = entry->pl_info.OptimizedHash(
+                parent.instance, VertexModuleKey(shaders[ProgramType::VS]));
+
+            if (graphics_pipelines.find(pl_hash_opt) != graphics_pipelines.end()) {
+                // Multiple entries can have the same optimized hash. Skip if that's the case.
+                LOG_DEBUG(Render_Vulkan, "    skipping.", curr.Id());
+                continue;
             }
 
             auto it_fs = fragment_shaders.find(entry->pl_info.shader_ids[ProgramType::FS]);

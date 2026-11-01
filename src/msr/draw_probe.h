@@ -56,10 +56,18 @@ inline void NextFrame() {
     if (!std::filesystem::exists(trigger, ec)) {
         return;
     }
+    // The file may hold the number of frames to log.
+    int count = 3;
+    if (std::FILE* in = std::fopen(trigger.string().c_str(), "r")) {
+        if (std::fscanf(in, "%d", &count) != 1 || count <= 0) {
+            count = 3;
+        }
+        std::fclose(in);
+    }
     std::filesystem::remove(trigger, ec);
     const auto path = std::filesystem::path(directory) / ("drawlog-" + std::to_string(++capture) + ".txt");
     file = std::fopen(path.string().c_str(), "w");
-    frames_left = 3;
+    frames_left = count < 2000 ? count : 2000;
     if (file) {
         std::fprintf(file, "--- frame %u\n", frame);
     }

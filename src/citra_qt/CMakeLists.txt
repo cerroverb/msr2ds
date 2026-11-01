@@ -366,6 +366,8 @@ if (ENABLE_MSR_GAME_FOLDER)
         msr_controls.h
         msr_launcher.cpp
         msr_launcher.h
+        msr_randovania.cpp
+        msr_randovania.h
     )
     target_link_libraries(citra_qt PRIVATE msr_frontend)
 endif()

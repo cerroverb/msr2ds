@@ -274,6 +274,26 @@ std::shared_ptr<SDLJoystick> SDLState::GetSDLJoystickBySDLID(SDL_JoystickID sdl_
     return nullptr;
 }
 
+/// Whose labels a pad's face buttons carry: "playstation", "nintendo", or "xbox" for Xbox pads,
+/// Steam's virtual pads and the many others labelled the same way.
+static std::string ControllerFamily(SDL_GameController* controller) {
+    switch (SDL_GameControllerGetType(controller)) {
+    case SDL_CONTROLLER_TYPE_PS3:
+    case SDL_CONTROLLER_TYPE_PS4:
+    case SDL_CONTROLLER_TYPE_PS5:
+        return "playstation";
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+#endif
+        return "nintendo";
+    default:
+        return "xbox";
+    }
+}
+
 std::vector<Common::ParamPackage> SDLState::GetConnectedGameControllers() {
     std::lock_guard lock{joystick_map_mutex};
     std::vector<Common::ParamPackage> controllers;
@@ -285,6 +305,7 @@ std::vector<Common::ParamPackage> SDLState::GetConnectedGameControllers() {
             Common::ParamPackage params({{"engine", "sdl"}, {"api", "controller"}});
             params.Set("guid", joystick->GetGUID());
             params.Set("port", joystick->GetPort());
+            params.Set("type", ControllerFamily(joystick->GetSDLGameController()));
             controllers.push_back(std::move(params));
         }
     }

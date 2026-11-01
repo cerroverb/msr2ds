@@ -14,7 +14,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 SOURCE = ROOT / 'src' / 'msr' / 'suit_swap_stub.s'
 HEADER = ROOT / 'src' / 'msr' / 'suit_swap_stub.h'
-ADDRESS = 0x6C4880  # msr/suit_swap.h StubAddress
+ADDRESS = 0x6C4A00  # msr/suit_swap.h StubAddress
 
 
 def tool(name):

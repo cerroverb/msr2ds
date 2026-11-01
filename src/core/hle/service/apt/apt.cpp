@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <bitset>
 #include <boost/serialization/shared_ptr.hpp>
 #include <boost/serialization/vector.hpp>
 #include "common/archives.h"
@@ -730,9 +731,19 @@ void Module::APTInterface::AppletUtility(Kernel::HLERequestContext& ctx) {
     const auto output_size = rp.Pop<u32>();
     [[maybe_unused]] const auto input = rp.PopStaticBuffer();
 
-    LOG_WARNING(Service_APT,
-                "(STUBBED) called command={:#010X}, input_size={:#010X}, output_size={:#010X}",
-                utility_command, input_size, output_size);
+    // Some games call this every frame (Samus Returns, commands 0x4 and 0x7): each command is
+    // reported once, then at debug level.
+    static std::bitset<64> reported;
+    if (utility_command >= reported.size() || !reported.test(utility_command)) {
+        if (utility_command < reported.size()) {
+            reported.set(utility_command);
+        }
+        LOG_WARNING(Service_APT,
+                    "(STUBBED) called command={:#010X}, input_size={:#010X}, output_size={:#010X}",
+                    utility_command, input_size, output_size);
+    } else {
+        LOG_DEBUG(Service_APT, "(STUBBED) called command={:#010X}", utility_command);
+    }
 
     std::vector<u8> out(output_size);
     if (utility_command == 0x6 && output_size > 0) {

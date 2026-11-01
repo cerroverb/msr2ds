@@ -296,6 +296,8 @@ private slots:
     void ApplyMsrInputProfile();
     void ApplyMsrLayout(bool gamepad);
     void AutoConfigureMsrController();
+    /// The game's face button icons follow the connected pad and the bindings.
+    void UpdateMsrButtonGlyphs();
 #endif
     void ToggleFullscreen();
     void ToggleSecondaryFullscreen();
@@ -426,7 +428,7 @@ private:
     std::vector<std::string> msr_connected_pads{"<startup>"};
     MSR::InputBridge* msr_input = nullptr;
     MSR::Launcher* msr_launcher = nullptr;
-    QString msr_booted_mods; ///< The texture packs and options the game booted with
+    QString msr_booted_mods; ///< The mods, texture packs and options the game booted with
     int msr_bind = -1; ///< Control waiting for a new input in the overlay, or -1
     bool msr_bind_started = false;
     std::chrono::steady_clock::time_point msr_bind_deadline{};

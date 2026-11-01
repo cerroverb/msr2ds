@@ -25,6 +25,7 @@ namespace MSR {
 /// Options of the single-screen presentation, saved in user/msr/settings.ini.
 struct PlayerSettings {
     bool widescreen = true;
+    float camera_zoom = 1.f; ///< The view in play: below 1 wider, above 1 closer
     float hud_scale = .6f;
     float hud_opacity = 1.f;
     bool show_minimap = true;
@@ -52,6 +53,10 @@ struct PlayerSettings {
     /// Pushes the values to the renderer (msr/presentation.h).
     void Publish() const;
 };
+
+/// Camera zoom range: the widest and the closest view in play (1 is the game's).
+inline constexpr float CameraZoomMin = .7f;
+inline constexpr float CameraZoomMax = 1.5f;
 
 /// Frame rate choices, as FrameRate::Choices.
 inline constexpr std::array<const char*, 4> FrameRateNames = {"30 FPS (original)", "60 FPS",
@@ -83,14 +88,17 @@ struct ControlsSnapshot {
     bool controller_connected = false;
 };
 
-/// The Mods tab: texture packs (msr/mods.h). Built and applied on the Qt thread.
+/// The Mods and Textures tabs: game mods and texture packs (msr/mods.h). Built and applied on
+/// the Qt thread.
 struct ModsSnapshot {
-    struct Pack {
+    struct Entry {
         std::string name;
-        std::string detail; ///< Texture count and pack.json details
+        std::string detail; ///< What a mod changes; a pack's texture count and pack.json details
         bool enabled;
     };
-    std::vector<Pack> packs; ///< Highest priority first
+    std::vector<Entry> mods; ///< Game mods, highest priority first
+    std::string mod_folder;
+    std::vector<Entry> packs; ///< Texture packs, highest priority first
     std::string folder;
     bool preload = false;
     bool dump = false;
@@ -111,6 +119,10 @@ struct OverlayAction {
         GamepadLayout,    ///< Map every control to the connected gamepad, by position
         KeyboardLayout,   ///< Restore the default keyboard bindings
         FrameRate,        ///< The frame rate changed: apply the CPU clock and presentation
+        GameMod,          ///< Enable or disable game mod `value` (an index in ModsSnapshot)
+        GameModUp,        ///< Raise game mod `value`'s priority
+        GameModDown,      ///< Lower game mod `value`'s priority
+        GameModsFolder,   ///< Open the game mods folder
         TexturePack,      ///< Enable or disable texture pack `value` (an index in ModsSnapshot)
         TexturePackUp,    ///< Raise texture pack `value`'s priority
         TexturePackDown,  ///< Lower texture pack `value`'s priority
@@ -166,7 +178,19 @@ private:
     void Push(const Event& event);
     void Act(OverlayAction::Kind kind, int value = 0);
     void DrawControls(float scale, float label_width, const std::function<void()>& default_focus);
-    void DrawMods(float label_width, const std::function<void()>& default_focus);
+    void DrawGameMods(const std::function<void()>& default_focus);
+    void DrawTexturePacks(float label_width, const std::function<void()>& default_focus);
+    /// The rows of a mod list: enable each one, move it up or down. Returns how many there are.
+    int DrawModList(const ModsSnapshot& snapshot,
+                    std::vector<ModsSnapshot::Entry> ModsSnapshot::*list, OverlayAction::Kind toggle,
+                    OverlayAction::Kind up, OverlayAction::Kind down,
+                    const std::function<void()>& default_focus);
+    /// A Mods change shows at once; the Qt thread applies it and sends a fresh snapshot.
+    void ChangeMods(OverlayAction::Kind kind, int value,
+                    const std::function<void(ModsSnapshot&)>& edit);
+    /// Below a mod list: the restart offer after a change, else `note`.
+    void DrawModsFooter(const ModsSnapshot& snapshot, const char* note);
+    ModsSnapshot ModsCopy();
     /// Beside the pause menu and file select: the controls the game only offers by touch, and
     /// how to reach them with touch mode; in touch mode, its own controls.
     void DrawControlHints(float width, float height);

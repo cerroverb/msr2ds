@@ -37,6 +37,9 @@ QString User();
 /// Texture packs that ship with the game: Root()/textures/, or usr/share/samus-returns-recomp/
 /// textures/ in the AppImage. Empty when there are none.
 QString BuiltInTextures();
+/// Shader caches that ship with the game (msr/shader_seed.h): Root()/shaders/, or the same place
+/// under share/ as the textures. Empty when there are none.
+QString BuiltInShaders();
 
 /// Creates the user directory and points Azahar at it. Call before any config is loaded.
 void Prepare();

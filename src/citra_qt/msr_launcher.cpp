@@ -21,6 +21,7 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QTabBar>
 #include <QTabWidget>
@@ -28,10 +29,13 @@
 #include <QVBoxLayout>
 #include "citra_qt/msr_controls.h"
 #include "citra_qt/msr_launcher.h"
+#include "citra_qt/msr_randovania.h"
 #include "citra_qt/uisettings.h"
 #include "citra_qt/util/util.h"
 #include "common/param_package.h"
 #include "common/settings.h"
+#include "core/core.h"
+#include "core/hle/service/cfg/cfg.h"
 #include "core/loader/loader.h"
 #include "core/loader/smdh.h"
 #include "input_common/main.h"
@@ -45,10 +49,37 @@
 namespace MSR {
 namespace {
 
-// SDL_GameControllerButton order, as in msr/input_bridge.cpp. The game's layout: its A, which
-// chooses, is the right face button (SDL's B, Xbox B).
+/// The languages the North American game has text for, by 3DS system language (0x11F844):
+/// us_english, us_french and us_spanish, and the European eu_german, eu_italian and eu_dutch.
+/// The game keeps the system language only where the console's region has it (0x1007D6), so
+/// those three need a European console; Japanese has a text file too, but not its font.
+struct Language {
+    const char* name;
+    Service::CFG::SystemLanguage value;
+    bool european;
+};
+constexpr std::array<Language, 6> Languages{{
+    {"English", Service::CFG::LANGUAGE_EN, false},
+    {"Français", Service::CFG::LANGUAGE_FR, false},
+    {"Español", Service::CFG::LANGUAGE_ES, false},
+    {"Deutsch", Service::CFG::LANGUAGE_DE, true},
+    {"Italiano", Service::CFG::LANGUAGE_IT, true},
+    {"Nederlands", Service::CFG::LANGUAGE_NL, true},
+}};
+constexpr s32 RegionEurope = 2;
+
+/// The console region a language needs: Europe, or the game's own (North America).
+void SetRegionFor(const Language& language) {
+    Settings::values.region_value =
+        language.european ? RegionEurope : Settings::REGION_VALUE_AUTO_SELECT;
+}
+
+// SDL_GameControllerButton order, as in msr/input_bridge.cpp. Both lower face buttons choose:
+// the right one is the game's A (Xbox B), the bottom one a PC pad's usual confirm (Xbox A), and
+// the launcher has no back action for either to clash with.
+constexpr int ButtonA = 0;
 constexpr int ButtonB = 1;
-constexpr int Choose = ButtonB;
+constexpr std::array<int, 2> Choose = {ButtonA, ButtonB};
 constexpr int ButtonStart = 6;
 constexpr int ButtonLeftShoulder = 9;
 constexpr int ButtonRightShoulder = 10;
@@ -82,6 +113,7 @@ QCheckBox::indicator:checked { background: #3da8db; border-color: #9fe4ff; }
 QComboBox { background: #142b40; color: #dcf0ff; border: 1px solid #1f577a; border-radius: 4px;
             padding: 5px 10px; font-size: 15px; }
 QComboBox QAbstractItemView { background: #0b1a28; color: #dcf0ff; selection-background-color: #296b8f; }
+QComboBox:disabled, QLineEdit:disabled { background: #0e2131; color: #536879; border-color: #16364d; }
 QSlider::groove:horizontal { height: 6px; background: #142b40; border-radius: 3px; }
 QSlider::sub-page:horizontal { background: #296b8f; border-radius: 3px; }
 QSlider::handle:horizontal { background: #3da8db; width: 16px; margin: -6px 0; border-radius: 8px; }
@@ -143,6 +175,23 @@ QGridLayout* MakeGrid(QWidget* page) {
     return grid;
 }
 
+/// A scrolling list for mod rows (Launcher::FillModList), its rows in `list`.
+QScrollArea* MakeModList(QWidget*& list) {
+    list = new QWidget;
+    list->setObjectName(QStringLiteral("bindlist"));
+    auto* rows = new QGridLayout(list);
+    rows->setContentsMargins(0, 0, 8, 0);
+    rows->setHorizontalSpacing(12);
+    rows->setVerticalSpacing(8);
+    rows->setColumnStretch(1, 1);
+    auto* area = new QScrollArea;
+    area->setWidget(list);
+    area->setWidgetResizable(true);
+    area->setFocusPolicy(Qt::NoFocus);
+    area->viewport()->setAutoFillBackground(false);
+    return area;
+}
+
 } // namespace
 
 Launcher::Launcher(QWidget* parent) : QWidget(parent) {
@@ -200,15 +249,19 @@ Launcher::Launcher(QWidget* parent) : QWidget(parent) {
     tabs->addTab(BuildHudTab(), QStringLiteral("HUD"));
     tabs->addTab(BuildControlsTab(), QStringLiteral("Controls"));
     tabs->addTab(BuildModsTab(), QStringLiteral("Mods"));
+    tabs->addTab(BuildRandomizerTab(), QStringLiteral("Randomizer"));
+    tabs->addTab(BuildTexturesTab(), QStringLiteral("Textures"));
     tabs->addTab(BuildCheatsTab(), QStringLiteral("Cheats"));
     tabs->setMinimumHeight(400);
     column->addWidget(tabs, 1);
 
     auto* footer = new QHBoxLayout;
     footer->setSpacing(12);
-    footer->addWidget(MakeLabel(QStringLiteral("In game, F1 or Select opens these settings."),
-                                "dim"),
-                      1);
+    auto* help = MakeLabel(QStringLiteral("Gamepad: A or B selects, Start plays, LB / RB switch "
+                                          "tabs. In game, F1 or Select opens these settings."),
+                           "dim");
+    help->setWordWrap(true);
+    footer->addWidget(help, 1);
     quit = new QPushButton(QStringLiteral("Quit"));
     play = new QPushButton(QStringLiteral("Play"));
     play->setObjectName(QStringLiteral("play"));
@@ -238,12 +291,19 @@ Launcher::Launcher(QWidget* parent) : QWidget(parent) {
         if (now && bindings->isAncestorOf(now)) {
             bindings->ensureWidgetVisible(now, 0, 12);
         }
-        if (now && packs->isAncestorOf(now)) {
-            packs->ensureWidgetVisible(now, 0, 12);
+        for (QScrollArea* list : {mods_area, packs}) {
+            if (now && list->isAncestorOf(now)) {
+                list->ensureWidgetVisible(now, 0, 12);
+            }
         }
         FollowFocus();
     });
-    connect(tabs, &QTabWidget::currentChanged, this, [this] { FollowFocus(); });
+    connect(tabs, &QTabWidget::currentChanged, this, [this](int index) {
+        if (tabs->widget(index) == rando_page) {
+            RefreshRandomizer();
+        }
+        FollowFocus();
+    });
 
     // Gamepad: any connected controller, as the in-game menu reads it.
     for (int i = 0; i < ButtonCount; ++i) {
@@ -268,9 +328,9 @@ Launcher::~Launcher() {
 
 void Launcher::UpdateFocusOrder() {
     // Top to bottom, so up and down walk the options of the open tab.
-    std::vector<QWidget*> order = {browse, tabs->tabBar(), volume, unlock_galleries,
+    std::vector<QWidget*> order = {browse, tabs->tabBar(), volume, language, unlock_galleries,
                                    unlock_fusion_mode, fusion_suit, import_saves, open_saves,
-                                   fullscreen, widescreen,
+                                   fullscreen, widescreen, camera_zoom,
                                    resolution, frame_rate, vsync, show_fps, menu_size, hud_size,
                                    hud_opacity, show_map, map_size, map_opacity, show_counters,
                                    show_abilities, panel_size, menu_backdrop, control_hints,
@@ -278,6 +338,10 @@ void Launcher::UpdateFocusOrder() {
     for (const auto& bind_row : bind_rows) {
         order.push_back(bind_row.button);
     }
+    order.insert(order.end(), mod_widgets.begin(), mod_widgets.end());
+    order.insert(order.end(), {open_game_mods, refresh_game_mods, rando_download, rando_locate,
+                               rando_preset, rando_edit, rando_permalink, rando_generate,
+                               rando_open_seed});
     order.insert(order.end(), pack_widgets.begin(), pack_widgets.end());
     order.insert(order.end(), {open_mods, refresh_mods, preload_textures, dump_textures,
                                infinite_energy, infinite_missiles, infinite_aeion, quit, play});
@@ -294,6 +358,16 @@ QWidget* Launcher::BuildDisplayTab() {
     widescreen = AddCheck(grid, QStringLiteral("Widescreen (16:9)"), [this](bool value) {
         EditPlayer([value](PlayerSettings& p) { p.widescreen = value; });
     });
+    camera_zoom = AddSlider(grid, QStringLiteral("Camera zoom"),
+                            static_cast<int>(std::lround(CameraZoomMin * 100.f)),
+                            static_cast<int>(std::lround(CameraZoomMax * 100.f)), Decimal,
+                            [this](int value) {
+                                EditPlayer([value](PlayerSettings& p) {
+                                    p.camera_zoom = value / 100.f;
+                                });
+                            });
+    camera_zoom->setToolTip(QStringLiteral("In play: below 1.00 shows more of the level, above "
+                                           "it comes closer. The HUD keeps its size."));
     const int row = grid->rowCount();
     grid->addWidget(MakeLabel(QStringLiteral("Internal resolution")), row, 0);
     resolution = new QComboBox;
@@ -433,6 +507,29 @@ QWidget* Launcher::BuildGameTab() {
     volume = AddSlider(grid, QStringLiteral("Volume"), 0, 100, Percent, [](int value) {
         Settings::values.volume = static_cast<float>(value) / 100.f;
     });
+    // The game's text follows the 3DS system language, read when it starts.
+    const int language_row = grid->rowCount();
+    grid->addWidget(MakeLabel(QStringLiteral("Language")), language_row, 0);
+    language = new QComboBox;
+    for (const auto& entry : Languages) {
+        language->addItem(QString::fromUtf8(entry.name));
+    }
+    language->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    language->setToolTip(QStringLiteral("The game's text. The North American game has these six; "
+                                        "it applies when the game starts."));
+    grid->addWidget(language, language_row, 1, Qt::AlignLeft);
+    connect(language, &QComboBox::currentIndexChanged, this, [](int index) {
+        if (index < 0 || index >= static_cast<int>(Languages.size())) {
+            return;
+        }
+        const Language& chosen = Languages[index];
+        SetRegionFor(chosen);
+        const auto cfg = Service::CFG::GetModule(Core::System::GetInstance());
+        if (cfg && cfg->GetSystemLanguage() != chosen.value) {
+            cfg->SetSystemLanguage(chosen.value);
+            cfg->UpdateConfigNANDSavegame();
+        }
+    });
     // Extras otherwise given by amiibo (msr/cheats.h).
     const auto player_check = [&](const QString& label, bool PlayerSettings::*field) {
         return AddCheck(grid, label, [this, field](bool value) {
@@ -445,6 +542,12 @@ QWidget* Launcher::BuildGameTab() {
         player_check(QStringLiteral("Unlock Fusion Mode"), &PlayerSettings::unlock_fusion_mode);
     fusion_suit =
         player_check(QStringLiteral("Fusion suit, any difficulty"), &PlayerSettings::fusion_suit);
+    fusion_note = MakeLabel(QStringLiteral("Off while a randomizer mod is on: it has a Fusion suit "
+                                           "option of its own."),
+                            "dim");
+    fusion_note->setWordWrap(true);
+    fusion_note->hide();
+    grid->addWidget(fusion_note, grid->rowCount(), 1);
     // Saves from a 3DS (Checkpoint, JKSM) or another emulator.
     const int saves_row = grid->rowCount();
     grid->addWidget(MakeLabel(QStringLiteral("Saves")), saves_row, 0);
@@ -497,24 +600,39 @@ QWidget* Launcher::BuildModsTab() {
     auto* layout = new QVBoxLayout(page);
     layout->setContentsMargins(22, 16, 22, 14);
     layout->setSpacing(10);
+    auto* about = MakeLabel(QStringLiteral("Mods made for 3DS emulators: each folder holds romfs, "
+                                           "romfs_ext, exefs, code.ips or exheader.bin. They "
+                                           "load when the game starts; where mods change the "
+                                           "same file, the first one listed wins. Randomizer "
+                                           "seeds are made in the Randomizer tab, or exported "
+                                           "from Randovania for Azahar or to a folder here."),
+                            "dim");
+    about->setWordWrap(true);
+    layout->addWidget(about);
+    mods_area = MakeModList(mod_list);
+    layout->addWidget(mods_area, 1);
+
+    auto* buttons = new QHBoxLayout;
+    open_game_mods = new QPushButton(QStringLiteral("Open the mods folder"));
+    refresh_game_mods = new QPushButton(QStringLiteral("Refresh"));
+    buttons->addWidget(open_game_mods, 1);
+    buttons->addWidget(refresh_game_mods);
+    layout->addLayout(buttons);
+    connect(open_game_mods, &QPushButton::clicked, this, [] { Mods::OpenModFolder(); });
+    connect(refresh_game_mods, &QPushButton::clicked, this, [this] { RefreshMods(); });
+    return page;
+}
+
+QWidget* Launcher::BuildTexturesTab() {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(22, 16, 22, 14);
+    layout->setSpacing(10);
     layout->addWidget(MakeLabel(QStringLiteral("Texture packs load when the game starts. Where "
                                                "packs replace the same texture, the first one "
                                                "listed wins."),
                                 "dim"));
-
-    // One row per pack folder: enable it, move it up or down the list.
-    pack_list = new QWidget;
-    pack_list->setObjectName(QStringLiteral("bindlist"));
-    auto* rows = new QGridLayout(pack_list);
-    rows->setContentsMargins(0, 0, 8, 0);
-    rows->setHorizontalSpacing(12);
-    rows->setVerticalSpacing(8);
-    rows->setColumnStretch(1, 1);
-    packs = new QScrollArea;
-    packs->setWidget(pack_list);
-    packs->setWidgetResizable(true);
-    packs->setFocusPolicy(Qt::NoFocus);
-    packs->viewport()->setAutoFillBackground(false);
+    packs = MakeModList(pack_list);
     layout->addWidget(packs, 1);
 
     auto* buttons = new QHBoxLayout;
@@ -543,60 +661,343 @@ QWidget* Launcher::BuildModsTab() {
     return page;
 }
 
+QWidget* Launcher::BuildRandomizerTab() {
+    rando_page = new QWidget;
+    auto* grid = MakeGrid(rando_page);
+    grid->setVerticalSpacing(10);
+
+    // Randovania itself: downloaded here, or the player's own copy.
+    const int program_row = grid->rowCount();
+    grid->addWidget(MakeLabel(QStringLiteral("Randovania")), program_row, 0, Qt::AlignTop);
+    auto* program = new QVBoxLayout;
+    program->setSpacing(8);
+    rando_state = MakeLabel({});
+    program->addWidget(rando_state);
+    auto* program_buttons = new QHBoxLayout;
+    program_buttons->setSpacing(12);
+    rando_download = new QPushButton;
+    rando_locate = new QPushButton(QStringLiteral("Use my own copy..."));
+    program_buttons->addWidget(rando_download);
+    program_buttons->addWidget(rando_locate);
+    program_buttons->addStretch(1);
+    program->addLayout(program_buttons);
+    grid->addLayout(program, program_row, 1);
+
+    const int preset_row = grid->rowCount();
+    grid->addWidget(MakeLabel(QStringLiteral("Preset")), preset_row, 0);
+    auto* preset = new QHBoxLayout;
+    preset->setSpacing(12);
+    rando_preset = new QComboBox;
+    rando_preset->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    rando_edit = new QPushButton(QStringLiteral("Make presets in Randovania"));
+    rando_edit->setToolTip(QStringLiteral("Opens Randovania: presets you make there for Samus "
+                                          "Returns are listed here."));
+    preset->addWidget(rando_preset, 1);
+    preset->addWidget(rando_edit);
+    grid->addLayout(preset, preset_row, 1);
+    rando_preset_info = MakeLabel({}, "dim");
+    rando_preset_info->setWordWrap(true);
+    grid->addWidget(rando_preset_info, grid->rowCount(), 1);
+
+    const int permalink_row = grid->rowCount();
+    grid->addWidget(MakeLabel(QStringLiteral("Shared seed")), permalink_row, 0);
+    rando_permalink = new QLineEdit;
+    rando_permalink->setPlaceholderText(
+        QStringLiteral("Optional: paste a permalink to play the same seed as someone else"));
+    rando_permalink->setClearButtonEnabled(true);
+    grid->addWidget(rando_permalink, permalink_row, 1);
+
+    const int actions_row = grid->rowCount();
+    auto* actions = new QHBoxLayout;
+    actions->setSpacing(12);
+    rando_generate = new QPushButton;
+    rando_open_seed = new QPushButton(QStringLiteral("Open the seed in Randovania"));
+    rando_open_seed->setToolTip(QStringLiteral("The seed that is on: its spoiler log, and "
+                                               "Randovania's map tracker."));
+    actions->addWidget(rando_generate);
+    actions->addWidget(rando_open_seed);
+    actions->addStretch(1);
+    grid->addLayout(actions, actions_row, 1);
+    rando_status = MakeLabel({});
+    rando_status->setWordWrap(true);
+    rando_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    grid->addWidget(rando_status, grid->rowCount(), 1);
+
+    auto* note = MakeLabel(QStringLiteral("Randovania shuffles where the items are; each seed "
+                                          "becomes a game mod, turned on in the Mods tab with "
+                                          "other seeds off. Start a new file for it: while it is "
+                                          "on, other files do not load."),
+                           "dim");
+    note->setWordWrap(true);
+    grid->addWidget(note, grid->rowCount(), 0, 1, 2);
+    grid->setRowStretch(grid->rowCount(), 1);
+
+    rando_task = new Randovania::Task(this);
+    connect(rando_task, &Randovania::Task::Progress, this,
+            [this](const QString& text) { ShowRandomizerStatus(text, "#dcf0ff"); });
+    connect(rando_task, &Randovania::Task::Finished, this, &Launcher::RandomizerFinished);
+    connect(rando_download, &QPushButton::clicked, this, [this] {
+        if (rando_task->Running() == Randovania::Task::Job::Download) {
+            rando_task->Cancel();
+            return;
+        }
+        rando_task->Download();
+        RefreshRandomizer();
+        UpdateRom();
+    });
+    connect(rando_locate, &QPushButton::clicked, this, [this] {
+#ifdef _WIN32
+        const QString filter = QStringLiteral("Randovania (randovania.exe)");
+#else
+        const QString filter = QStringLiteral("Randovania (randovania)");
+#endif
+        const QString own = Randovania::OwnProgram();
+        const QString path = QFileDialog::getOpenFileName(
+            this, QStringLiteral("Select the randovania program of your Randovania"),
+            own.isEmpty() ? QDir::homePath() : QFileInfo(own).absolutePath(), filter);
+        if (!path.isEmpty()) {
+            Randovania::SetOwnProgram(path);
+            ShowRandomizerStatus({}, "#dcf0ff");
+            RefreshRandomizer();
+        }
+    });
+    connect(rando_preset, &QComboBox::currentIndexChanged, this, [this](int index) {
+        rando_preset_info->setText(index >= 0 && index < static_cast<int>(rando_presets.size())
+                                       ? rando_presets[index].description
+                                       : QString{});
+    });
+    connect(rando_edit, &QPushButton::clicked, this, [this] {
+        if (!Randovania::OpenWindow()) {
+            ShowRandomizerStatus(QStringLiteral("Randovania could not start."), "#ff9a8a");
+        }
+    });
+    connect(rando_permalink, &QLineEdit::textChanged, this, [this] { RefreshRandomizer(); });
+    connect(rando_generate, &QPushButton::clicked, this, &Launcher::GenerateSeed);
+    connect(rando_open_seed, &QPushButton::clicked, this, [this] {
+        if (!Randovania::OpenWindow(Randovania::EnabledSeedLog())) {
+            ShowRandomizerStatus(QStringLiteral("Randovania could not start."), "#ff9a8a");
+        }
+    });
+    return rando_page;
+}
+
+void Launcher::RefreshRandomizer() {
+    using Job = Randovania::Task::Job;
+    const Job job = rando_task->Running();
+    const QString program = Randovania::Program();
+    const QString own = Randovania::OwnProgram();
+    const QString version = Randovania::DownloadedVersion();
+    if (!own.isEmpty()) {
+        rando_state->setText(rando_state->fontMetrics().elidedText(
+            QStringLiteral("Your copy: %1").arg(QDir::toNativeSeparators(own)), Qt::ElideMiddle,
+            560));
+        rando_state->setToolTip(QDir::toNativeSeparators(own));
+    } else if (!version.isEmpty()) {
+        rando_state->setText(QStringLiteral("Randovania %1, downloaded").arg(version));
+        rando_state->setToolTip(
+            QDir::toNativeSeparators(GameFolder::User() + QStringLiteral("randovania")));
+    } else {
+        rando_state->setText(QStringLiteral("Not set up: download it (about 200 MB, from GitHub) "
+                                            "or use your own copy."));
+        rando_state->setToolTip({});
+    }
+    rando_download->setText(job == Job::Download ? QStringLiteral("Stop")
+                            : version.isEmpty()  ? QStringLiteral("Download Randovania")
+                                                 : QStringLiteral("Check for an update"));
+    rando_download->setEnabled(job != Job::Generate);
+    rando_locate->setEnabled(job == Job::None);
+
+    // The presets, keeping the one chosen (or the one last generated with).
+    QString keep = Randovania::LastPreset();
+    if (const int index = rando_preset->currentIndex();
+        index >= 0 && index < static_cast<int>(rando_presets.size())) {
+        keep = rando_presets[index].file.isEmpty() ? rando_presets[index].name
+                                                   : rando_presets[index].file;
+    }
+    rando_presets = Randovania::Presets();
+    {
+        const QSignalBlocker block(rando_preset);
+        rando_preset->clear();
+        int chosen = 0;
+        for (std::size_t i = 0; i < rando_presets.size(); ++i) {
+            const auto& entry = rando_presets[i];
+            rando_preset->addItem(entry.file.isEmpty() ? entry.name + QStringLiteral(" (included)")
+                                                       : entry.name);
+            if ((entry.file.isEmpty() ? entry.name : entry.file) == keep) {
+                chosen = static_cast<int>(i);
+            }
+        }
+        rando_preset->setCurrentIndex(chosen);
+    }
+    rando_preset_info->setText(rando_presets.empty()
+                                   ? QString{}
+                                   : rando_presets[rando_preset->currentIndex()].description);
+    // A permalink holds its own preset.
+    const bool permalink = !rando_permalink->text().trimmed().isEmpty();
+    rando_preset->setEnabled(job == Job::None && !permalink);
+    rando_edit->setEnabled(!program.isEmpty());
+    rando_permalink->setEnabled(job == Job::None);
+    rando_generate->setText(job == Job::Generate ? QStringLiteral("Stop")
+                            : permalink          ? QStringLiteral("Generate the shared seed")
+                                                 : QStringLiteral("Generate a seed"));
+    rando_generate->setEnabled(job == Job::Generate || (job == Job::None && !program.isEmpty()));
+    rando_open_seed->setEnabled(job == Job::None && !program.isEmpty() &&
+                                !Randovania::EnabledSeedLog().isEmpty());
+}
+
+void Launcher::GenerateSeed() {
+    if (rando_task->Running() == Randovania::Task::Job::Generate) {
+        rando_task->Cancel();
+        return;
+    }
+    const QString rom = GameFolder::ActiveRom();
+    const auto info = rom.isEmpty() ? GameFolder::RomInfo{} : GameFolder::Probe(rom);
+    if (rom.isEmpty() || !info.Ok()) {
+        ShowRandomizerStatus(QStringLiteral("Choose your game dump first (Browse, at the top)."),
+                             "#ff9a8a");
+        return;
+    }
+    if (info.encrypted) {
+        ShowRandomizerStatus(
+            QStringLiteral("Randovania needs a decrypted dump; this one is encrypted."), "#ff9a8a");
+        return;
+    }
+    const int index = rando_preset->currentIndex();
+    if (index < 0 || index >= static_cast<int>(rando_presets.size())) {
+        return;
+    }
+    rando_task->Generate(rando_presets[index], rando_permalink->text().trimmed(), rom);
+    RefreshRandomizer();
+    UpdateRom();
+}
+
+void Launcher::RandomizerFinished(const QString& error, const QString& name,
+                                  const QString& detail) {
+    if (!error.isEmpty()) {
+        ShowRandomizerStatus(
+            error + QStringLiteral(" (More in %1, in the user folder.)")
+                        .arg(QDir::toNativeSeparators(QStringLiteral("randovania/last-run.log"))),
+            "#ff9a8a");
+        rando_status->setToolTip(
+            QDir::toNativeSeparators(GameFolder::User() + QStringLiteral("randovania/last-run.log")));
+    } else if (name.startsWith(QStringLiteral("Randomizer - "))) {
+        // The new seed is the one that loads.
+        for (const auto& mod : Mods::GameMods()) {
+            if (mod.name != name && mod.enabled && Mods::IsRandomizer(mod)) {
+                Mods::SetModEnabled(mod.name, false);
+            }
+        }
+        Mods::SetModEnabled(name, true);
+        rando_permalink->clear();
+        RefreshMods();
+        ShowRandomizerStatus(QStringLiteral("Seed ready: %1. It is on in the Mods tab: press "
+                                            "Play and start a new file.")
+                                 .arg(detail),
+                             "#86e39a");
+    } else {
+        ShowRandomizerStatus(detail == QStringLiteral("already")
+                                 ? QStringLiteral("Randovania %1 is the latest.").arg(name)
+                                 : QStringLiteral("Randovania %1 is ready.").arg(name),
+                             "#86e39a");
+    }
+    RefreshRandomizer();
+    UpdateRom();
+}
+
+void Launcher::ShowRandomizerStatus(const QString& text, const char* color) {
+    rando_status->setText(text);
+    rando_status->setToolTip({});
+    rando_status->setStyleSheet(QStringLiteral("color: %1;").arg(QLatin1String(color)));
+}
+
 void Launcher::RefreshMods() {
-    auto* rows = static_cast<QGridLayout*>(pack_list->layout());
+    std::vector<ModRow> rows;
+    for (const auto& mod : Mods::GameMods()) {
+        rows.push_back({mod.name, Mods::Describe(mod), mod.enabled});
+    }
+    FillModList(mod_list, mod_widgets, rows,
+                QStringLiteral("No mods yet. Put each mod in its own folder in %1")
+                    .arg(QDir::toNativeSeparators(Mods::GameModFolder())),
+                [this](const QString& name, bool enabled) {
+                    Mods::SetModEnabled(name, enabled);
+                    UpdateFusionSuit();
+                },
+                Mods::MoveMod);
+    rows.clear();
+    for (const auto& pack : Mods::TexturePacks()) {
+        rows.push_back({pack.name, Mods::Describe(pack), pack.enabled});
+    }
+    FillModList(pack_list, pack_widgets, rows,
+                QStringLiteral("No texture packs yet. Put each pack in its own folder in %1")
+                    .arg(QDir::toNativeSeparators(Mods::TexturePackFolder())),
+                Mods::SetEnabled, Mods::Move);
+    preload_textures->setChecked(Settings::values.preload_textures.GetValue());
+    dump_textures->setChecked(Settings::values.dump_textures.GetValue());
+    UpdateFusionSuit();
+    UpdateFocusOrder();
+}
+
+void Launcher::UpdateFusionSuit() {
+    // A randomizer has a Fusion suit option of its own, read where this one rewrites the game
+    // (msr/cheats.h): with one on, this one stays off.
+    const bool randomizer = Mods::RandomizerEnabled();
+    const QSignalBlocker block(fusion_suit);
+    fusion_suit->setEnabled(!randomizer);
+    fusion_suit->setChecked(!randomizer && GetOverlay().GetPlayerSettings().fusion_suit);
+    fusion_note->setVisible(randomizer);
+}
+
+void Launcher::FillModList(QWidget* list, std::vector<QWidget*>& widgets,
+                           const std::vector<ModRow>& entries, const QString& empty_text,
+                           std::function<void(const QString&, bool)> enable,
+                           std::function<void(const QString&, int)> move) {
+    auto* rows = static_cast<QGridLayout*>(list->layout());
     while (QLayoutItem* item = rows->takeAt(0)) {
         delete item->widget();
         delete item;
     }
-    pack_widgets.clear();
+    widgets.clear();
 
-    const auto list = Mods::TexturePacks();
-    if (list.empty()) {
-        auto* empty = MakeLabel(QStringLiteral("No texture packs yet. Put each pack in its own "
-                                               "folder in %1")
-                                    .arg(QDir::toNativeSeparators(Mods::TexturePackFolder())));
+    if (entries.empty()) {
+        auto* empty = MakeLabel(empty_text);
         empty->setWordWrap(true);
         empty->setTextInteractionFlags(Qt::TextSelectableByMouse);
         rows->addWidget(empty, 0, 0, 1, 4);
     }
-    for (std::size_t i = 0; i < list.size(); ++i) {
-        const auto& pack = list[i];
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const auto& entry = entries[i];
         const int row = static_cast<int>(i);
-        auto* box = new QCheckBox(pack.name);
-        box->setChecked(pack.enabled);
-        auto* detail = MakeLabel(Mods::Describe(pack), "dim");
+        auto* box = new QCheckBox(entry.name);
+        box->setChecked(entry.enabled);
+        auto* detail = MakeLabel(entry.detail, "dim");
         auto* up = new QPushButton(QStringLiteral("Up"));
         auto* down = new QPushButton(QStringLiteral("Down"));
         up->setEnabled(i > 0);
-        down->setEnabled(i + 1 < list.size());
+        down->setEnabled(i + 1 < entries.size());
         rows->addWidget(box, row, 0);
         rows->addWidget(detail, row, 1);
         rows->addWidget(up, row, 2);
         rows->addWidget(down, row, 3);
-        const QString name = pack.name;
-        connect(box, &QCheckBox::toggled, this, [name](bool on) { Mods::SetEnabled(name, on); });
-        const auto move = [this, name](int direction, bool focus_up) {
-            Mods::Move(name, direction);
-            // Rebuilt after the click returns; the focus follows the pack.
-            QTimer::singleShot(0, this, [this, name, focus_up] {
+        const QString name = entry.name;
+        connect(box, &QCheckBox::toggled, this, [enable, name](bool on) { enable(name, on); });
+        const auto shift = [this, move, name, list = &widgets](int direction, bool focus_up) {
+            move(name, direction);
+            // Rebuilt after the click returns; the focus follows the entry.
+            QTimer::singleShot(0, this, [this, name, focus_up, list] {
                 RefreshMods();
-                for (std::size_t j = 0; j + 2 < pack_widgets.size(); j += 3) {
-                    if (static_cast<QCheckBox*>(pack_widgets[j])->text() == name) {
-                        QWidget* target = pack_widgets[j + (focus_up ? 1 : 2)];
-                        (target->isEnabled() ? target : pack_widgets[j])->setFocus(Qt::OtherFocusReason);
+                for (std::size_t j = 0; j + 2 < list->size(); j += 3) {
+                    if (static_cast<QCheckBox*>((*list)[j])->text() == name) {
+                        QWidget* target = (*list)[j + (focus_up ? 1 : 2)];
+                        (target->isEnabled() ? target : (*list)[j])->setFocus(Qt::OtherFocusReason);
                     }
                 }
             });
         };
-        connect(up, &QPushButton::clicked, this, [move] { move(-1, true); });
-        connect(down, &QPushButton::clicked, this, [move] { move(1, false); });
-        pack_widgets.insert(pack_widgets.end(), {box, up, down});
+        connect(up, &QPushButton::clicked, this, [shift] { shift(-1, true); });
+        connect(down, &QPushButton::clicked, this, [shift] { shift(1, false); });
+        widgets.insert(widgets.end(), {box, up, down});
     }
     rows->setRowStretch(rows->rowCount(), 1);
-    preload_textures->setChecked(Settings::values.preload_textures.GetValue());
-    dump_textures->setChecked(Settings::values.dump_textures.GetValue());
-    UpdateFocusOrder();
 }
 
 QCheckBox* Launcher::AddCheck(QGridLayout* grid, const QString& label,
@@ -654,12 +1055,27 @@ void Launcher::Load() {
     const auto percent = [](float value) { return static_cast<int>(std::lround(value * 100.f)); };
     fullscreen->setChecked(UISettings::values.fullscreen.GetValue());
     widescreen->setChecked(p.widescreen);
+    camera_zoom->setValue(percent(p.camera_zoom));
     resolution->setCurrentIndex(std::clamp(static_cast<int>(Settings::values.resolution_factor.GetValue()),
                                            0, resolution->count() - 1));
     const auto rate = std::find(FrameRate::Choices.begin(), FrameRate::Choices.end(), p.frame_rate);
     frame_rate->setCurrentIndex(rate == FrameRate::Choices.end()
                                     ? 1
                                     : static_cast<int>(rate - FrameRate::Choices.begin()));
+    if (const auto cfg = Service::CFG::GetModule(Core::System::GetInstance())) {
+        // Another language reads as English, which the game shows for it.
+        const auto current = cfg->GetSystemLanguage();
+        const auto it =
+            std::find_if(Languages.begin(), Languages.end(),
+                         [current](const Language& entry) { return entry.value == current; });
+        const QSignalBlocker block(language);
+        language->setCurrentIndex(
+            it == Languages.end() ? 0 : static_cast<int>(it - Languages.begin()));
+        // A European language set some other way needs the region too.
+        if (it != Languages.end() && it->european) {
+            SetRegionFor(*it);
+        }
+    }
     vsync->setChecked(Settings::values.use_vsync.GetValue());
     show_fps->setChecked(p.show_fps);
     menu_size->setValue(percent(p.menu_scale));
@@ -681,6 +1097,7 @@ void Launcher::Load() {
     infinite_missiles->setChecked(p.infinite_missiles);
     infinite_aeion->setChecked(p.infinite_aeion);
     RefreshMods();
+    RefreshRandomizer();
 }
 
 void Launcher::UpdateRom(const QString& error) {
@@ -708,7 +1125,8 @@ void Launcher::UpdateRom(const QString& error) {
     }
     rom_status->setText(text);
     rom_status->setStyleSheet(QStringLiteral("color: %1;").arg(color));
-    play->setEnabled(ok);
+    // Not while a seed is being written into the mods folder.
+    play->setEnabled(ok && rando_task->Running() == Randovania::Task::Job::None);
 
     QPixmap pixmap;
     if (ok) {
@@ -848,6 +1266,9 @@ void Launcher::StopBind() {
 }
 
 void Launcher::Poll() {
+    // The card re-centres as tabs of other heights open, and the window can be resized: the ring
+    // follows its option wherever the layout moves it.
+    FollowFocus();
     const auto time = std::chrono::steady_clock::now();
     std::array<bool, ButtonCount> now{};
     bool any = false;
@@ -859,8 +1280,9 @@ void Launcher::Poll() {
     if (stick) {
         std::tie(x, y) = stick->GetStatus();
     }
-    const auto pressed = [&](int button) { return now[button] && !previous[button]; };
+    const auto before = previous;
     previous = now;
+    const auto pressed = [&](int button) { return now[button] && !before[button]; };
 
     if (bind_id >= 0) {
         // Rebinding: wait for the button that chose the row to be released, then take the
@@ -919,7 +1341,7 @@ void Launcher::Poll() {
         move();
         stick_repeat = time + std::chrono::milliseconds(110);
     }
-    if (pressed(Choose)) {
+    if (std::any_of(Choose.begin(), Choose.end(), pressed)) {
         Activate();
     }
     if (pressed(ButtonLeftShoulder)) {
@@ -995,16 +1417,27 @@ void Launcher::FollowFocus() {
     } else if (bindings->isAncestorOf(focus)) {
         // Scrolled bindings: only the visible part.
         rect &= QRect(bindings->viewport()->mapTo(this, QPoint(0, 0)), bindings->viewport()->size());
+    } else if (mods_area->isAncestorOf(focus)) {
+        rect &= QRect(mods_area->viewport()->mapTo(this, QPoint(0, 0)),
+                      mods_area->viewport()->size());
     } else if (packs->isAncestorOf(focus)) {
         rect &= QRect(packs->viewport()->mapTo(this, QPoint(0, 0)), packs->viewport()->size());
     }
-    focus_ring->setGeometry(rect.adjusted(-4, -4, 4, 4));
+    const QRect ring = rect.adjusted(-4, -4, 4, 4);
+    if (focus_ring->isVisible() && focus_ring->geometry() == ring) {
+        return;
+    }
+    focus_ring->setGeometry(ring);
     focus_ring->raise();
     focus_ring->show();
     focus_ring->update();
 }
 
 bool Launcher::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::WindowActivate && watched == window() && rando_page->isVisible()) {
+        // Back from Randovania's window: presets may have been made there.
+        RefreshRandomizer();
+    }
     if (event->type() != QEvent::KeyPress || !isVisible()) {
         return false;
     }

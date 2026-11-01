@@ -58,8 +58,13 @@ LayeredFS::LayeredFS() = default;
 
 LayeredFS::LayeredFS(std::shared_ptr<RomFSReader> romfs_, std::string patch_path_,
                      std::string patch_ext_path_, bool load_relocations_)
-    : romfs(std::move(romfs_)), patch_path(std::move(patch_path_)),
-      patch_ext_path(std::move(patch_ext_path_)), load_relocations(load_relocations_) {
+    : romfs(std::move(romfs_)), layers{{std::move(patch_path_), std::move(patch_ext_path_)}},
+      load_relocations(load_relocations_) {
+    Load();
+}
+
+LayeredFS::LayeredFS(std::shared_ptr<RomFSReader> romfs_, std::vector<Layer> layers_)
+    : romfs(std::move(romfs_)), layers(std::move(layers_)), load_relocations(true) {
     Load();
 }
 
@@ -73,8 +78,11 @@ void LayeredFS::Load() {
     LoadDirectory(root, 0);
 
     if (load_relocations) {
-        LoadRelocations();
-        LoadExtRelocations();
+        // The lowest priority first, so the layers above override it
+        for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer) {
+            LoadRelocations(layer->patch_path);
+            LoadExtRelocations(layer->patch_ext_path);
+        }
     }
 
     RebuildMetadata();
@@ -139,14 +147,15 @@ std::string LayeredFS::ReadName(u32 offset, u32 name_length) {
     return Common::UTF16ToUTF8(name);
 }
 
-void LayeredFS::LoadRelocations() {
+void LayeredFS::LoadRelocations(const std::string& patch_path) {
     if (!FileUtil::Exists(patch_path)) {
         return;
     }
 
     const FileUtil::DirectoryEntryCallable callback =
-        [this, &callback]([[maybe_unused]] u64* num_entries_out, const std::string& directory,
-                          const std::string& virtual_name) {
+        [this, &patch_path, &callback]([[maybe_unused]] u64* num_entries_out,
+                                       const std::string& directory,
+                                       const std::string& virtual_name) {
             auto* parent = directory_path_map.at(directory.substr(patch_path.size() - 1));
 
             if (FileUtil::IsDirectory(directory + virtual_name + DIR_SEP)) {
@@ -179,6 +188,7 @@ void LayeredFS::LoadRelocations() {
             auto* file = file_path_map.at(path);
             file->relocation.type = 1;
             file->relocation.replace_file_path = directory + virtual_name;
+            file->relocation.patched_file.clear();
             file->relocation.size = FileUtil::GetSize(directory + virtual_name);
             LOG_INFO(Service_FS, "LayeredFS replacement file in use for {}", path);
             return true;
@@ -187,7 +197,7 @@ void LayeredFS::LoadRelocations() {
     FileUtil::ForeachDirectoryEntry(nullptr, patch_path, callback);
 }
 
-void LayeredFS::LoadExtRelocations() {
+void LayeredFS::LoadExtRelocations(std::string patch_ext_path) {
     if (!FileUtil::Exists(patch_ext_path)) {
         return;
     }
@@ -199,12 +209,11 @@ void LayeredFS::LoadExtRelocations() {
 
     FileUtil::FSTEntry result;
     FileUtil::ScanDirectoryTree(patch_ext_path, result, 256);
+    // The files in its subfolders too: they patch the RomFS's subfolders.
+    std::vector<FileUtil::FSTEntry> entries;
+    FileUtil::GetAllFilesFromNestedEntries(result, entries);
 
-    for (const auto& entry : result.children) {
-        if (FileUtil::IsDirectory(entry.physicalName)) {
-            continue;
-        }
-
+    for (const auto& entry : entries) {
         const auto path = entry.physicalName.substr(patch_ext_path.size());
         if (path.size() >= 5 && path.substr(path.size() - 5) == ".stub") {
             // Remove the corresponding file if exists
@@ -213,6 +222,7 @@ void LayeredFS::LoadExtRelocations() {
                 auto& file = *file_path_map[file_path];
                 file.relocation.type = 3;
                 file.relocation.size = 0;
+                file.relocation.patched_file.clear();
                 file_path_map.erase(file_path);
                 LOG_INFO(Service_FS, "LayeredFS removed file {}", file_path);
             } else {
@@ -244,8 +254,7 @@ void LayeredFS::LoadExtRelocations() {
             }
 
             auto& file = *file_path_map[file_path];
-            std::vector<u8> buffer(file.relocation.size); // Original size
-            romfs->ReadFile(file.relocation.original_offset, buffer.size(), buffer.data());
+            std::vector<u8> buffer = ReadCurrent(file);
 
             Loader::ResultStatus ret{};
             if (extension == ".ips") {
@@ -267,6 +276,24 @@ void LayeredFS::LoadExtRelocations() {
             LOG_WARNING(Service_FS, "LayeredFS unknown ext file {}", path);
         }
     }
+}
+
+std::vector<u8> LayeredFS::ReadCurrent(const File& file) {
+    const auto& relocation = file.relocation;
+    if (relocation.type == 2) {
+        return relocation.patched_file;
+    }
+    std::vector<u8> buffer(relocation.size);
+    if (relocation.type == 1) {
+        FileUtil::IOFile replace_file(relocation.replace_file_path, "rb");
+        if (!replace_file ||
+            replace_file.ReadBytes(buffer.data(), buffer.size()) != buffer.size()) {
+            LOG_ERROR(Service_FS, "Could not read replacement file for {}", file.path);
+        }
+    } else {
+        romfs->ReadFile(relocation.original_offset, buffer.size(), buffer.data());
+    }
+    return buffer;
 }
 
 static std::size_t GetNameSize(const std::string& name) {

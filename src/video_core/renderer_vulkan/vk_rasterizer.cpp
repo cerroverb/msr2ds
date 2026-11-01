@@ -595,16 +595,20 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     // Samus Returns widescreen: squeeze the depth-tested world draws of the top screen before
     // clipping so more of the level is visible, and let presentation stretch the screen to 16:9.
     // 2D layers (fades, the game's full-screen composites) keep their full width.
+    // The zoom scales the same draws on both axes.
     {
         const auto vp = regs.rasterizer.GetViewportRect();
         const bool top_viewport = vp.GetWidth() == 240 && std::abs(vp.bottom - vp.top) == 400;
-        const bool wide = MSR::Presentation::enabled.load(std::memory_order_relaxed) &&
-                          MSR::Presentation::widescreen.load(std::memory_order_relaxed) &&
-                          using_color_fb && !shadow_rendering && top_viewport &&
-                          regs.framebuffer.output_merger.depth_test_enable != 0;
-        const float clip_scale_y = wide ? MSR::Presentation::WideScale : 1.f;
-        if (vs_data.clip_scale_y != clip_scale_y) {
+        const bool world = MSR::Presentation::enabled.load(std::memory_order_relaxed) &&
+                           using_color_fb && !shadow_rendering && top_viewport &&
+                           regs.framebuffer.output_merger.depth_test_enable != 0;
+        const bool wide = world && MSR::Presentation::widescreen.load(std::memory_order_relaxed);
+        const float zoom =
+            world ? MSR::Presentation::world_zoom.load(std::memory_order_relaxed) : 1.f;
+        const float clip_scale_y = (wide ? MSR::Presentation::WideScale : 1.f) * zoom;
+        if (vs_data.clip_scale_y != clip_scale_y || vs_data.clip_scale_x != zoom) {
             vs_data.clip_scale_y = clip_scale_y;
+            vs_data.clip_scale_x = zoom;
             vs_data_dirty = true;
         }
     }
@@ -875,10 +879,21 @@ bool RasterizerVulkan::AccelerateDisplayTransfer(const Pica::DisplayTransferConf
 }
 
 bool RasterizerVulkan::AccelerateTextureCopy(const Pica::DisplayTransferConfig& config) {
+    if (MSR::DrawProbe::Active()) {
+        MSR::DrawProbe::Write(fmt::format("texcopy in={:08X} out={:08X} size={}",
+                                          config.GetPhysicalInputAddress(),
+                                          config.GetPhysicalOutputAddress(),
+                                          config.texture_copy.size));
+    }
     return res_cache.AccelerateTextureCopy(config);
 }
 
 bool RasterizerVulkan::AccelerateFill(const Pica::MemoryFillConfig& config) {
+    if (MSR::DrawProbe::Active()) {
+        MSR::DrawProbe::Write(fmt::format("fill {:08X}-{:08X} value={:08X}",
+                                          config.GetStartAddress(), config.GetEndAddress(),
+                                          config.value_32bit));
+    }
     return res_cache.AccelerateFill(config);
 }
 
