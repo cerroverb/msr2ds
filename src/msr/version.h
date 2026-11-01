@@ -11,5 +11,8 @@ namespace MSR {
 inline constexpr char ProjectName[] = "msr2ds";
 inline constexpr char Version[] = "1.1.0-pre";
 inline constexpr char VersionLabel[] = "1.1 pre-release";
+/// The GitHub repository whose releases the launcher checks for newer versions
+/// (citra_qt/msr_updates.h).
+inline constexpr char ReleasesRepo[] = "gminustwo/msr2ds";
 
 } // namespace MSR

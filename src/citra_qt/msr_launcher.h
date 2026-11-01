@@ -11,6 +11,7 @@
 #include <vector>
 #include <QWidget>
 #include "citra_qt/msr_randovania.h"
+#include "citra_qt/msr_updates.h"
 #include "core/frontend/input.h"
 
 class QCheckBox;
@@ -87,6 +88,10 @@ private:
     /// A Randovania job ended (msr_randovania.h).
     void RandomizerFinished(const QString& error, const QString& name, const QString& detail);
     void ShowRandomizerStatus(const QString& text, const char* color);
+    /// Asks GitHub for a newer version (msr_updates.h).
+    void CheckForUpdates();
+    void UpdateChecked(const QString& error, const QString& version, const QString& title,
+                       const QString& url);
     /// The Fusion suit setting, kept off while a randomizer mod is on.
     void UpdateFusionSuit();
     /// One row per entry in `list`: enable it, move it up or down the list. `widgets` gets the
@@ -128,6 +133,15 @@ private:
     QPushButton* play = nullptr;
     QPushButton* quit = nullptr;
     QWidget* focus_ring = nullptr;
+    QWidget* update_banner = nullptr; ///< A newer version, beside the title
+    QLabel* update_text = nullptr;
+    QPushButton* update_get = nullptr;
+    QCheckBox* update_startup = nullptr;
+    QPushButton* update_now = nullptr;
+    QLabel* update_status = nullptr;
+    Updates::Checker* update_checker = nullptr;
+    QString update_url;
+    bool update_checked = false; ///< The check at startup ran this run
 
     // Settings widgets, filled by Load()
     QCheckBox* fullscreen = nullptr;

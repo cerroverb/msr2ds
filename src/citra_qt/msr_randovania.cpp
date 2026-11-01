@@ -20,6 +20,7 @@
 #include <QTextDocumentFragment>
 #include <QTimer>
 #include <QVariant>
+#include "citra_qt/msr_process.h"
 #include "citra_qt/msr_randovania.h"
 #include "common/logging/log.h"
 #include "msr/game_folder.h"
@@ -67,18 +68,6 @@ void SetSetting(const char* key, const QString& value) {
     }
 }
 
-/// Windows has had curl and tar (bsdtar, which unpacks zip files) since Windows 10 1803: the
-/// System32 ones, not whichever an MSYS or Git install puts first in the PATH.
-QString Tool(const QString& name) {
-#ifdef _WIN32
-    const QString path = qEnvironmentVariable("SystemRoot", QStringLiteral("C:\\Windows")) +
-                         QStringLiteral("\\System32\\") + name + QStringLiteral(".exe");
-    return QFile::exists(path) ? path : QStandardPaths::findExecutable(name);
-#else
-    return QStandardPaths::findExecutable(name);
-#endif
-}
-
 QString Native(const QString& path) {
     return QDir::toNativeSeparators(path);
 }
@@ -123,12 +112,7 @@ QProcessEnvironment Environment() {
 void Prepare(QProcess& process) {
     process.setProcessEnvironment(Environment());
     process.setWorkingDirectory(Folder());
-#ifdef _WIN32
-    process.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
-        // CREATE_NO_WINDOW, which CREATE_NEW_CONSOLE would override.
-        args->flags = (args->flags & ~0x00000010u) | 0x08000000u;
-    });
-#endif
+    Process::HideConsole(process);
 }
 
 /// A preset's description, as plain text of at most two lines in the launcher.
@@ -420,8 +404,8 @@ void Task::Cancel() {
 
 void Task::Download() {
     Begin(Job::Download);
-    const QString curl = Tool(QStringLiteral("curl"));
-    const QString tar = Tool(QStringLiteral("tar"));
+    const QString curl = Process::SystemTool(QStringLiteral("curl"));
+    const QString tar = Process::SystemTool(QStringLiteral("tar"));
     if (curl.isEmpty() || tar.isEmpty()) {
         Fail(QStringLiteral("Downloading needs curl and tar, which this system does not have."));
         return;

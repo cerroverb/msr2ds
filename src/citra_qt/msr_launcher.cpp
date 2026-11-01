@@ -8,6 +8,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -26,10 +27,12 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 #include "citra_qt/msr_controls.h"
 #include "citra_qt/msr_launcher.h"
 #include "citra_qt/msr_randovania.h"
+#include "citra_qt/msr_updates.h"
 #include "citra_qt/uisettings.h"
 #include "citra_qt/util/util.h"
 #include "common/param_package.h"
@@ -223,6 +226,20 @@ Launcher::Launcher(QWidget* parent) : QWidget(parent) {
         QStringLiteral("Single-screen PC edition, %1").arg(QLatin1String(MSR::VersionLabel)),
         "dim"));
     header->addLayout(titles, 1);
+    // A newer version, when the update check finds one (msr_updates.h).
+    update_banner = new QWidget;
+    auto* banner = new QVBoxLayout(update_banner);
+    banner->setContentsMargins(0, 0, 0, 0);
+    banner->setSpacing(6);
+    update_text = MakeLabel({});
+    update_text->setStyleSheet(QStringLiteral("color: #86e39a;"));
+    update_get = new QPushButton(QStringLiteral("Download page"));
+    banner->addWidget(update_text, 0, Qt::AlignRight);
+    banner->addWidget(update_get, 0, Qt::AlignRight);
+    update_banner->hide();
+    header->addWidget(update_banner, 0, Qt::AlignVCenter);
+    connect(update_get, &QPushButton::clicked, this,
+            [this] { QDesktopServices::openUrl(QUrl(update_url)); });
     column->addLayout(header);
 
     // The game dump: the package does not include the game.
@@ -319,6 +336,9 @@ Launcher::Launcher(QWidget* parent) : QWidget(parent) {
     poll_timer = new QTimer(this);
     connect(poll_timer, &QTimer::timeout, this, &Launcher::Poll);
 
+    update_checker = new Updates::Checker(this);
+    connect(update_checker, &Updates::Checker::Finished, this, &Launcher::UpdateChecked);
+
     qApp->installEventFilter(this);
 }
 
@@ -328,8 +348,9 @@ Launcher::~Launcher() {
 
 void Launcher::UpdateFocusOrder() {
     // Top to bottom, so up and down walk the options of the open tab.
-    std::vector<QWidget*> order = {browse, tabs->tabBar(), volume, language, unlock_galleries,
-                                   unlock_fusion_mode, fusion_suit, import_saves, open_saves,
+    std::vector<QWidget*> order = {update_get, browse, tabs->tabBar(), volume, language,
+                                   unlock_galleries, unlock_fusion_mode, fusion_suit,
+                                   import_saves, open_saves, update_startup, update_now,
                                    fullscreen, widescreen, camera_zoom,
                                    resolution, frame_rate, vsync, show_fps, menu_size, hud_size,
                                    hud_opacity, show_map, map_size, map_opacity, show_counters,
@@ -564,6 +585,26 @@ QWidget* Launcher::BuildGameTab() {
         const auto info = GameFolder::Probe(GameFolder::ActiveRom());
         Saves::OpenFolder(info.Ok() ? info.program_id : GameFolder::UsaProgramId);
     });
+    // New versions on GitHub (msr_updates.h).
+    const int updates_row = grid->rowCount();
+    grid->addWidget(MakeLabel(QStringLiteral("Updates")), updates_row, 0);
+    update_startup = new QCheckBox(QStringLiteral("Check when the launcher opens"));
+    update_now = new QPushButton(QStringLiteral("Check now"));
+    auto* updates = new QHBoxLayout;
+    updates->setSpacing(16);
+    updates->addWidget(update_startup);
+    updates->addWidget(update_now);
+    updates->addStretch(1);
+    grid->addLayout(updates, updates_row, 1);
+    update_status = MakeLabel(QStringLiteral("You have %1 %2.")
+                                  .arg(QLatin1String(MSR::ProjectName),
+                                       QLatin1String(MSR::VersionLabel)),
+                              "dim");
+    update_status->setWordWrap(true);
+    grid->addWidget(update_status, grid->rowCount(), 1);
+    connect(update_startup, &QCheckBox::toggled, this,
+            [](bool on) { Updates::SetCheckAtStartup(on); });
+    connect(update_now, &QPushButton::clicked, this, &Launcher::CheckForUpdates);
     auto* note = MakeLabel(QStringLiteral("Quick save, quick load and restart are in the in-game "
                                           "menu (F1 or Select)."),
                            "dim");
@@ -1046,6 +1087,11 @@ void Launcher::Open() {
     Load();
     UpdateRom();
     RefreshControls();
+    // Once per run: the launcher also comes back when the game stops with an error.
+    if (!update_checked && Updates::CheckAtStartup()) {
+        update_checked = true;
+        CheckForUpdates();
+    }
     show();
     (play->isEnabled() ? play : browse)->setFocus(Qt::OtherFocusReason);
 }
@@ -1098,6 +1144,39 @@ void Launcher::Load() {
     infinite_aeion->setChecked(p.infinite_aeion);
     RefreshMods();
     RefreshRandomizer();
+    const QSignalBlocker block(update_startup);
+    update_startup->setChecked(Updates::CheckAtStartup());
+}
+
+void Launcher::CheckForUpdates() {
+    update_now->setEnabled(false);
+    update_status->setText(QStringLiteral("Checking GitHub for a newer version..."));
+    update_checker->Start();
+}
+
+void Launcher::UpdateChecked(const QString& error, const QString& version, const QString& title,
+                             const QString& url) {
+    update_now->setEnabled(true);
+    const QString current =
+        QStringLiteral("%1 %2").arg(QLatin1String(MSR::ProjectName), QLatin1String(MSR::VersionLabel));
+    if (!error.isEmpty()) {
+        update_status->setText(QStringLiteral("Could not check: %1").arg(error));
+        return;
+    }
+    if (version.isEmpty()) {
+        update_status->setText(QStringLiteral("%1 is the latest version.").arg(current));
+        return;
+    }
+    const QString name =
+        title.isEmpty() ? QStringLiteral("%1 %2").arg(QLatin1String(MSR::ProjectName), version)
+                        : title;
+    update_url = url;
+    update_text->setText(QStringLiteral("%1 is out").arg(name));
+    update_banner->show();
+    update_status->setText(
+        QStringLiteral("%1 is out; you have %2. Its download page opens from the top of the "
+                       "launcher.")
+            .arg(name, current));
 }
 
 void Launcher::UpdateRom(const QString& error) {
