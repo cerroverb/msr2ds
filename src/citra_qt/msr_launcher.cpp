@@ -366,6 +366,9 @@ void Launcher::UpdateFocusOrder() {
     order.insert(order.end(), pack_widgets.begin(), pack_widgets.end());
     order.insert(order.end(), {open_mods, refresh_mods, preload_textures, dump_textures,
                                infinite_energy, infinite_missiles, infinite_aeion, quit, play});
+    if (background_shaders) {
+        order.insert(std::find(order.begin(), order.end(), vsync) + 1, background_shaders);
+    }
     for (std::size_t i = 1; i < order.size(); ++i) {
         QWidget::setTabOrder(order[i - 1], order[i]);
     }
@@ -415,6 +418,24 @@ QWidget* Launcher::BuildDisplayTab() {
     });
     vsync = AddCheck(grid, QStringLiteral("V-Sync"),
                      [](bool value) { Settings::values.use_vsync = value; });
+#ifdef __APPLE__
+    // Metal compiles each new shader from source: the game pauses for a few frames the first time
+    // an effect appears. Built in the background, it does not pause, but the effect flickers.
+    background_shaders =
+        AddCheck(grid, QStringLiteral("Background shaders"), [this](bool value) {
+            EditPlayer([value](PlayerSettings& p) { p.background_shaders = value; });
+            Settings::values.async_shader_compilation = value;
+        });
+    background_shaders->setToolTip(
+        QStringLiteral("macOS compiles each new shader the first time an effect appears, which "
+                       "pauses the game for a few frames. On: no pause, but that effect (fog, "
+                       "dust, an enemy) is missing or flickers until its shader is ready. Once "
+                       "compiled, shaders are kept, so either way it happens once per effect."));
+    grid->addWidget(MakeLabel(QStringLiteral("No pauses when new effects appear, but they flicker "
+                                             "the first time"),
+                              "dim"),
+                    grid->rowCount(), 1, 1, -1);
+#endif
     show_fps = AddCheck(grid, QStringLiteral("Show FPS"), [this](bool value) {
         EditPlayer([value](PlayerSettings& p) { p.show_fps = value; });
     });
@@ -1123,6 +1144,9 @@ void Launcher::Load() {
         }
     }
     vsync->setChecked(Settings::values.use_vsync.GetValue());
+    if (background_shaders) {
+        background_shaders->setChecked(p.background_shaders);
+    }
     show_fps->setChecked(p.show_fps);
     menu_size->setValue(percent(p.menu_scale));
     hud_size->setValue(percent(p.hud_scale));

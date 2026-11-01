@@ -39,6 +39,10 @@ struct PlayerSettings {
     float menu_scale = 1.34f;
     bool show_fps = false;
     int frame_rate = 60; ///< One of FrameRate::Choices (msr/frame_rate.h)
+    /// macOS: shaders built in the background (async_shader_compilation, msr/defaults.cpp), so the
+    /// first sight of an effect does not pause the game while Metal compiles it; the effect is
+    /// missing for those frames instead (flicker).
+    bool background_shaders = false;
     // Extras otherwise given by amiibo (msr/cheats.h)
     bool unlock_galleries = true;
     bool unlock_fusion_mode = true;

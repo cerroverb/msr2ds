@@ -1088,6 +1088,12 @@ void GMainWindow::InitializeMsrGameFolder() {
     MSR::PlayerSettings player;
     player.Load(MSR::GameFolder::User() + QStringLiteral("msr/settings.ini"));
     overlay.SetPlayerSettings(player);
+#ifdef __APPLE__
+    // Metal compiles each new shader from source, pausing the game for a few frames the first time
+    // an effect appears. The player can have them built in the background instead, at the cost of
+    // the effect missing for those frames (the launcher's Display tab; msr/defaults.cpp).
+    Settings::values.async_shader_compilation = player.background_shaders;
+#endif
     MSR::OverlayHook::overlay = &overlay;
 
     // F1 or L3+R3 open it; keyboard, mouse and gamepad then drive the menu.

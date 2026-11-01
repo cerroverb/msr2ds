@@ -38,7 +38,8 @@ void ApplyEveryLaunch() {
     // Draws wait for their pipeline. Built asynchronously, a draw whose pipeline is still building
     // is skipped: the game keeps loading shader programs as effects come and go, and the frame
     // went out without its fog, dust or an enemy (texture flicker). Earlier versions turned this
-    // on at first run, so it is set every launch.
+    // on at first run, so it is set every launch. On macOS, where a new shader takes Metal tens of
+    // milliseconds, the player can turn it back on (PlayerSettings::background_shaders).
     Settings::values.async_shader_compilation = false;
 }
 

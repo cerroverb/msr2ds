@@ -149,6 +149,7 @@ private:
     QSlider* camera_zoom = nullptr;
     QComboBox* resolution = nullptr;
     QCheckBox* vsync = nullptr;
+    QCheckBox* background_shaders = nullptr; ///< macOS only
     QCheckBox* show_fps = nullptr;
     QSlider* menu_size = nullptr;
     QSlider* hud_size = nullptr;

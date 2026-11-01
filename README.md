@@ -94,7 +94,10 @@ Citra and Azahar packs work (see [Texture packs](#texture-packs)).
 
 On a Mac, Metal compiles each new shader the first time it is used (about a
 tenth of a second), so effects make the game pause briefly the first time they
-appear. macOS keeps what it compiled: they do not pause again.
+appear. macOS keeps what it compiled: they do not pause again. Background
+shaders, in the launcher's Display tab (Mac only, off by default), takes the
+pauses away, but then new effects flicker the first time they appear instead:
+fog, dust or an enemy is missing until its shader is ready.
 
 **Widescreen** follows DekUI's renderer approach. Depth-tested draws in the top
 viewport (the 3D world) are squeezed by 15/16 on the display's horizontal axis

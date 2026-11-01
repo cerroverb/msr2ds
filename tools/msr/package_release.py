@@ -105,7 +105,9 @@ README_MACOS = """
 macOS: Apple Silicon, macOS 13.4 or newer. The app is not notarized, so the first time macOS
 refuses to open it: choose Open Anyway in System Settings, Privacy & Security (or right-click
 the app, Open). Metal compiles each new shader the first time it is used, so effects pause the
-game briefly the first time they appear; macOS keeps what it compiled.
+game briefly the first time they appear; macOS keeps what it compiled. Background shaders, in the
+launcher's Display tab, takes the pauses away, but new effects then flicker the first time they
+appear (missing until their shader is ready).
 """
 
 README_TEXTURES = """HD textures: the HD Texture Pack and its add-ons are included and turned on. Turn them off or

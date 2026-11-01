@@ -166,6 +166,8 @@ void PlayerSettings::Load(const QString& path) {
     menu_scale = file.value(QStringLiteral("menu_scale"), menu_scale).toFloat();
     show_fps = file.value(QStringLiteral("show_fps"), show_fps).toBool();
     frame_rate = file.value(QStringLiteral("frame_rate"), frame_rate).toInt();
+    background_shaders =
+        file.value(QStringLiteral("background_shaders"), background_shaders).toBool();
     if (std::find(FrameRate::Choices.begin(), FrameRate::Choices.end(), frame_rate) ==
         FrameRate::Choices.end()) {
         frame_rate = 60;
@@ -196,6 +198,7 @@ void PlayerSettings::Save(const QString& path) const {
     file.setValue(QStringLiteral("menu_scale"), menu_scale);
     file.setValue(QStringLiteral("show_fps"), show_fps);
     file.setValue(QStringLiteral("frame_rate"), frame_rate);
+    file.setValue(QStringLiteral("background_shaders"), background_shaders);
     file.setValue(QStringLiteral("unlock_galleries"), unlock_galleries);
     file.setValue(QStringLiteral("unlock_fusion_mode"), unlock_fusion_mode);
     file.setValue(QStringLiteral("fusion_suit"), fusion_suit);
