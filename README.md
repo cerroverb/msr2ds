@@ -92,8 +92,7 @@ Citra and Azahar packs work (see [Texture packs](#texture-packs)).
 
 **Steamdeck stick to around 4x (960p) for performance.**
 
-**Mac**
-Has significant slowdown at frame rates above 60.
+**Mac** has significant slowdown at frame rates above 60.
 > [!IMPORTANT]
 >
 > MacOS has jitter. Macs have no native Vulkan, so Azahar's Vulkan renderer runs through MoltenVK, a translation layer to Apple's Metal. MoltenVK turns each shader into Metal source code, and Metal compiles it from scratch. Graphics drivers on Windows and Linux compile the same shaders in a few milliseconds, so there you don't notice.
