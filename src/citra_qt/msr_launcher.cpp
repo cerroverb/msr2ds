@@ -24,6 +24,7 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QStyleHints>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -198,6 +199,10 @@ QScrollArea* MakeModList(QWidget*& list) {
 } // namespace
 
 Launcher::Launcher(QWidget* parent) : QWidget(parent) {
+    // The gamepad and the arrow keys walk the options with Tab (Navigate). macOS, unless keyboard
+    // navigation is on in System Settings, lets Tab reach only text fields and lists: every
+    // checkbox, slider, menu and button would be skipped.
+    QGuiApplication::styleHints()->setTabFocusBehavior(Qt::TabFocusAllControls);
     setObjectName(QStringLiteral("MsrLauncher"));
     setAttribute(Qt::WA_StyledBackground, true);
     setStyleSheet(QString::fromUtf8(StyleSheet));
