@@ -28,10 +28,12 @@ struct RomInfo {
     QString Region() const;
 };
 
-/// Folder holding the executable; portable data and an optional game dump live beside it.
+/// Folder holding the executable (on macOS, the one holding the app bundle); portable data and
+/// an optional game dump live beside it.
 QString Root();
-/// Portable Azahar user directory (Root()/user/, with a trailing separator). An AppImage keeps
-/// it beside the AppImage file if a user/ folder is there, else in ~/.local/share.
+/// Portable Azahar user directory (Root()/user/, with a trailing separator). An AppImage, or a
+/// macOS app, keeps it beside the AppImage file or the app if a user/ folder is there, else in
+/// ~/.local/share or ~/Library/Application Support.
 QString User();
 
 /// Texture packs that ship with the game: Root()/textures/, or usr/share/samus-returns-recomp/

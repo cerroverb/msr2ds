@@ -20,8 +20,17 @@ endif()
 
 if (APPLE)
     set(DIST_DIR "../../dist/apple")
+    set(APPLE_BUNDLE_NAME "Azahar")
+    set(APPLE_BUNDLE_ID "org.azahar-emu.azahar")
+    set(APPLE_ICON "azahar.icns")
+    if (ENABLE_MSR_GAME_FOLDER)
+        # samus.icns: dist/msr/samus.png (tools/msr/make_icon.py) at the macOS icon sizes.
+        set(APPLE_BUNDLE_NAME "Samus Returns")
+        set(APPLE_BUNDLE_ID "io.github.gminustwo.msr2ds")
+        set(APPLE_ICON "samus.icns")
+    endif()
     set(APPLE_RESOURCES
-        "${DIST_DIR}/azahar.icns"
+        "${DIST_DIR}/${APPLE_ICON}"
         "${DIST_DIR}/launch_logo.png"
     )
     if (IOS)
@@ -33,15 +42,26 @@ if (APPLE)
     include(GenerateBuildInfo)
     set(SRC_DIR "${PROJECT_SOURCE_DIR}")
     generate_build_info()
+    set(APPLE_BUNDLE_VERSION "${BUILD_VERSION}")
+    set(APPLE_SHORT_VERSION "${BUILD_FULLNAME}")
+    set(APPLE_LONG_VERSION "${BUILD_FULLNAME}")
+    if (ENABLE_MSR_GAME_FOLDER)
+        # The port's version (src/msr/version.h): 1.1.0 for Finder, 1.1.0-pre in full.
+        file(STRINGS "${PROJECT_SOURCE_DIR}/src/msr/version.h" MSR_VERSION_LINE
+             REGEX "char Version\\[\\] = ")
+        string(REGEX REPLACE ".*\"([^\"]+)\".*" "\\1" APPLE_LONG_VERSION "${MSR_VERSION_LINE}")
+        string(REGEX REPLACE "-.*" "" APPLE_SHORT_VERSION "${APPLE_LONG_VERSION}")
+        set(APPLE_BUNDLE_VERSION "${APPLE_SHORT_VERSION}")
+    endif()
     set_target_properties(citra_meta PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST "${DIST_DIR}/Info.plist.in"
-        MACOSX_BUNDLE_BUNDLE_NAME "Azahar"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "org.azahar-emu.azahar"
-        MACOSX_BUNDLE_BUNDLE_VERSION "${BUILD_VERSION}"
-        MACOSX_BUNDLE_SHORT_VERSION_STRING "${BUILD_FULLNAME}"
-        MACOSX_BUNDLE_LONG_VERSION_STRING "${BUILD_FULLNAME}"
-        MACOSX_BUNDLE_ICON_FILE "azahar.icns"
+        MACOSX_BUNDLE_BUNDLE_NAME "${APPLE_BUNDLE_NAME}"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "${APPLE_BUNDLE_ID}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${APPLE_BUNDLE_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${APPLE_SHORT_VERSION}"
+        MACOSX_BUNDLE_LONG_VERSION_STRING "${APPLE_LONG_VERSION}"
+        MACOSX_BUNDLE_ICON_FILE "${APPLE_ICON}"
         RESOURCE "${APPLE_RESOURCES}"
     )
 

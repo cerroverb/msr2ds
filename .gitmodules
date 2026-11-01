@@ -100,3 +100,6 @@
 [submodule "externals/cryptopp"]
 	path = externals/cryptopp
 	url = https://github.com/cryptopp-modern/cryptopp-modern.git
+[submodule "libadrenotools"]
+	path = externals/libadrenotools
+	url = https://github.com/bylaws/libadrenotools

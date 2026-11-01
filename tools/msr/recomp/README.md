@@ -69,6 +69,8 @@ resumes at:
 - Memory goes through Azahar's page table, with the memory system as the slow path.
 - Floating point runs on SSE, with MXCSR set from the guest FPSCR (the 3DS runs games in
   flush-to-zero, default-NaN mode). The NaN canonicalization is applied after each operation.
+  On an AArch64 host (macOS on Apple Silicon) the guest's RMode, FZ and DN bits go into FPCR
+  unchanged.
 - The recompiled code is used only when the loaded program's text matches the SHA-256 it was
   generated from. Any other program runs on the JIT.
 

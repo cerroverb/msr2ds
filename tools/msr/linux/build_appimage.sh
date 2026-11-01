@@ -14,7 +14,8 @@
 #                  usr/share/samus-returns-recomp/textures (MSR::GameFolder::BuiltInTextures).
 #                  A shaders/ folder beside it (package_release.py shaders) ships as the shader
 #                  seed. "-": none
-#   output-dir     where <ProjectName>-<Version>-x86_64.AppImage goes
+#   output-dir     where <ProjectName>-<Version>-<arch>.AppImage goes (x86_64 or aarch64, the
+#                  build system's)
 #   build-dir      default build-linux
 #   MSR_JOBS       parallel compile jobs (default: nproc / 2; the generated code is large)
 #
@@ -37,6 +38,12 @@ fi
 output="$(realpath "${3:?output-dir}")"
 build_dir="$(realpath -m "${4:-build-linux}")"
 jobs="${MSR_JOBS:-$(( $(nproc) / 2 ))}"
+arch="$(uname -m)"
+case "$arch" in
+  x86_64) qt_host=linux; qt_arch=linux_gcc_64; qt_dir=gcc_64 ;;
+  aarch64) qt_host=linux_arm64; qt_arch=linux_gcc_arm64; qt_dir=gcc_arm64 ;;
+  *) echo "Unsupported architecture: $arch (x86_64 or aarch64)" >&2; exit 1 ;;
+esac
 
 name="$(sed -n 's/.*ProjectName\[\] = "\(.*\)";/\1/p' src/msr/version.h)"
 version="$(sed -n 's/.*char Version\[\] = "\(.*\)";/\1/p' src/msr/version.h)"
@@ -47,13 +54,11 @@ mkdir -p "$tools" "$output"
 # Qt: Azahar takes the system's on Linux; this fetches the release Qt with aqtinstall (as
 # Azahar's own build does on Windows), so the AppImage carries a current Qt.
 qt_version=6.10.3
-qt="$tools/qt/$qt_version/gcc_64"
+qt="$tools/qt/$qt_version/$qt_dir"
 if [ ! -x "$qt/bin/qmake" ]; then
   python3 -m pip install --quiet --target "$tools/aqt" aqtinstall
-  for arch in linux_gcc_64 gcc_64; do
-    PYTHONPATH="$tools/aqt" python3 -m aqt install-qt --outputdir "$tools/qt" \
-      linux desktop "$qt_version" "$arch" -m qtmultimedia && break
-  done
+  PYTHONPATH="$tools/aqt" python3 -m aqt install-qt --outputdir "$tools/qt" \
+    "$qt_host" desktop "$qt_version" "$qt_arch" -m qtmultimedia
 fi
 [ -x "$qt/bin/qmake" ] || { echo "Qt $qt_version not installed in $qt" >&2; exit 1; }
 
@@ -89,9 +94,9 @@ if [ ${#missing[@]} -gt 0 ]; then
   for deb in "$tools"/debs/*.deb; do dpkg -x "$deb" "$sysroot"; done
 fi
 
-for tool in linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage; do
+for tool in "linuxdeploy-$arch.AppImage" "linuxdeploy-plugin-qt-$arch.AppImage"; do
   if [ ! -x "$tools/$tool" ]; then
-    project="${tool%-x86_64.AppImage}"
+    project="${tool%-"$arch".AppImage}"
     curl -fsSL -o "$tools/$tool" \
       "https://github.com/linuxdeploy/$project/releases/download/continuous/$tool"
     chmod +x "$tools/$tool"
@@ -124,11 +129,20 @@ Categories=Game;
 Terminal=false
 EOF
 
+# Qt Multimedia (the camera) runs on its FFmpeg backend. Its GStreamer plugin would need GStreamer
+# on the build system and in the AppImage, and linuxdeploy stops when that is missing: the plugin
+# is set aside while the AppImage is made (Qt's CMake files still list it).
+gst="$qt/plugins/multimedia/libgstreamermediaplugin.so"
+if [ -f "$gst" ]; then
+  mv "$gst" "$qt/gstreamermediaplugin.aside"
+  trap 'mv "$qt/gstreamermediaplugin.aside" "$gst"' EXIT
+fi
+
 export APPIMAGE_EXTRACT_AND_RUN=1 QMAKE="$qmake"
-export LD_LIBRARY_PATH="$qt_lib:$sysroot/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export OUTPUT="$output/$name-$version-x86_64.AppImage"
+export LD_LIBRARY_PATH="$qt_lib:$sysroot/usr/lib/$arch-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export OUTPUT="$output/$name-$version-$arch.AppImage"
 rm -f "$OUTPUT"
-(cd "$tools" && "$tools/linuxdeploy-x86_64.AppImage" \
+(cd "$tools" && "$tools/linuxdeploy-$arch.AppImage" \
   --appdir "$appdir" \
   --executable "$appdir/usr/bin/SamusReturns" \
   --desktop-file "$appdir/usr/share/applications/samus-returns-recomp.desktop" \

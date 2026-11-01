@@ -26,8 +26,16 @@
       README.txt and license.txt, and zips it as
       build-release/<ProjectName>-<Version>-windows-x64.zip.
 
+  python3 tools/msr/package_release.py macos [build-dir]
+      The public macOS release: <build-dir>/bundle/SamusReturns.app (default build-macos, a JIT
+      build made with tools/msr/macos/build.sh) with README.txt and license.txt, zipped with
+      ditto (which keeps the app's symlinks and signature) as
+      build-release/public/<ProjectName>-<Version>-macos-<arch>.zip. It refuses a recompiled
+      build.
+
 The Linux AppImage is made in Linux by tools/msr/linux/build_appimage.sh (public: no
-generated code, no textures). Name and version come from src/msr/version.h.
+generated code, no textures); on a Mac, by tools/msr/macos/build_linux.sh. Name and version come
+from src/msr/version.h.
 
 A recompiled build embeds code translated from your game dump, the shader caches hold the game's
 shader programs, and the texture pack is its authors' work made from the game's textures: keep
@@ -38,6 +46,7 @@ import pathlib
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import zipfile
 
@@ -70,13 +79,16 @@ included. The launcher asks for it the first time and remembers where it is.
 
 README_BODY = """
 To skip the launcher and boot straight into the game with your saved settings, run
-SamusReturns-Direct.exe on Windows (a Steam shortcut can point at it), or start the AppImage
-with --play on Linux. The settings stay in the in-game menu (F1 or Select).
+SamusReturns-Direct.exe on Windows (a Steam shortcut can point at it), start the AppImage with
+--play on Linux, or run "open SamusReturns.app --args --play" on macOS. The settings stay in the
+in-game menu (F1 or Select).
 
 Your settings and saves:
   Windows: the user folder beside {exe}
   Linux (AppImage): ~/.local/share/samus-returns-recomp, or a folder named user beside the
   AppImage file if you create one
+  macOS: ~/Library/Application Support/samus-returns-recomp, or a folder named user beside
+  SamusReturns.app if you create one
 The launcher's Game tab imports saves from Azahar or Citra.
 
 Game mods: mods made for Citra, Azahar or Luma3DS (romfs, exefs, code.ips...) work as they are.
@@ -88,6 +100,13 @@ Controls: see the launcher's Controls tab. A gamepad is set up when it is connec
 connected gamepad controls the game, Steam Input included.
 
 {footer}"""
+
+README_MACOS = """
+macOS: Apple Silicon, macOS 13.4 or newer. The app is not notarized, so the first time macOS
+refuses to open it: choose Open Anyway in System Settings, Privacy & Security (or right-click
+the app, Open). Metal compiles each new shader the first time it is used, so effects pause the
+game briefly the first time they appear; macOS keeps what it compiled.
+"""
 
 README_TEXTURES = """HD textures: the HD Texture Pack and its add-ons are included and turned on. Turn them off or
 reorder them in the launcher's Textures tab (or the in-game menu, F1 or Select). Credits in
@@ -197,13 +216,13 @@ def stage_shaders(folders):
         print(f'{target.name}: {len(entries)} entries, {target.stat().st_size // 1024} KiB')
 
 
-def write_readme(target, exe, public=False):
+def write_readme(target, exe, public=False, notes=''):
     name, ver, label = version()
     fields = dict(name=name, version=ver, label=label, exe=exe,
                   readme=f'{MAIN_PACK} - Readme.txt')
     intro, textures, footer = ((README_PUBLIC_INTRO, README_PUBLIC_TEXTURES, README_PUBLIC_FOOTER)
                                if public else (README_INTRO, README_TEXTURES, README_FOOTER))
-    text = intro.format(**fields) + README_BODY.format(
+    text = intro.format(**fields) + notes + README_BODY.format(
         textures=textures.format(**fields), footer=footer, **fields)
     target.write_text(text, encoding='utf-8', newline='\r\n' if exe.endswith('.exe') else '\n')
 
@@ -264,9 +283,36 @@ def package_windows(build_dir='build-windows', public=False):
     print(f'{archive} ({archive.stat().st_size / 2**30:.2f} GiB)')
 
 
+def package_macos(build_dir='build-macos'):
+    name, ver, _ = version()
+    app = ROOT / build_dir / 'bundle' / 'SamusReturns.app'
+    exe = app / 'Contents' / 'MacOS' / 'SamusReturns'
+    if not exe.is_file():
+        sys.exit(f'{app} is missing: build it first (tools/msr/macos/build.sh {build_dir})')
+    cache = ROOT / build_dir / 'CMakeCache.txt'
+    if not cache.is_file() or 'ENABLE_MSR_RECOMP:BOOL=ON' in cache.read_text(errors='replace'):
+        sys.exit(f'{build_dir} is not a JIT build: the public package must not hold code '
+                 'translated from the game (tools/msr/macos/build.sh)')
+    arch = subprocess.run(['lipo', '-archs', str(exe)], capture_output=True, text=True,
+                          check=True).stdout.split()
+    folder = f'{name}-{ver}-macos-{"universal" if len(arch) > 1 else arch[0]}'
+    out = PUBLIC / folder
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+    subprocess.run(['ditto', str(app), str(out / app.name)], check=True)
+    shutil.copy2(ROOT / 'license.txt', out / 'license.txt')
+    write_readme(out / 'README.txt', app.name, True, README_MACOS)
+
+    archive = out.parent / f'{folder}.zip'
+    archive.unlink(missing_ok=True)
+    subprocess.run(['ditto', '-c', '-k', '--keepParent', str(out), str(archive)], check=True)
+    print(f'{archive} ({archive.stat().st_size / 2**20:.0f} MiB)')
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in ('textures', 'shaders', 'windows', 'public',
-                                                'readme'):
+                                                'readme', 'macos'):
         sys.exit(__doc__)
     if sys.argv[1] == 'textures':
         if len(sys.argv) < 3:
@@ -281,6 +327,8 @@ def main():
         write_readme(pathlib.Path(sys.argv[2]), 'the AppImage')
     elif sys.argv[1] == 'public':
         package_windows(*(sys.argv[2:3] or ['build-jit']), public=True)
+    elif sys.argv[1] == 'macos':
+        package_macos(*sys.argv[2:3])
     else:
         package_windows(*sys.argv[2:3])
 

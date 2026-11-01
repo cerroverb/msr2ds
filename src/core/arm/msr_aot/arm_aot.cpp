@@ -48,24 +48,25 @@ bool WriteExclusive64(void* m, u32 a, u64 v, u64 expected) {
     return Mem(m).WriteExclusive64(a, v, expected);
 }
 
-/// Restores the host's MXCSR on scope exit; the recompiled code runs with the guest's.
-class GuestMxcsr {
+/// Restores the host's floating-point control (MXCSR, or FPCR on AArch64) on scope exit; the
+/// recompiled code runs with the guest's.
+class GuestFpControl {
 public:
-    explicit GuestMxcsr(u32 fpscr) : host(_mm_getcsr()) {
+    explicit GuestFpControl(u32 fpscr) : host(MsrAot::HostFpControl()) {
         Enter(fpscr);
     }
-    ~GuestMxcsr() {
+    ~GuestFpControl() {
         Leave();
     }
     void Enter(u32 fpscr) {
-        _mm_setcsr(MsrAot::MxcsrFor(fpscr, host));
+        MsrAot::SetHostFpControl(MsrAot::GuestFpControl(fpscr, host));
     }
     void Leave() {
-        _mm_setcsr(host);
+        MsrAot::SetHostFpControl(host);
     }
 
 private:
-    u32 host;
+    MsrAot::FpControl host;
 };
 
 constexpr u64 ReportInterval = 268'111'856ull * 30; // about 30 emulated seconds
@@ -204,7 +205,7 @@ void ARM_AOT::Run() {
     auto& timer = GetTimer();
     reschedule = false;
     LoadFromJit();
-    GuestMxcsr mxcsr(ctx.fpscr);
+    GuestFpControl fp_control(ctx.fpscr);
     // Ticks accumulate across functions and settle with the timer only when leaving the loop
     // (system calls and the JIT read and advance it), keeping each dispatch to a table lookup.
     const auto settle = [&] {
@@ -229,23 +230,23 @@ void ARM_AOT::Run() {
         }
         settle();
         if (!handler) {
-            mxcsr.Leave();
+            fp_control.Leave();
             Interpret();
-            mxcsr.Enter(ctx.fpscr);
+            fp_control.Enter(ctx.fpscr);
         } else if (ctx.exit == MsrAot::Exit::Svc) {
             ++svc_count;
-            mxcsr.Leave();
+            fp_control.Leave();
             StoreToJit();
             svc->CallSVC(ctx.svc);
             LoadFromJit();
-            mxcsr.Enter(ctx.fpscr);
+            fp_control.Enter(ctx.fpscr);
         } else if (ctx.exit == MsrAot::Exit::Interpret || ctx.exit == MsrAot::Exit::Patched) {
-            mxcsr.Leave();
+            fp_control.Leave();
             Interpret(ctx.exit == MsrAot::Exit::Interpret);
-            mxcsr.Enter(ctx.fpscr);
+            fp_control.Enter(ctx.fpscr);
         }
     }
-    mxcsr.Leave();
+    fp_control.Leave();
     StoreToJit();
     ReportStats();
 }

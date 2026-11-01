@@ -13,14 +13,23 @@
 // Memory goes through the emulator's page table, falling back to the memory system for
 // anything that is not plain RAM. Floating point uses the host's SSE with MXCSR set from the
 // guest FPSCR (flush-to-zero as denormals-are-zero plus flush-to-zero, and the rounding mode);
-// default-NaN mode is applied after each operation.
+// default-NaN mode is applied after each operation. On an AArch64 host the guest's rounding,
+// flush-to-zero and default-NaN bits go into FPCR as they are: they sit at the same positions.
 
 #pragma once
 
 #include <cstdint>
 #include <cstring>
+#if defined(__x86_64__) || defined(_M_X64)
 #include <emmintrin.h>
 #include <xmmintrin.h>
+#define MSR_AOT_HOST_SSE 1
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#define MSR_AOT_HOST_SSE 0
+#else
+#error "The recompiled code needs an x86-64 or AArch64 host"
+#endif
 
 // The generated code is compiled at -O1 to keep its build time down; the small helpers it calls
 // on every instruction must still inline.
@@ -319,6 +328,9 @@ MSR_AOT_INLINE void BranchX(Ctx& c, u32 target) {
 constexpr u32 FpscrDn = 1u << 25;
 constexpr u32 FpscrFz = 1u << 24;
 
+#if MSR_AOT_HOST_SSE
+using FpControl = u32;
+
 /// MXCSR for a guest FPSCR: flush-to-zero (inputs and outputs) and the rounding mode.
 inline u32 MxcsrFor(u32 fpscr, u32 host) {
     static constexpr u32 rounding[4] = {0x0000, 0x4000, 0x2000, 0x6000}; // RN, RP, RM, RZ
@@ -328,9 +340,38 @@ inline u32 MxcsrFor(u32 fpscr, u32 host) {
     return m | 0x1F80u;                // all exceptions masked
 }
 
+inline FpControl HostFpControl() {
+    return _mm_getcsr();
+}
+inline void SetHostFpControl(FpControl value) {
+    _mm_setcsr(value);
+}
+inline FpControl GuestFpControl(u32 fpscr, FpControl host) {
+    return MxcsrFor(fpscr, host);
+}
+#else
+using FpControl = u64;
+
+inline FpControl HostFpControl() {
+    u64 value;
+    asm volatile("mrs %0, fpcr" : "=r"(value));
+    return value;
+}
+inline void SetHostFpControl(FpControl value) {
+    asm volatile("msr fpcr, %0" : : "r"(value) : "memory");
+}
+/// FPCR for a guest FPSCR: AArch64 keeps RMode (23:22), FZ (24) and DN (25) where the VFP
+/// does, and flushes inputs and outputs as it does. Exception traps stay off.
+inline FpControl GuestFpControl(u32 fpscr, FpControl host) {
+    constexpr u64 guest_bits = 0x03C00000u;
+    constexpr u64 trap_bits = 0x9F00u; // IDE, IXE, UFE, OFE, DZE, IOE
+    return (host & ~(guest_bits | trap_bits)) | (fpscr & guest_bits);
+}
+#endif
+
 inline void SetFpscr(Ctx& c, u32 value) {
     c.fpscr = value;
-    _mm_setcsr(MxcsrFor(value, _mm_getcsr()));
+    SetHostFpControl(GuestFpControl(value, HostFpControl()));
 }
 
 MSR_AOT_INLINE float F(const Ctx& c, u32 i) {
@@ -363,12 +404,29 @@ MSR_AOT_INLINE double NanD(const Ctx& c, double x) {
     }
     return x;
 }
+#if MSR_AOT_HOST_SSE
 MSR_AOT_INLINE float SqrtF(float x) {
     return _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(x)));
 }
 MSR_AOT_INLINE double SqrtD(double x) {
     return _mm_cvtsd_f64(_mm_sqrt_sd(_mm_set_sd(0.0), _mm_set_sd(x)));
 }
+/// Double to 64-bit integer, toward zero or with the current rounding mode.
+MSR_AOT_INLINE s64 ToS64(double x, bool toward_zero) {
+    return toward_zero ? _mm_cvttsd_si64(_mm_set_sd(x)) : _mm_cvtsd_si64(_mm_set_sd(x));
+}
+#else
+MSR_AOT_INLINE float SqrtF(float x) {
+    return vget_lane_f32(vsqrt_f32(vdup_n_f32(x)), 0);
+}
+MSR_AOT_INLINE double SqrtD(double x) {
+    return vget_lane_f64(vsqrt_f64(vdup_n_f64(x)), 0);
+}
+/// Double to 64-bit integer, toward zero or with the current rounding mode (FRINTX), saturating.
+MSR_AOT_INLINE s64 ToS64(double x, bool toward_zero) {
+    return vcvtd_s64_f64(toward_zero ? x : vget_lane_f64(vrndx_f64(vdup_n_f64(x)), 0));
+}
+#endif
 MSR_AOT_INLINE u32 AbsBits(u32 v) {
     return v & 0x7FFFFFFFu;
 }
@@ -389,11 +447,11 @@ MSR_AOT_INLINE void Compare(Ctx& c, T a, T b) {
 inline u32 ToS32(double x, bool toward_zero) {
     if (x != x) return 0;
     if (x >= 2147483648.0) {
-        const s64 i = toward_zero ? _mm_cvttsd_si64(_mm_set_sd(x)) : _mm_cvtsd_si64(_mm_set_sd(x));
+        const s64 i = ToS64(x, toward_zero);
         if (x >= 4.0e18 || i > 0x7FFFFFFF) return 0x7FFFFFFFu;
     }
     if (x <= -2147483649.0) return 0x80000000u;
-    const s64 i = toward_zero ? _mm_cvttsd_si64(_mm_set_sd(x)) : _mm_cvtsd_si64(_mm_set_sd(x));
+    const s64 i = ToS64(x, toward_zero);
     if (i > 0x7FFFFFFF) return 0x7FFFFFFFu;
     if (i < -0x80000000LL) return 0x80000000u;
     return static_cast<u32>(static_cast<s32>(i));
@@ -402,10 +460,10 @@ inline u32 ToU32(double x, bool toward_zero) {
     if (x != x) return 0;
     if (x >= 4294967296.0) return 0xFFFFFFFFu;
     if (x <= -1.0) {
-        const s64 i = toward_zero ? _mm_cvttsd_si64(_mm_set_sd(x)) : _mm_cvtsd_si64(_mm_set_sd(x));
+        const s64 i = ToS64(x, toward_zero);
         if (i < 0) return 0;
     }
-    const s64 i = toward_zero ? _mm_cvttsd_si64(_mm_set_sd(x)) : _mm_cvtsd_si64(_mm_set_sd(x));
+    const s64 i = ToS64(x, toward_zero);
     if (i < 0) return 0;
     if (i > 0xFFFFFFFFLL) return 0xFFFFFFFFu;
     return static_cast<u32>(i);

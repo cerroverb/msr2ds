@@ -57,18 +57,38 @@ QString RomInfo::Region() const {
 }
 
 QString Root() {
+#ifdef __APPLE__
+    // In an app bundle (SamusReturns.app/Contents/MacOS) the game folder is the one holding
+    // the bundle: data written inside it would break its signature and go with each rebuild.
+    QDir bundle(QCoreApplication::applicationDirPath());
+    if (bundle.dirName() == QStringLiteral("MacOS") && bundle.cdUp() &&
+        bundle.dirName() == QStringLiteral("Contents") && bundle.cdUp() &&
+        bundle.dirName().endsWith(QStringLiteral(".app")) && bundle.cdUp()) {
+        return bundle.absolutePath();
+    }
+#endif
     return QCoreApplication::applicationDirPath();
 }
 
 QString User() {
     static const QString user = [] {
-        // An AppImage runs from a read-only mount: its data goes to a user/ folder beside the
-        // AppImage file when there is one (portable), otherwise to the user's data folder.
-        const QString appimage = qEnvironmentVariable("APPIMAGE");
-        if (appimage.isEmpty()) {
+        // An AppImage runs from a read-only mount, and macOS runs a downloaded app from a
+        // read-only copy until it is moved (App Translocation), or keeps it in /Applications:
+        // their data goes to a user/ folder beside the AppImage file or the app when there is one
+        // (portable), otherwise to the user's data folder (~/.local/share, Application Support).
+        QString beside;
+        if (const QString appimage = qEnvironmentVariable("APPIMAGE"); !appimage.isEmpty()) {
+            beside = QFileInfo(appimage).absolutePath();
+        }
+#ifdef __APPLE__
+        if (Root() != QCoreApplication::applicationDirPath()) {
+            beside = Root();
+        }
+#endif
+        if (beside.isEmpty()) {
             return Root() + QStringLiteral("/user/");
         }
-        const QString portable = QFileInfo(appimage).absolutePath() + QStringLiteral("/user/");
+        const QString portable = beside + QStringLiteral("/user/");
         if (QFileInfo(portable).isDir()) {
             return portable;
         }

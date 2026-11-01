@@ -258,7 +258,11 @@ void EmuWindow::UpdateCurrentFramebufferLayout(u32 width, u32 height, bool is_po
     if (render_full_stereo) {
         width = width / 2;
     }
-    if (is_portrait_mode) {
+    if (MSR::Presentation::enabled) {
+        // The single screen whatever the orientation: letterboxed when a phone is held upright.
+        layout = Layout::MsrSingleScreenLayout(width, height, MSR::Presentation::widescreen,
+                                               MSR::Presentation::panel_scale);
+    } else if (is_portrait_mode) {
         switch (portrait_layout_option) {
         case Settings::PortraitLayoutOption::PortraitTopFullWidth:
             layout = Layout::PortraitTopFullFrameLayout(width, height,
@@ -275,9 +279,6 @@ void EmuWindow::UpdateCurrentFramebufferLayout(u32 width, u32 height, bool is_po
                                                     Settings::values.upright_screen.GetValue());
             break;
         }
-    } else if (MSR::Presentation::enabled) {
-        layout = Layout::MsrSingleScreenLayout(width, height, MSR::Presentation::widescreen,
-                                               MSR::Presentation::panel_scale);
     } else {
         switch (layout_option) {
         case Settings::LayoutOption::CustomLayout:

@@ -10,8 +10,9 @@
 
 *Metroid: Samus Returns* as a single-screen PC game, built on the Azahar 3DS
 emulator. You need your own decrypted dump of the game (USA): none is included,
-and nothing from the game is in this repository. Windows and Linux downloads are
-on the [releases page](https://github.com/gminustwo/msr2ds/releases).
+and nothing from the game is in this repository. Windows, macOS, Linux (x86-64
+and ARM64) and Android downloads are on the
+[releases page](https://github.com/gminustwo/msr2ds/releases).
 
 One 16:9 screen in the style of *Metroid Dread*. Energy and missiles sit at the
 upper left with the Aeion gauge and the beam slots (the usual beam, Ice and
@@ -65,12 +66,24 @@ Vulkan and audio.
 
 ## Play
 
-1. Download the Windows zip or the Linux AppImage from the
+1. Download the Windows zip, the macOS zip, the Linux AppImage (`x86_64` or
+   `aarch64`) or the Android APK from the
    [releases page](https://github.com/gminustwo/msr2ds/releases).
 2. Windows: unzip it anywhere and run `SamusReturns.exe`. Linux: make the
-   AppImage executable (`chmod +x`) and run it.
+   AppImage executable (`chmod +x`) and run it. macOS (Apple Silicon, macOS 13.4
+   or newer): unzip it and open `SamusReturns.app`. The app is not notarized:
+   the first time, macOS refuses to open it; choose Open Anyway in System
+   Settings, Privacy & Security.
 3. The launcher asks for your decrypted dump (`.3ds` or `.cci`) the first time
    and remembers it. Press Play.
+
+**Android** (arm64, Android 10 or newer, Vulkan): install the APK. The app's
+setup asks for a user folder and a games folder; put the dump in a folder of
+its own (Android does not let apps use `Download` itself). It is Azahar's
+Android app with this port's single 16:9 screen, 60 FPS and the galleries and
+Fusion Mode open; the launcher, the settings overlay, mods and the randomizer
+are PC only for now. Menus show the bottom screen as a panel you can touch, and
+the on-screen buttons can be moved in the in-game menu.
 
 Afterwards `SamusReturns-Direct.exe` (Linux: `--play`) skips the launcher. It
 needs a GPU with Vulkan. The first start uses a 4K internal resolution: lower it
@@ -78,6 +91,10 @@ in the launcher's Display tab on a weaker GPU. No texture pack is included;
 Citra and Azahar packs work (see [Texture packs](#texture-packs)).
 
 **Steamdeck stick to around 4x (960p) for performance.**
+
+On a Mac, Metal compiles each new shader the first time it is used (about a
+tenth of a second), so effects make the game pause briefly the first time they
+appear. macOS keeps what it compiled: they do not pause again.
 
 **Widescreen** follows DekUI's renderer approach. Depth-tested draws in the top
 viewport (the 3D world) are squeezed by 15/16 on the display's horizontal axis
@@ -109,6 +126,59 @@ bundles into `build-windows/bundle/`. Later, `bash tools/msr/windows/build.sh`
 rebuilds the same folder (still recompiled) after source changes. It embeds code
 translated from the game: keep it for your own use. Only the JIT build can be
 shared.
+
+### macOS (Apple Silicon or Intel)
+
+Xcode's command line tools, CMake and Ninja. Azahar's CMake downloads Qt and
+MoltenVK, and SDL2 is its bundled copy.
+
+```sh
+git submodule update --init --recursive   # first time only
+bash tools/msr/macos/build.sh                          # JIT -> build-macos/bundle/
+bash tools/msr/macos/build_recomp.sh <dump.cci>        # recompiled, same folder
+```
+
+`build_recomp.sh` makes a Python venv with capstone in `build-macos-venv/` the
+first time. The app is `build-macos/bundle/Samus Returns.app`. A `user` folder
+beside the app keeps it portable; without one, its data goes to
+`~/Library/Application Support/samus-returns-recomp`. On AArch64 the
+recompiled code takes the guest's rounding, flush-to-zero and default-NaN modes
+into FPCR, where x86-64 uses MXCSR. The Randomizer tab's download fetches
+Randovania's Windows or Linux release only; on a Mac, point Locate at your own
+Randovania.
+
+`bash tools/msr/macos/build_linux.sh` builds the Linux AppImage on a Mac, in a
+Lima VM (`brew install lima`): Ubuntu 24.04 with the Containerfile's packages,
+on the Mac's architecture, so Apple Silicon gives the `aarch64` AppImage.
+`PUBLIC=1` makes the public one; otherwise it takes the recompiled code in
+`build-macos/msr-recomp/generated`.
+
+### Android (Android Studio)
+
+Azahar's Android app (`src/android`), as `io.github.gminustwo.msr2ds`
+("Samus Returns", installed beside Azahar), arm64 only. It boots into the
+single-screen presentation with the PC builds' defaults (`ApplySamusReturns`
+in `jni/native.cpp`): Vulkan, 60 FPS, the galleries and Fusion Mode open. A
+phone held upright shows the same 16:9 view, letterboxed.
+
+Needs the Android SDK with NDK 27.3.13750724 and CMake 3.31 (Android Studio's
+SDK Manager), and a JDK 21: Gradle 8.14 does not run on the Java 25 that
+Android Studio bundles, so `gradle/gradle-daemon-jvm.properties` asks for 21
+(Settings > Build Tools > Gradle > Gradle JDK). Open `src/android` in Android
+Studio, or:
+
+```sh
+cd src/android
+JAVA_HOME=<jdk 21> ./gradlew assembleVanillaRelease
+# -> app/build/outputs/apk/vanilla/release/app-vanilla-release.apk
+```
+
+Without a key it is signed with the debug key; `ANDROID_KEYSTORE_FILE`,
+`ANDROID_KEYSTORE_PASS` and `ANDROID_KEY_ALIAS` sign it with yours. For the
+recompiled code, set `msr.recomp.dir=<generated>` in
+`src/android/local.properties` (or `MSR_RECOMP_DIR`); without it the game runs
+on the JIT. That APK embeds code translated from the game: keep it for your
+own use.
 
 ### Releases (1.0)
 
@@ -189,7 +259,10 @@ location is remembered. Only decrypted Samus Returns dumps are accepted
 since the emulator cannot boot them. Tested with the USA release, title
 `00040000001BB200`.
 
-Everything lives in `user/` beside the exe:
+Everything lives in `user/` beside the exe (the macOS app and the AppImage:
+beside them if that folder exists, otherwise in
+`~/Library/Application Support/samus-returns-recomp` or
+`~/.local/share/samus-returns-recomp`):
 
 - saves: `user/sdmc`
 - emulator config: `user/config/qt-config.ini`
