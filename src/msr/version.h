@@ -9,8 +9,8 @@ namespace MSR {
 /// The port's name and version, shown in the launcher and written to the log. Packages are named
 /// after them (tools/msr/package_release.py).
 inline constexpr char ProjectName[] = "msr2ds";
-inline constexpr char Version[] = "1.1.0-pre";
-inline constexpr char VersionLabel[] = "1.1 pre-release";
+inline constexpr char Version[] = "1.1.1-pre";
+inline constexpr char VersionLabel[] = "1.1.1 pre-release";
 /// The GitHub repository whose releases the launcher checks for newer versions
 /// (citra_qt/msr_updates.h).
 inline constexpr char ReleasesRepo[] = "gminustwo/msr2ds";
