@@ -106,6 +106,22 @@ static std::string GetGUID(SDL_Joystick* joystick) {
     return guid_str;
 }
 
+/// Holds SDL's joystick lock for a scope. SDL holds it while it calls SDLEventWatcher, which locks
+/// joystick_map_mutex, so code that calls SDL with the map locked takes this first: the other
+/// order deadlocks against the poll thread (the Steam Deck's motion sensors send it events
+/// nonstop).
+class SDLJoysticksLock {
+public:
+    SDLJoysticksLock() {
+        SDL_LockJoysticks();
+    }
+    ~SDLJoysticksLock() {
+        SDL_UnlockJoysticks();
+    }
+    SDLJoysticksLock(const SDLJoysticksLock&) = delete;
+    SDLJoysticksLock& operator=(const SDLJoysticksLock&) = delete;
+};
+
 /// Creates a ParamPackage from an SDL_Event that can directly be used to create a ButtonDevice
 static Common::ParamPackage SDLEventToButtonParamPackage(SDLState& state, const SDL_Event& event);
 
@@ -260,6 +276,7 @@ std::shared_ptr<std::vector<std::shared_ptr<SDLJoystick>>> SDLState::GetJoystick
  */
 std::shared_ptr<SDLJoystick> SDLState::GetSDLJoystickBySDLID(SDL_JoystickID sdl_id) {
     // rewriting this method, the old version was more fragile
+    const SDLJoysticksLock sdl_lock;
     std::lock_guard lock{joystick_map_mutex};
 
     for (auto& [guid, joystick_list] : joystick_map) {
@@ -295,6 +312,7 @@ static std::string ControllerFamily(SDL_GameController* controller) {
 }
 
 std::vector<Common::ParamPackage> SDLState::GetConnectedGameControllers() {
+    const SDLJoysticksLock sdl_lock;
     std::lock_guard lock{joystick_map_mutex};
     std::vector<Common::ParamPackage> controllers;
     for (const auto& [guid, joystick_list] : joystick_map) {
@@ -405,6 +423,8 @@ void SDLState::InitJoystick(int joystick_index) {
     LOG_INFO(Input, "Gamepad connected: \"{}\", GUID {}{}", SDL_JoystickName(sdl_joystick), guid,
              sdl_gamecontroller ? "" : " (joystick only, not used by gamepad bindings)");
 
+    // New SDLJoysticks query SDL as they are made
+    const SDLJoysticksLock sdl_lock;
     std::lock_guard lock{joystick_map_mutex};
     if (joystick_map.find(guid) == joystick_map.end()) {
         auto joystick = std::make_shared<SDLJoystick>(guid, 0, sdl_joystick, sdl_gamecontroller);
@@ -490,6 +510,7 @@ void SDLState::HandleGameControllerEvent(const SDL_Event& event) {
 }
 
 void SDLState::CloseJoysticks() {
+    const SDLJoysticksLock sdl_lock; // Each SDLJoystick closes its SDL handles as it goes
     std::lock_guard lock{joystick_map_mutex};
     joystick_map.clear();
     joystick_vector->clear();
