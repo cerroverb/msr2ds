@@ -575,8 +575,8 @@ int video_init(int scale) {
                        (int)f13.shaderDemoteToHelperInvocation);
     VK(vkCreateDevice(phys, &dci, NULL, &dev));
     if (vk13) vk_push_init(dev, has_push);
-#ifdef __ANDROID__
-    { extern void msr_vk13_load(VkDevice d); if (vk13) msr_vk13_load(dev); }   /* vk13_android.c */
+#ifdef MSR_VK13_FROM_DEVICE
+    { extern void msr_vk13_load(VkDevice d); if (vk13) msr_vk13_load(dev); }   /* vk13_load.c */
 #endif
     vkGetDeviceQueue(dev, qfam, 0, &queue);
     /* swapchain format first (the presenter's target uses it), then the presenter, then the swapchain-sized resources */

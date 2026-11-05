@@ -112,13 +112,19 @@ set(MSR_NATIVE_SOURCES
 if (ANDROID)
     # The Android app (native/android): this program as libmain.so, which SDL's Java side loads and runs (SDL_main);
     # runtime/android.c is what it asks of the app's Java side (MsrActivity)
-    add_library(msr-native SHARED ${MSR_NATIVE_SOURCES} runtime/android.c runtime/vk13_android.c)
+    add_library(msr-native SHARED ${MSR_NATIVE_SOURCES} runtime/android.c)
     set_target_properties(msr-native PROPERTIES OUTPUT_NAME main)
     target_link_libraries(msr-native PRIVATE android log)
     # The guest's floating point as the 3DS computes it: no fused multiply-adds (AArch64 compilers fuse by default)
     target_compile_options(msr-native PRIVATE -ffp-contract=off)
 else()
     add_executable(msr-native ${MSR_NATIVE_SOURCES})
+endif()
+if (ANDROID OR WIN32)
+    # Vulkan 1.3's functions from the device, not the Vulkan library (runtime/vk13_load.c): Android's has none of them,
+    # and Windows' may be older than 1.3, where the program must still start (and render on the CPU)
+    target_sources(msr-native PRIVATE runtime/vk13_load.c)
+    target_compile_definitions(msr-native PRIVATE MSR_VK13_FROM_DEVICE)
 endif()
 if (MSR_A64)
     target_include_directories(msr-native BEFORE PRIVATE ${MSR_AOT_DIR}/a64)   # <emmintrin.h>, <xmmintrin.h>

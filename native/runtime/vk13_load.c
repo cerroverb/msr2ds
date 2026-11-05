@@ -1,7 +1,8 @@
-/* The Vulkan 1.3 functions the renderer calls (dynamic rendering, extended dynamic state), for the Android app: the
- * NDK's libvulkan.so exports only Vulkan 1.1's, so these are the device's own, looked up once it exists
- * (msr_vk13_load from video.c; the KHR and EXT names of the extensions they came from, where the core name is not
- * there). */
+/* The Vulkan 1.3 functions the renderer calls (dynamic rendering, extended dynamic state), looked up from the device
+ * once it exists instead of linked (msr_vk13_load from video.c, when the device has Vulkan 1.3; the KHR and EXT names
+ * of the extensions they came from, where the core name is not there). The Android app: the NDK's libvulkan.so exports
+ * only Vulkan 1.1's. Windows: a vulkan-1.dll older than 1.3 has none of them, and linked,
+ * the program would not start at all, where without them it renders on the CPU (video.c). */
 #include <stdio.h>
 #include <vulkan/vulkan.h>
 
