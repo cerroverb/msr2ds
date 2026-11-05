@@ -538,7 +538,9 @@ extern "C" void msr_overlay_frame(void) {
         case Kind::Layout:
             break;   // the compositor reads the presentation settings each frame
         case Kind::FrameRate:
-            main_set_frame_rate(O().GetPlayerSettings().frame_rate);
+            // In the launcher there is no game: its memory is not set up (rt_mem_init), and rewriting its code there
+            // crashed (#28). The rate is saved with the settings, and the game applies it when it starts (main.c).
+            if (!launcher_mode) main_set_frame_rate(O().GetPlayerSettings().frame_rate);
             break;
         case Kind::QuickSave:
             msr_state_quick_save();   // state.c
