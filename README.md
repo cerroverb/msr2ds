@@ -8,8 +8,8 @@
 
 > **No game files are included.**
 
-*Metroid: Samus Returns* as a single-screen PC game, built on the Azahar 3DS
-emulator. You need your own decrypted dump of the game (USA): none is included,
+*Metroid: Samus Returns* as a native, single-screen PC game. This is a full PC Port. It is no longer built on emulation.
+You need your own decrypted dump of the game (USA): none is included,
 and nothing from the game is in this repository. Windows, macOS, Linux (x86-64
 and ARM64) and Android downloads are on the
 [releases page](https://github.com/gminustwo/msr2ds/releases).
@@ -19,18 +19,38 @@ upper left with the Aeion gauge and the beam slots (the usual beam, Ice and
 Grapple) under them, and the map is at the upper right with the DNA and Metroid
 counts below it. Start brings up the game's own bottom screen (map, inventory,
 options); the right trigger switches between the usual, Ice and Grapple Beams.
-It renders in widescreen up to 4K internal resolution, at 30 (the original), 60,
+It renders in widescreen up to 4K internal resolution, at 30 (the original), 60, 90,
 120 or 144 frames per second, and loads texture packs. A launcher picks the game
 dump and holds the settings, which are also in an in-game overlay (F1 or Select).
 
-It follows the approach of **DekUI**, a *Majora's Mask 3D* port: a fork of the
-Azahar 3DS emulator, turned into a single-game player by a game module in
-`src/msr/` and a few guarded hooks. Azahar is pinned at **2126.2**; its own
-README is now `README-AZAHAR.md`. Released builds run the game on Azahar's JIT
-CPU. Built from your own dump, the game's ARM code can instead be recompiled
-ahead of time into C++, for your own use (see [Recompiled build](#recompiled-build)).
-Either way, Azahar provides the 3DS system services, PICA GPU emulation on
-Vulkan and audio.
+## Features
+
+- All play occurs on a single 16:9 screen, with full controller or keyboard support
+- Unlock amiibo galleries
+- All difficulty modes available from start (Hard, Fusion)
+- Fusion suit on any difficulty (and able to swap between on the fly)
+- 4K+ resolution
+- 30 (original), 60, 120, 144 FPS support
+- Vsync
+- HDR support
+- Ultrawide 32:9 support
+- HUD controls (turn off/on each element & change their size)
+- Texture Pack support
+- Cheats: Infinite energy, infinite missiles and bombs, unlimited Aeion
+- Save states (experimental)
+- Bloom toggle
+- Camera zoom (try this out. It's fun)
+- Nintendo controller layout is off by default. A is accept, B is back in menus but A is jump in gameplay. This is configurable
+- Mod support
+- Steamdeck preset mode to get 60fps performance
+
+## Extra controls
+
+- Left trigger auto-morphballs like Metroid Dread
+- Right trigger cycles between beams
+- Start pulls up map and lower screen options
+- Select pulls up program options
+- Aeion abilities mapped to the right-stick, D-pad moves
 
 ![Title screen](images/title.jpg)
 
@@ -44,25 +64,10 @@ Vulkan and audio.
   <img src="images/samus3.jpg" width="32%" alt="A Metroid, with the late-game HUD">
 </p>
 
-## Features
-
-- All play occurs on a single 16:9 screen, with full controller or keyboard support
-- Unlock amiibo galleries
-- Unlock Fusion Mode
-- Fusion suit on any difficulty (and able to swap between on the fly)
-- 4K+ resolution
-- 30 (original), 60, 120, 144 FPS support
-- Vsync
-- HUD controls
-- Texture Pack support
-- Cheats: Infinite energy, infinite missiles and bombs, unlimited Aeion
-
-## Extra controls
-
-- Left trigger auto-morphballs like Metroid Dread
-- Right trigger cycles between beams
-- Start pulls up map and lower screen options
-- Select pulls up program options
+## Known issues
+- Occasionally the bottom screen elements glitch/flicker on the screen. This is known and being working on.
+- On Steamdeck (or slower systems) it may take awhile to do the initial install (30+ min).
+- If the exe closes randomly when installing, re-open and it should work. This is a known bug.
 
 ## Play
 
