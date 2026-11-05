@@ -1388,6 +1388,59 @@ void Overlay::DrawLauncher(const LauncherSnapshot& l, float label_width,
     }
     ImGui::EndGroup();
     ImGui::Spacing();
+
+    // Saves from a 3DS (a Checkpoint or JKSM backup) or another emulator, in place of the ones here. The
+    // confirmation's buttons take the IDs of the two they replace, so a pad's focus stays on the first.
+    using Saves = LauncherSnapshot::Saves;
+    Label("Saves", label_width);
+    ImGui::BeginGroup();
+    ImGui::PushTextWrapPos(0.f);
+    {
+        const float half = (ImGui::GetContentRegionAvail().x - style.ItemSpacing.x) / 2.f;
+        if (l.saves == Saves::Confirm) {
+            ImGui::TextColored(accent, "Import the saves in %s?", l.saves_from.c_str());
+            Note(l.saves_detail.c_str());
+            Note("They replace all three files here. The current ones are kept in user/msr/save-backups.");
+            if (ImGui::Button("Import###saves_a", {half, 0.f})) {
+                Act(OverlayAction::Kind::LauncherImportConfirm);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel###saves_b", {half, 0.f})) {
+                Act(OverlayAction::Kind::LauncherImportCancel);
+            }
+        } else {
+#ifndef __ANDROID__   // msr-native's Android app: no dialogs or folders to open (a PC copies the saves over USB)
+            ImGui::BeginDisabled(l.saves == Saves::Searching);
+            if (l.can_browse) {
+                if (ImGui::Button("Import saves...###saves_a", {half, 0.f})) {
+                    Act(OverlayAction::Kind::LauncherImportSaves);
+                }
+                ImGui::SameLine();
+            }
+            if (ImGui::Button("Open saves folder###saves_b", {l.can_browse ? half : -FLT_MIN, 0.f})) {
+                Act(OverlayAction::Kind::LauncherSavesFolder);
+            }
+            ImGui::EndDisabled();
+#endif
+            if (l.saves == Saves::Done) {
+                ImGui::TextColored(good, "%s", l.saves_note.c_str());
+            } else if (l.saves == Saves::Failed) {
+                ImGui::TextColored(bad, "%s", l.saves_note.c_str());
+            } else if (l.saves == Saves::Searching) {
+                Note(l.saves_note.c_str());
+            } else if (l.can_browse) {
+                Note("From a 3DS (a Checkpoint or JKSM backup) or another emulator (Citra, Lime3DS, Azahar): "
+                     "choose the folder they are in.");
+            } else {
+                Note(("From a 3DS or another emulator: copy its profile0, profile1 and profile2 folders into " +
+                      l.saves_folder + ".").c_str());
+            }
+        }
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::EndGroup();
+    ImGui::Spacing();
+
     Note((l.version + ": the game's code runs as native code built from your own dump, on a small "
           "3DS runtime of its own. Nothing of the game comes with this program.").c_str());
     ImGui::Separator();

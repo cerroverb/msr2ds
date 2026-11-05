@@ -169,6 +169,15 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   game ended and after a change in the menu: after a first install a pack copied in stayed unlisted, though the game
   loaded it. A scan that began before a change in the menu is dropped, and `ini.cpp` reads or replaces a file under
   one lock (on Windows a file open in one thread cannot be replaced from another).
+- Save import (2026-11-04, the launcher's Game tab, `launcher.cpp` the saves section; the emulator-based build's
+  `src/msr/saves.cpp`, which went with it): Import saves... asks for a folder (the shell's folder picker; zenity or
+  kdialog on Linux) and looks under it, 12 folders deep and 20000 folders at most on a worker thread, for one holding
+  `profileN` folders with `.bmssv` files: a Checkpoint or JKSM backup, an emulator's `.../001bb200/data/00000001`, an
+  installation's `native-save/savedata`. The game's title folder comes first, then saves in use before a launcher's
+  `save-backups`, then the newest; the saves here are never offered. Once confirmed, the folder is copied beside the
+  saves, the current ones are copied to `user/msr/save-backups/<date-time>/savedata`, and the copy takes their place
+  (a failure leaves them as they were). Azahar's `00000001.metadata` is not needed. Open saves folder shows
+  `user/native-save/savedata`.
 - Code the module lacks (reached only through pointers computed at run time): `interp_full.c` interprets it (ARMv6K
   ARM and Thumb, VFPv2) until the module's code is reached, where the emulator build uses its JIT. Each such address
   is logged once and added to `user/msr/recomp-jit-entries-core-native.txt`, which the launcher's next build of the

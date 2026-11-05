@@ -57,8 +57,10 @@ Everything goes in the user folder ("Open the user folder" on the Game tab):
 - Windows: user\ beside msr-native.exe
 - Linux: ~/.local/share/msr-native/user, or a user/ folder beside the AppImage if you make one
 It holds your saves (native-save), settings, the native code and its build tools, game mods
-(mods/game) and texture packs (mods/textures). Saves from an emulator go in
-native-save/savedata/profile0, profile1 and profile2.
+(mods/game) and texture packs (mods/textures). To bring saves from a 3DS or an emulator, use
+"Import saves..." on the Game tab and choose the folder they are in (a Checkpoint or JKSM
+backup, or the emulator's folder); your current saves are kept in msr/save-backups. Or copy
+them into native-save/savedata/profile0, profile1 and profile2.
 
 Controls
 --------

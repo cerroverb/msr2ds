@@ -562,6 +562,10 @@ extern "C" void msr_overlay_frame(void) {
         case Kind::LauncherFolder:
         case Kind::LauncherUpdate:
         case Kind::LauncherUpdatePage:
+        case Kind::LauncherImportSaves:
+        case Kind::LauncherImportConfirm:
+        case Kind::LauncherImportCancel:
+        case Kind::LauncherSavesFolder:
             msr_launcher_action(static_cast<int>(action.kind), action.text.c_str());
             break;
         case Kind::Quit:

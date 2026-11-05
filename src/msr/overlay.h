@@ -163,6 +163,14 @@ struct LauncherSnapshot {
     /// msr-native on a PC: the Android app's native code can be built too (Build for Android)
     bool android_build = false;
     std::string android_note; ///< The Android build's result: where to copy it, or what failed
+    /// Save import (launcher.cpp, the saves section): the saves of a 3DS backup or another emulator,
+    /// looked for under a folder the player chooses, then put in place of the ones here once confirmed
+    enum class Saves { Idle, Searching, Confirm, Done, Failed };
+    Saves saves = Saves::Idle;
+    std::string saves_from;   ///< Confirm: the folder holding the saves found
+    std::string saves_detail; ///< Confirm: how many files, when last saved, other save folders there
+    std::string saves_note;   ///< Searching: where; Done: where the previous saves went; Failed: why
+    std::string saves_folder; ///< Where the game keeps its saves
 };
 
 struct OverlayAction {
@@ -200,6 +208,10 @@ struct OverlayAction {
         LauncherFolder,   ///< Open the user folder
         LauncherUpdate,   ///< Download the newer release and put it in place
         LauncherUpdatePage, ///< Open the newer release's page (what's new; its download)
+        LauncherImportSaves,   ///< Choose a folder with saves to import (a folder dialog, then a search)
+        LauncherImportConfirm, ///< Import the saves found
+        LauncherImportCancel,  ///< Leave the saves found
+        LauncherSavesFolder,   ///< Open the saves folder
     };
     Kind kind;
     EmulatorSettings emulator{};

@@ -202,7 +202,7 @@ if(WIN32)
   endif()
   target_sources(msr-native PRIVATE runtime/win/pwr.rc runtime/win/hdr_win.c)
   set_source_files_properties(runtime/win/pwr.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/win/pwr.manifest;${CMAKE_CURRENT_SOURCE_DIR}/runtime/win/msr-native.ico")
-  target_link_libraries(msr-native PRIVATE winmm shell32 dxgi dwmapi comdlg32)
+  target_link_libraries(msr-native PRIVATE winmm shell32 dxgi dwmapi comdlg32 ole32 uuid)   # ole32, uuid: the folder dialog
   # a window program: no console opens with it (the launcher logs to user/launcher.log, the game to the file it is given)
   set_target_properties(msr-native PROPERTIES WIN32_EXECUTABLE TRUE)
   # msr-native-direct.exe (runtime/win/direct.c): the game without the launcher. It is inside msr-native.exe (resource

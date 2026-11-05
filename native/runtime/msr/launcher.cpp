@@ -11,7 +11,9 @@
 //   - updates: a newer release on GitHub, offered when the launcher starts and put in place of this installation's own
 //     files (the updates section below);
 //   - the direct start: once the native code is built, msr-native-direct.exe beside the program (msr-native-direct.sh
-//     beside the AppImage) starts the game without the launcher (the direct start section below).
+//     beside the AppImage) starts the game without the launcher (the direct start section below);
+//   - saves: Import saves... brings the player's saves from a 3DS backup or another emulator's folder, in place of the
+//     ones here (the saves section below).
 // The user folder: beside the program (Windows, a portable folder; Linux when a user/ folder is there, also beside the
 // AppImage), else the system's (%LOCALAPPDATA%\msr-native, ~/.local/share/msr-native); MSR_NATIVE_HOME overrides it.
 // The Android app (native/android): the user folder is the app's on the shared storage (Android/data/<app>/files/user),
@@ -21,11 +23,13 @@
 // (android.c); there are no file dialogs, folders to open, updates or direct start there.
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -39,6 +43,7 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <SDL_syswm.h>
 #else
 #include <fcntl.h>
@@ -110,6 +115,10 @@ std::string Narrow(const std::wstring& w) {
     return s;
 }
 #endif
+std::string Lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return s;
+}
 std::string Trim(std::string s) {
     while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
     std::size_t i = 0;
@@ -494,6 +503,11 @@ struct State {
     bool android_build = false;   // the build under way is the Android app's (Build for Android)
     Code code_before = Code::Missing;   // the native code's state before it, shown again after it
     std::string android_note;     // the Android build's result: where it is, or what failed
+    // save import (the saves section below)
+    Snapshot::Saves saves = Snapshot::Saves::Idle;
+    fs::path saves_from;          // the saves found, waiting for the player's confirmation
+    std::string saves_detail, saves_note;
+    std::thread saves_worker;     // the search
 } S;
 
 void WriteDirect();   // the direct start section
@@ -850,6 +864,14 @@ bool CanBrowse() {
 #endif
 }
 
+#ifdef _WIN32
+HWND DialogOwner() {   // the launcher's window, so the dialog stays in front of it
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    return video_window() && SDL_GetWindowWMInfo(video_window(), &info) ? info.info.win.window : nullptr;
+}
+#endif
+
 std::string Browse(const std::string& current) {
 #ifdef _WIN32
     wchar_t file[4096] = L"";
@@ -857,9 +879,7 @@ std::string Browse(const std::string& current) {
     if (!start.empty() && start.size() < 4095) std::wcscpy(file, start.c_str());
     OPENFILENAMEW of{};
     of.lStructSize = sizeof of;
-    SDL_SysWMinfo info;
-    SDL_VERSION(&info.version);
-    if (video_window() && SDL_GetWindowWMInfo(video_window(), &info)) of.hwndOwner = info.info.win.window;
+    of.hwndOwner = DialogOwner();
     of.lpstrFilter = L"3DS game dumps (*.3ds, *.cci, *.cxi, *.zcci, *.zcxi)\0*.3ds;*.cci;*.cxi;*.zcci;*.zcxi\0All files\0*.*\0";
     of.lpstrFile = file;
     of.nMaxFile = 4096;
@@ -882,6 +902,48 @@ std::string Browse(const std::string& current) {
 #endif
 }
 
+// A folder, chosen with the system's dialog ("" when cancelled). Windows: the shell's folder picker (COM, on this
+// thread: SDL's window thread, already a single-threaded apartment); Linux: zenity or kdialog, as Browse.
+std::string BrowseFolder(const char* title) {
+#ifdef _WIN32
+    std::string out;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    IFileOpenDialog* dialog = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_IFileOpenDialog,
+                                   reinterpret_cast<void**>(&dialog)))) {
+        FILEOPENDIALOGOPTIONS options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+        const std::wstring wide = Wide(title);
+        dialog->SetTitle(wide.c_str());
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->Show(DialogOwner())) && SUCCEEDED(dialog->GetResult(&item))) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                out = Narrow(path);
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+        dialog->Release();
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+    return out;
+#else
+    const std::string t = title;
+    const std::string cmd = std::system("command -v zenity >/dev/null 2>&1") == 0
+        ? "env -u LD_LIBRARY_PATH zenity --file-selection --directory --title='" + t + "' 2>/dev/null"
+        : "env -u LD_LIBRARY_PATH kdialog --title '" + t + "' --getexistingdirectory ~ 2>/dev/null";
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) return {};
+    char buf[4096];
+    std::string out;
+    while (std::fgets(buf, sizeof buf, p)) out += buf;
+    pclose(p);
+    return Trim(out);
+#endif
+}
+
 void OpenFolder(const fs::path& dir) {
     std::error_code e;
     fs::create_directories(dir, e);
@@ -893,6 +955,300 @@ void OpenFolder(const fs::path& dir) {
     Child c;
     if (Spawn({"xdg-open", Utf8(dir)}, {}, false, {}, true, c)) std::thread([c]() mutable { Poll(c, true); Close(c); }).detach();
 #endif
+}
+
+// ---- saves: brought from a 3DS backup or another emulator ----
+// Samus Returns keeps its three files (A, B, C) in one save archive: profile0, profile1 and profile2, each holding
+// samus.bmssv, common.bmssv and pkprfl.bmssv. They are the game's own files, kept as they are everywhere: Azahar,
+// Citra and Lime3DS in sdmc/Nintendo 3DS/<0...>/<0...>/title/00040000/001bb200/data/00000001/ (beside a
+// 00000001.metadata, the archive's format, which is not needed here), Checkpoint and JKSM in their backups' folders,
+// and the game here in <user>/native-save/savedata/ (fs.c, $PWR_SAVE_DIR). Import saves... looks under the folder the
+// player chooses for one holding profileN folders, 12 folders deep at most (a worker thread), and offers the first:
+// this game's title folder first, then an installation's saves before its save-backups, then the newest; when there
+// are none there, the user folder it is in is searched (an emulator's empty save folder in msr2ds 1.x, whose saves
+// were in its native-save folder). Once the player confirms, a copy of that folder takes the place of
+// the saves here, which go to <user>/msr/save-backups/<date-time>/ first. Only before the game starts (the launcher is
+// hidden while it runs), as the emulator-based build's launcher did (its src/msr/saves.cpp).
+struct FoundSave {
+    fs::path folder;                 // holds the profileN folders
+    int files = 0;                   // profileN folders with the game's files
+    fs::file_time_type modified = fs::file_time_type::min();   // the newest file (libstdc++'s file_clock starts in
+                                                               // 2174: today is negative, below a zero time_point)
+    bool this_game = false;          // under the game's title folder (an emulator's 001bb200, Checkpoint's 0x01BB2)
+    bool backup = false;             // in a launcher's save-backups folder: saves an import replaced
+};
+
+fs::path SaveFolder() {   // where the game keeps its saves, from the same working folder (main.c, fs.c)
+    const char* dir = std::getenv("PWR_SAVE_DIR");
+    std::error_code e;
+    return fs::absolute((dir && *dir ? FromUtf8(dir) : fs::path("user") / "native-save") / "savedata", e);
+}
+
+// A path to compare: whole, with the system's separators (and in lower case on Windows), no separator at the end
+std::string PathKey(const fs::path& p) {
+    std::error_code e;
+    fs::path full = fs::weakly_canonical(p, e);
+    if (e || full.empty()) full = fs::absolute(p, e);
+    std::string s = Utf8(full.make_preferred());
+#ifdef _WIN32
+    s = Lower(s);
+#endif
+    while (s.size() > 1 && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+    return s;
+}
+bool Inside(const fs::path& p, const fs::path& dir) {
+    const std::string a = PathKey(p), b = PathKey(dir);
+    return a == b || (a.size() > b.size() && !a.compare(0, b.size(), b) && (a[b.size()] == '/' || a[b.size()] == '\\'));
+}
+
+std::string LocalTime(std::time_t t, const char* format) {
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char buf[64];
+    return std::strftime(buf, sizeof buf, format, &tm) ? buf : "";
+}
+std::time_t TimeOf(fs::file_time_type t) {   // file_clock to the system's (file_clock::to_sys is not everywhere yet)
+    using namespace std::chrono;
+    return system_clock::to_time_t(system_clock::now() +
+                                   duration_cast<system_clock::duration>(t - fs::file_time_type::clock::now()));
+}
+
+// The save in `folder`: its profileN folders that hold the game's files (files 0: none)
+FoundSave SaveAt(const fs::path& folder) {
+    FoundSave save{folder};
+    constexpr auto skip = fs::directory_options::skip_permission_denied;
+    std::error_code e;
+    for (fs::directory_iterator it(folder, skip, e), end; !e && it != end; it.increment(e)) {
+        const std::string name = Utf8(it->path().filename());
+        std::error_code d;
+        if (name.size() != 8 || Lower(name.substr(0, 7)) != "profile" || !std::isdigit(static_cast<unsigned char>(name[7])) ||
+            !it->is_directory(d)) {
+            continue;
+        }
+        bool any = false;
+        std::error_code f;
+        for (fs::directory_iterator file(it->path(), skip, f), fend; !f && file != fend; file.increment(f)) {
+            std::error_code r;
+            if (Lower(Utf8(file->path().extension())) != ".bmssv" || !file->is_regular_file(r)) continue;
+            any = true;
+            save.modified = std::max(save.modified, file->last_write_time(r));
+        }
+        save.files += any;
+    }
+    return save;
+}
+
+// Samus Returns saves under `start`, at any depth up to 12 folders (20000 folders at most, so choosing a whole drive
+// cannot take long): this game's title first, then saves in use before backups, then the newest. Never the saves here.
+std::vector<FoundSave> FindSaves(const fs::path& start) {
+    constexpr int MaxFolders = 20000, MaxDepth = 12;
+    const fs::path own = SaveFolder().parent_path();   // native-save: the saves here, and an import's leftovers there
+    std::vector<FoundSave> found;
+    const auto add = [&](FoundSave save) {
+        if (Inside(save.folder, own)) return;
+        const std::string where = Lower(Utf8(save.folder));
+        save.this_game = where.find("001bb200") != std::string::npos || where.find("0x01bb2") != std::string::npos;
+        save.backup = where.find("save-backups") != std::string::npos;
+        found.push_back(std::move(save));
+    };
+    std::vector<std::pair<fs::path, int>> pending{{start, 0}};
+    for (int visited = 0; !pending.empty() && visited < MaxFolders; ++visited) {
+        const auto [folder, depth] = pending.back();
+        pending.pop_back();
+        if (FoundSave save = SaveAt(folder); save.files > 0) {
+            add(std::move(save));
+            continue;   // a save holds no other saves
+        }
+        if (depth >= MaxDepth) continue;
+        std::error_code e;
+        for (fs::directory_iterator it(folder, fs::directory_options::skip_permission_denied, e), end; !e && it != end;
+             it.increment(e)) {
+            std::error_code d;
+            if (it->is_directory(d) && !it->is_symlink(d)) pending.emplace_back(it->path(), depth + 1);
+        }
+    }
+    if (found.empty()) {   // a folder inside a save (profile0, as the dialog left it chosen): the save around it
+        fs::path folder = start;
+        for (int level = 0; level < 3 && folder.has_relative_path(); ++level) {
+            folder = folder.parent_path();
+            if (FoundSave save = SaveAt(folder); save.files > 0) {
+                add(std::move(save));
+                break;
+            }
+        }
+    }
+    std::stable_sort(found.begin(), found.end(), [](const FoundSave& a, const FoundSave& b) {
+        if (a.this_game != b.this_game) return a.this_game;
+        if (a.backup != b.backup) return b.backup;   // backups keep their files' times: a test file can be the newest
+        return a.modified > b.modified;
+    });
+    return found;
+}
+
+// The user folder `folder` is in: the nearest folder above it with an sdmc folder (an emulator's, msr2ds 1.x's) or a
+// native-save folder (msr-native's) in it; empty when there is none
+fs::path UserFolderOf(const fs::path& folder) {
+    fs::path at = folder;
+    for (int level = 0; level < 12 && at.has_relative_path(); ++level) {
+        at = at.parent_path();
+        std::error_code e, f;
+        if (fs::is_directory(at / "sdmc", e) || fs::is_directory(at / "native-save", f)) return at;
+    }
+    return {};
+}
+
+// Import saves...'s search: under `start`; when none are there, in the user folder `start` is in, which `around` then
+// names. An emulator's save folder can be empty while its installation keeps the saves elsewhere: msr2ds 1.x running
+// without the emulator kept them in user/native-save/savedata, not in user/sdmc/.../001bb200/data/00000001.
+std::vector<FoundSave> SavesFor(const fs::path& start, fs::path& around) {
+    around.clear();
+    std::vector<FoundSave> found = FindSaves(start);
+    if (found.empty()) {
+        if (const fs::path user = UserFolderOf(start); !user.empty() && !(found = FindSaves(user)).empty()) around = user;
+    }
+    return found;
+}
+
+// A copy of the saves in `from` in place of the ones here. The current ones go to <user>/msr/save-backups/<date-time>/
+// first (`backup`: that folder, empty when there were none). "" when done; on failure the saves stay as they were.
+std::string ImportSaves(const fs::path& from, fs::path& backup) {
+    backup.clear();
+    const fs::path target = SaveFolder();
+    fs::path staging = target, previous = target;
+    staging += ".import";
+    previous += ".previous";
+    std::error_code e;
+    fs::remove_all(staging, e);
+    fs::remove_all(previous, e);
+    // copied beside the saves first, so a failed copy changes nothing
+    e.clear();
+    fs::create_directories(staging, e);
+    if (!e) fs::copy(from, staging, fs::copy_options::recursive, e);
+    if (e) {
+        const std::string why = e.message();
+        fs::remove_all(staging, e);
+        return "Could not copy the saves (" + why + ").";
+    }
+    bool current = false;   // saves here (the folder may be there, empty)
+    if (fs::is_directory(target, e)) current = fs::directory_iterator(target, e) != fs::directory_iterator();
+    if (current) {
+        const fs::path backups = S.user / "msr" / "save-backups";
+        const std::string stamp = LocalTime(std::time(nullptr), "%Y-%m-%d_%H-%M-%S");
+        backup = backups / stamp;
+        for (int n = 2; fs::exists(backup, e); ++n) backup = backups / (stamp + "_" + std::to_string(n));
+        e.clear();
+        fs::create_directories(backup, e);
+        if (!e) fs::copy(target, backup / "savedata", fs::copy_options::recursive, e);
+        if (e) {
+            const std::string why = e.message();
+            fs::remove_all(staging, e);
+            backup.clear();
+            return "Could not back up the current saves (" + why + ").";
+        }
+        fs::rename(target, previous, e);
+        if (e) {
+            fs::remove_all(staging, e);
+            return "Could not replace the saves in " + Utf8(fs::path(target).make_preferred()) +
+                   ". Is a window open on that folder?";
+        }
+    } else {
+        fs::remove(target, e);   // an empty folder, if any
+    }
+    e.clear();
+    fs::create_directories(target.parent_path(), e);
+    e.clear();
+    fs::rename(staging, target, e);
+    if (e) {
+        std::error_code r;
+        if (current) fs::rename(previous, target, r);
+        fs::remove_all(staging, r);
+        return "Could not move the imported saves into place (" + e.message() + ").";
+    }
+    fs::remove_all(previous, e);
+    return {};
+}
+
+// Import saves...: the folder dialog, then the search on a worker thread; the overlay asks for the confirmation
+void ChooseSaves() {
+    {
+        std::scoped_lock lock{S.lock};
+        if (S.playing || S.saves == Snapshot::Saves::Searching) return;
+    }
+    const std::string chosen = BrowseFolder("Select the folder with your Samus Returns saves");
+    if (chosen.empty()) return;
+    std::fprintf(stderr, "launcher: saves: looking in %s\n", chosen.c_str());
+    {
+        std::scoped_lock lock{S.lock};
+        S.saves = Snapshot::Saves::Searching;
+        S.saves_from.clear();
+        S.saves_detail.clear();
+        S.saves_note = "Looking for saves in " + chosen + "...";
+        S.dirty = true;
+    }
+    if (S.saves_worker.joinable()) S.saves_worker.join();
+    S.saves_worker = std::thread([chosen] {
+        fs::path around;
+        const std::vector<FoundSave> found = SavesFor(FromUtf8(chosen), around);
+        std::scoped_lock lock{S.lock};
+        S.dirty = true;
+        if (found.empty()) {
+            std::fprintf(stderr, "launcher: saves: none found\n");
+            S.saves = Snapshot::Saves::Failed;
+            S.saves_note = "No Samus Returns saves were found in " + chosen + ". Choose a Checkpoint or JKSM backup "
+                           "of the game, or the folder of a 3DS emulator (Citra, Lime3DS, Azahar) that has played it.";
+            return;
+        }
+        const FoundSave& save = found.front();
+        std::fprintf(stderr, "launcher: saves: %d in %s (%zu found)\n", save.files, Utf8(save.folder).c_str(), found.size());
+        S.saves = Snapshot::Saves::Confirm;
+        S.saves_from = save.folder;
+        S.saves_note.clear();
+        S.saves_detail = around.empty() ? std::string{}
+            : "There are none in the folder you chose: these are from the user folder it is in, " +
+                  Utf8(fs::path(around).make_preferred()) + ". ";
+        S.saves_detail += std::to_string(save.files) + (save.files == 1 ? " save file" : " save files") +
+                          ", last saved " + LocalTime(TimeOf(save.modified), "%Y-%m-%d %H:%M") + ".";
+        if (found.size() == 2) {
+            S.saves_detail += " Another save folder is there too: to import it instead, choose its folder.";
+        } else if (found.size() > 2) {
+            S.saves_detail += " " + std::to_string(found.size() - 1) +
+                              " other save folders are there too: to import one of them, choose its folder.";
+        }
+    });
+}
+
+void ConfirmSaves() {
+    fs::path from;
+    {
+        std::scoped_lock lock{S.lock};
+        if (S.playing || S.saves != Snapshot::Saves::Confirm) return;
+        from = S.saves_from;
+    }
+    fs::path backup;
+    const std::string error = ImportSaves(from, backup);
+    std::fprintf(stderr, "launcher: saves: import from %s: %s\n", Utf8(from).c_str(), error.empty() ? "done" : error.c_str());
+    std::scoped_lock lock{S.lock};
+    S.saves = error.empty() ? Snapshot::Saves::Done : Snapshot::Saves::Failed;
+    S.saves_note = !error.empty() ? error
+        : backup.empty()          ? "Saves imported."
+                                  : "Saves imported. The previous ones are in " + Utf8(backup.make_preferred()) + ".";
+    S.saves_from.clear();
+    S.saves_detail.clear();
+    S.dirty = true;
+}
+
+void CancelSaves() {
+    std::scoped_lock lock{S.lock};
+    if (S.saves != Snapshot::Saves::Confirm) return;
+    S.saves = Snapshot::Saves::Idle;
+    S.saves_from.clear();
+    S.saves_detail.clear();
+    S.saves_note.clear();
+    S.dirty = true;
 }
 
 // ---- updates: a newer release, downloaded and put in place of this installation's own files ----
@@ -1479,6 +1835,11 @@ void Publish() {
         s.android_build = true;
         s.android_note = S.android_note;
 #endif
+        s.saves = S.saves;
+        s.saves_from = Utf8(fs::path(S.saves_from).make_preferred());
+        s.saves_detail = S.saves_detail;
+        s.saves_note = S.saves_note;
+        s.saves_folder = Utf8(SaveFolder().make_preferred());
     }
     static const bool browse = CanBrowse();
     s.can_browse = browse;
@@ -1520,6 +1881,10 @@ extern "C" void msr_launcher_action(int kind, const char* text) {
     }
     case Kind::LauncherGame: SetGame(text ? text : ""); break;
     case Kind::LauncherFolder: OpenFolder(S.user); break;
+    case Kind::LauncherImportSaves: ChooseSaves(); break;
+    case Kind::LauncherImportConfirm: ConfirmSaves(); break;
+    case Kind::LauncherImportCancel: CancelSaves(); break;
+    case Kind::LauncherSavesFolder: OpenFolder(SaveFolder()); break;
     case Kind::LauncherUpdate: StartUpdate(); break;
     case Kind::LauncherUpdatePage: {
         std::string page;
@@ -1656,6 +2021,7 @@ int Launcher() {
     }
     CancelBuild();
     if (S.worker.joinable()) S.worker.join();
+    if (S.saves_worker.joinable()) S.saves_worker.join();   // a search for saves (20000 folders at most)
     {   // a check or download still running: stopped (an update being put in place finishes first)
         std::scoped_lock lock{S.lock};
         Kill(S.update_tool);
