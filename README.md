@@ -1,9 +1,10 @@
 # msr2ds (Metroid Samus Returns 2DS)
 
-> [!SUBMITTING ISSUES]
-> Windows users: it would be very helpful to upload your log file. This can be found under user/msr-native.log
-
 > [!IMPORTANT]
+> Windows users:
+> It would be very helpful to upload your log file. This can be found under user/msr-native.log
+> 
+> Texture packs:
 > I don't provide the HD texture pack. For one, I didn't create them. Secondly, it would make the download over a GB.
 > You can find them at the link below. Don't trust the link? No problem, Google where to find it yourself.
 >
