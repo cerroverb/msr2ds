@@ -9,14 +9,17 @@ You need
 --------
 - A decrypted dump of Metroid: Samus Returns (USA): a .3ds, .cci or .cxi file, or one
   compressed by Azahar (.zcci, .zcxi), which is read as it is.
-- A graphics card with Vulkan 1.3.
+- A graphics card with Vulkan 1.3 (a Mac: Apple Silicon, M1 or newer, and macOS 13 or newer).
 - About 1 GB of free space and an internet connection for the first build (it downloads
-  the build tools: Zig, capstone and, on Windows, Python; about 105 MB).
+  the build tools: Zig, capstone and, on Windows and macOS, Python; about 105 MB).
 
 First start
 -----------
 1. Windows: unpack the zip anywhere you can write to and start msr-native.exe.
    Linux / Steam Deck: make the AppImage executable and start it.
+   macOS: unzip it, move msr-native.app to Applications (or anywhere) and open it. The app is
+   not notarized: the first time, macOS refuses to open it; choose Open Anyway in System
+   Settings, Privacy & Security (or run: xattr -dr com.apple.quarantine msr-native.app).
 2. Game tab, "Game file": choose your dump with Browse... or type its path.
 3. "Build the native code". This takes a few minutes the first time, then it is done.
 4. Play.
@@ -25,7 +28,8 @@ The same menu opens in the game with F1 or the controller's Select / View / Back
 The launcher comes back when the game closes.
 
 Once the native code is built, the launcher also makes msr-native-direct.exe beside
-msr-native.exe (Linux: msr-native-direct.sh beside the AppImage). It starts the game straight
+msr-native.exe (Linux: msr-native-direct.sh beside the AppImage; macOS: msr-native-direct.app
+beside msr-native.app). It starts the game straight
 away, without the launcher: use it for a desktop shortcut, Steam or a frontend. When the game
 cannot start yet (no game file, or the native code needs building), it opens the launcher.
 
@@ -46,8 +50,8 @@ user folder on the device. There are no touch controls: use a controller (or a k
 Updates
 -------
 When a new version is out, the launcher's Game tab says so when it starts. "Update now"
-downloads it and replaces this program's files where they are (the same folder, or the same
-AppImage), then starts the new version. Your saves, settings, mods and the native code are
+downloads it and replaces this program's files where they are (the same folder, the same
+AppImage or the same app), then starts the new version. Your saves, settings, mods and the native code are
 kept: you build the native code once, and an update only asks you to rebuild it in the rare
 case the new version needs it. "What's new" opens the release's page.
 
@@ -56,6 +60,8 @@ Your files
 Everything goes in the user folder ("Open the user folder" on the Game tab):
 - Windows: user\ beside msr-native.exe
 - Linux: ~/.local/share/msr-native/user, or a user/ folder beside the AppImage if you make one
+- macOS: ~/Library/Application Support/msr-native/user, or a user/ folder beside msr-native.app
+  if you make one
 It holds your saves (native-save), settings, the native code and its build tools, game mods
 (mods/game) and texture packs (mods/textures). To bring saves from a 3DS or an emulator, use
 "Import saves..." on the Game tab and choose the folder they are in (a Checkpoint or JKSM
@@ -82,5 +88,7 @@ Licences
 msr-native is free software under the GNU GPL version 3 or later (LICENSE-GPL-3.0.txt). The
 parts from the emulator-based Samus Returns port are GPL 2.0 or later (LICENSE-GPL-2.0.txt).
 zstd, which reads compressed game files, is BSD (LICENSE-zstd.txt).
+The macOS app also holds MoltenVK and shaderc (Apache 2.0), SDL 2 (zlib) and libpng (libpng
+licence), each with its licence beside this file.
 Dear ImGui and AMD FidelityFX FSR 1 are MIT. Metroid: Samus Returns belongs to Nintendo; this
 program contains none of it.

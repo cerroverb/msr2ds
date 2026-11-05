@@ -52,7 +52,12 @@ static int shaderc_load(void) {
     if (sc_state >= 0) return sc_state;
     sc_state = 0;
     if (getenv("PWR_VK_NO_VSGEN")) return 0;
+#ifdef __APPLE__
+    /* the app's own (Contents/Frameworks), else one the library path finds (a development build) */
+    const char *names[] = { "@executable_path/../Frameworks/libshaderc_shared.1.dylib", "libshaderc_shared.1.dylib", "libshaderc_shared.dylib" };
+#else
     const char *names[] = { "libshaderc.so.1", "libshaderc_shared.so.1", "libshaderc_shared.so", "libshaderc.so", "shaderc_shared.dll", "libshaderc_shared.dll" };
+#endif
     void *h = NULL;
     for (size_t i = 0; i < sizeof names / sizeof *names && !h; i++) h = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
     if (!h) { fprintf(stderr, "vsgen: libshaderc not found; vertex shaders use the GPU interpreter\n"); return 0; }

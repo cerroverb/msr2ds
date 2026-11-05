@@ -349,6 +349,8 @@ int main(int argc, char **argv) {
         snprintf(module_path, sizeof module_path, "user/msr/recomp/msr_aot.dll");
 #elif defined(__ANDROID__)
         snprintf(module_path, sizeof module_path, "user/msr/recomp-android/libmsr_aot.so");   /* built on a PC */
+#elif defined(__APPLE__)
+        snprintf(module_path, sizeof module_path, "user/msr/recomp/libmsr_aot.dylib");
 #else
         snprintf(module_path, sizeof module_path, "user/msr/recomp/libmsr_aot.so");
 #endif
@@ -470,7 +472,7 @@ int main(int argc, char **argv) {
     { extern void pica_vk_saves_wait(void); pica_vk_saves_wait(); }   /* a shader cache save under way lands first */
     video_shutdown();
 #ifndef _WIN32
-    /* Linux: ends here, without exit()'s static destructors. The guest threads, the GX worker and the texture packs'
+    /* Linux and macOS: end here, without exit()'s static destructors. The guest threads, the GX worker and the texture packs'
        PNG workers are still running, and glibc's pthread_cond_destroy waits for the waiters of a condition variable:
        the PNG workers' (msr/textures.cpp) never left, so the game never exited once its window closed or Restart was
        chosen (2026-11-03, Steam Deck: the launcher waited for it). Windows' runtime does not wait there. */

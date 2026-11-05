@@ -11,11 +11,16 @@
 //   - updates: a newer release on GitHub, offered when the launcher starts and put in place of this installation's own
 //     files (the updates section below);
 //   - the direct start: once the native code is built, msr-native-direct.exe beside the program (msr-native-direct.sh
-//     beside the AppImage) starts the game without the launcher (the direct start section below);
+//     beside the AppImage, msr-native-direct.app beside msr-native.app) starts the game without the launcher (the
+//     direct start section below);
 //   - saves: Import saves... brings the player's saves from a 3DS backup or another emulator's folder, in place of the
 //     ones here (the saves section below).
 // The user folder: beside the program (Windows, a portable folder; Linux when a user/ folder is there, also beside the
-// AppImage), else the system's (%LOCALAPPDATA%\msr-native, ~/.local/share/msr-native); MSR_NATIVE_HOME overrides it.
+// AppImage; macOS when a user/ folder is beside msr-native.app), else the system's (%LOCALAPPDATA%\msr-native,
+// ~/.local/share/msr-native, ~/Library/Application Support/msr-native); MSR_NATIVE_HOME overrides it.
+// macOS (Apple Silicon): the program is msr-native.app (tools/package/macos.sh), the recompiler in its
+// Contents/Resources/recomp/; the build tools are downloaded as on Linux, Python always (the system's python3 may be
+// only the stub that asks to install Apple's developer tools).
 // The Android app (native/android): the user folder is the app's on the shared storage (Android/data/<app>/files/user),
 // which a PC reaches over USB. Nothing is built there: the PC's launcher builds the Android native code (Build for
 // Android: build_module.py --target android-arm64, into user/msr/recomp-android/), which the player copies into the
@@ -51,6 +56,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
 #endif
 #ifdef __ANDROID__
 #include "android.h"
@@ -89,6 +97,8 @@ using Code = Snapshot::Code;
 
 #ifdef _WIN32
 constexpr const char* Library = "msr_aot.dll";
+#elif defined(__APPLE__)
+constexpr const char* Library = "libmsr_aot.dylib";
 #else
 constexpr const char* Library = "libmsr_aot.so";
 #endif
@@ -167,11 +177,27 @@ fs::path ExePath() {
     wchar_t buf[MAX_PATH * 4];
     const DWORD n = GetModuleFileNameW(nullptr, buf, static_cast<DWORD>(std::size(buf)));
     return fs::path(std::wstring(buf, n));
+#elif defined(__APPLE__)
+    char buf[4096];
+    std::uint32_t n = sizeof buf;
+    if (_NSGetExecutablePath(buf, &n) != 0) return {};
+    std::error_code e;
+    const fs::path p = fs::canonical(fs::path(buf), e);
+    return e ? fs::path(buf) : p;
 #else
     std::error_code e;
     return fs::read_symlink("/proc/self/exe", e);
 #endif
 }
+
+#ifdef __APPLE__
+// The app bundle this program is in (<name>.app, from its Contents/MacOS/), or empty when it is not in one (a build)
+fs::path AppBundle() {
+    const fs::path bundle = ExePath().parent_path().parent_path().parent_path();
+    std::error_code e;
+    return bundle.extension() == ".app" && fs::is_directory(bundle / "Contents", e) ? bundle : fs::path{};
+}
+#endif
 
 bool Writable(const fs::path& dir) {
     std::error_code e;
@@ -189,6 +215,16 @@ fs::path DataRoot() {
     return FromUtf8(msr_android_root());   // Android/data/<app>/files: reachable from a PC over USB
 #endif
     const fs::path exe_dir = ExePath().parent_path();
+#ifdef __APPLE__
+    {
+        std::error_code e;
+        const fs::path bundle = AppBundle();
+        const fs::path beside = bundle.empty() ? exe_dir : bundle.parent_path();
+        if (fs::is_directory(beside / "user", e)) return beside;   // portable: a user/ folder beside the app
+        const char* h = std::getenv("HOME");
+        return FromUtf8(h ? h : ".") / "Library" / "Application Support" / "msr-native";
+    }
+#endif
 #ifdef _WIN32
     if (Writable(exe_dir / "user")) return exe_dir;   // portable, as the zip unpacks
     wchar_t buf[MAX_PATH];
@@ -208,8 +244,8 @@ fs::path DataRoot() {
 #endif
 }
 
-// The recompiler shipped with the program: recomp/ beside it (Windows), ../share/msr-native/recomp (the AppImage), the
-// source tree above a build folder (development), or MSR_RECOMP_SCRIPTS
+// The recompiler shipped with the program: recomp/ beside it (Windows), ../share/msr-native/recomp (the AppImage),
+// ../Resources/recomp (the macOS app), the source tree above a build folder (development), or MSR_RECOMP_SCRIPTS
 fs::path Scripts() {
     const fs::path rel = fs::path("tools") / "msr" / "recomp" / "build_module.py";
     const fs::path exe_dir = ExePath().parent_path();
@@ -217,6 +253,7 @@ fs::path Scripts() {
     if (const char* dev = std::getenv("MSR_RECOMP_SCRIPTS"); dev && *dev) roots.push_back(FromUtf8(dev));
     roots.push_back(exe_dir / "recomp");
     roots.push_back(exe_dir / ".." / "share" / "msr-native" / "recomp");
+    roots.push_back(exe_dir / ".." / "Resources" / "recomp");
     roots.push_back(exe_dir / "..");
     std::error_code e;
     for (const auto& r : roots)
@@ -448,6 +485,18 @@ constexpr Download Downloads[] = {
      "732cedbbb56d42e723f14d7af6387f1454194a820b4b96b56d1e53f865ef85d0", 1273459, "capstone.whl"},
 };
 constexpr const char* ZigArchive = "zig.zip";
+#elif defined(__APPLE__)
+constexpr Download Downloads[] = {   // Apple Silicon
+    {"Python 3.12",
+     "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-aarch64-apple-darwin-install_only_stripped.tar.gz",
+     "233f8e15255b3e1d1fd47ea5dd5230dfed803f371138e896e54d98c60ae19f6f", 25030095, "python.tar.gz"},
+    {"Zig 0.15.2", "https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz",
+     "3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b", 50635984, "zig.tar.xz"},
+    {"capstone 5.0.9",
+     "https://files.pythonhosted.org/packages/42/9a/4eecfbc94961cda70301fd13de69042be1943bee456e37bc1369840601b1/capstone-5.0.9-py3-none-macosx_11_0_arm64.whl",
+     "fc269c5082e17d7f9f265cd6980e2fdc6ab572df913951d76db0357e06b8001d", 1202361, "capstone.whl"},
+};
+constexpr const char* ZigArchive = "zig.tar.xz";
 #else
 constexpr Download Downloads[] = {
     // only when the system has no Python 3.8 or newer (SteamOS and most desktops have one)
@@ -653,8 +702,8 @@ bool Cancelled() {
 }
 
 std::string SystemPython() {
-#ifdef _WIN32
-    return {};
+#if defined(_WIN32) || defined(__APPLE__)
+    return {};   // macOS: /usr/bin/python3 may be the stub that asks to install the developer tools
 #else
     for (const char* name : {"python3", "python"}) {
         Child c;
@@ -855,7 +904,7 @@ void CancelBuild() {
 
 // ---- the file dialog ----
 bool CanBrowse() {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
     return true;
 #elif defined(__ANDROID__)
     return false;   // the game file is found in the user folder (FindGame)
@@ -886,6 +935,26 @@ std::string Browse(const std::string& current) {
     of.lpstrTitle = L"Metroid: Samus Returns (USA), decrypted";
     of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     return GetOpenFileNameW(&of) ? Narrow(file) : std::string{};
+#elif defined(__APPLE__)
+    // the system's open panel, through AppleScript (osascript comes with macOS); empty when cancelled
+    const auto quote = [](const std::string& text) {   // an AppleScript string literal
+        std::string q = "\"";
+        for (char c : text) q += c == '"' || c == '\\' ? std::string("\\") + c : std::string(1, c);
+        return q + "\"";
+    };
+    std::string script = "POSIX path of (choose file with prompt " + quote("Metroid: Samus Returns (USA), decrypted") +
+                         " of type {\"3ds\", \"cci\", \"cxi\", \"zcci\", \"zcxi\"}";
+    std::error_code e;
+    const fs::path folder = FromUtf8(current).parent_path();
+    if (!current.empty() && fs::is_directory(folder, e)) script += " default location (POSIX file " + quote(Utf8(folder)) + ")";
+    script += ")";
+    Child c;
+    if (!Spawn({"/usr/bin/osascript", "-e", script}, {}, true, {}, true, c)) return {};
+    std::string out;
+    ReadLines(c, [&](const std::string& line) { if (out.empty()) out = line; });
+    const int code = Poll(c, true);
+    Close(c);
+    return code == 0 ? Trim(out) : std::string{};
 #else
     (void)current;
     const char* cmd = std::system("command -v zenity >/dev/null 2>&1") == 0
@@ -903,7 +972,8 @@ std::string Browse(const std::string& current) {
 }
 
 // A folder, chosen with the system's dialog ("" when cancelled). Windows: the shell's folder picker (COM, on this
-// thread: SDL's window thread, already a single-threaded apartment); Linux: zenity or kdialog, as Browse.
+// thread: SDL's window thread, already a single-threaded apartment); macOS: AppleScript's choose folder; Linux: zenity
+// or kdialog, as Browse.
 std::string BrowseFolder(const char* title) {
 #ifdef _WIN32
     std::string out;
@@ -929,6 +999,18 @@ std::string BrowseFolder(const char* title) {
     }
     if (SUCCEEDED(com)) CoUninitialize();
     return out;
+#elif defined(__APPLE__)
+    // the system's folder panel, through AppleScript, as Browse; empty when cancelled
+    std::string script = "POSIX path of (choose folder with prompt \"";
+    for (const char* c = title; *c; ++c) script += *c == '"' || *c == '\\' ? std::string("\\") + *c : std::string(1, *c);
+    script += "\")";
+    Child c;
+    if (!Spawn({"/usr/bin/osascript", "-e", script}, {}, true, {}, true, c)) return {};
+    std::string out;
+    ReadLines(c, [&](const std::string& line) { if (out.empty()) out = line; });
+    const int code = Poll(c, true);
+    Close(c);
+    return code == 0 ? Trim(out) : std::string{};
 #else
     const std::string t = title;
     const std::string cmd = std::system("command -v zenity >/dev/null 2>&1") == 0
@@ -953,7 +1035,11 @@ void OpenFolder(const fs::path& dir) {
     (void)dir;   // the overlay shows the folder instead
 #else
     Child c;
+#ifdef __APPLE__
+    if (Spawn({"/usr/bin/open", Utf8(dir)}, {}, false, {}, true, c)) std::thread([c]() mutable { Poll(c, true); Close(c); }).detach();
+#else
     if (Spawn({"xdg-open", Utf8(dir)}, {}, false, {}, true, c)) std::thread([c]() mutable { Poll(c, true); Close(c); }).detach();
+#endif
 #endif
 }
 
@@ -1253,8 +1339,9 @@ void CancelSaves() {
 
 // ---- updates: a newer release, downloaded and put in place of this installation's own files ----
 // The releases of MSR_UPDATE_REPO on GitHub (native/CMakeLists.txt; public releases), each with the packages
-// tools/package makes: msr-native-<version>-windows-x64.zip (the program, its libraries and recomp/, in one folder) and
-// msr-native-<version>-x86_64.AppImage. The launcher looks when it starts and offers the newest release above its own
+// tools/package makes: msr-native-<version>-windows-x64.zip (the program, its libraries and recomp/, in one folder),
+// msr-native-<version>-x86_64.AppImage and msr-native-<version>-macos-arm64.zip (msr-native.app). The launcher looks
+// when it starts and offers the newest release above its own
 // version that has this system's package (pre-releases too). Update downloads it, checks its SHA-256 against the
 // release's digest, and then
 //   - Windows: unpacks it (tar) into user/msr/update/; each file it has goes where the installation has it: the old one
@@ -1263,6 +1350,10 @@ void CancelSaves() {
 //     back. The new program starts and deletes the old files.
 //   - Linux: writes the new AppImage beside the running one and renames it over it (the same path: shortcuts, Steam's
 //     too, keep working), then runs it in this process's place.
+//   - macOS: unpacks the zip (ditto) into user/msr/update/, renames the running app to <name>.app.updating-old, moves
+//     the new one to its place (the same path), then runs it in this process's place; it deletes the old app. Any
+//     failure puts the old app back. An app macOS runs from a read-only copy (App Translocation: opened where the
+//     download unpacked, not moved) cannot be updated: the release's page is offered instead.
 // The user folder is never touched: saves, settings, mods, the game file and the native code built from it, which
 // stays valid unless the new version changes aot_runtime.h (CheckCode then asks for a rebuild). MSR_UPDATE_URL: another
 // address for the release list (any curl URL, file:// for tests; "off": no check). The log: user/msr/update.log.
@@ -1443,6 +1534,8 @@ bool UpdateTool(const std::vector<std::string>& argv, const fs::path& file = {},
 const char* PackageSuffix() {
 #ifdef _WIN32
     return "-windows-x64.zip";
+#elif defined(__APPLE__)
+    return "-macos-arm64.zip";
 #else
     return "-x86_64.AppImage";
 #endif
@@ -1452,6 +1545,11 @@ bool Installable() {
 #ifdef _WIN32
     const fs::path dir = ExePath().parent_path();
     return fs::is_regular_file(dir / "recomp" / "tools" / "msr" / "recomp" / "build_module.py", e) && Writable(dir);
+#elif defined(__APPLE__)
+    const fs::path bundle = AppBundle();
+    return !bundle.empty() && Utf8(bundle).find("/AppTranslocation/") == std::string::npos &&
+           fs::is_regular_file(bundle / "Contents" / "Resources" / "recomp" / "tools" / "msr" / "recomp" / "build_module.py", e) &&
+           Writable(bundle.parent_path()) && Writable(bundle / "Contents");
 #else
     const char* image = std::getenv("APPIMAGE");
     return image && *image && fs::is_regular_file(FromUtf8(image), e) && Writable(FromUtf8(image).parent_path());
@@ -1542,6 +1640,12 @@ void CleanUpdate() {
         if (!left) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
+#elif defined(__APPLE__)
+    if (const fs::path bundle = AppBundle(); !bundle.empty()) {   // the old app (this process replaced its program)
+        fs::path old = bundle;
+        old += ".updating-old";
+        if (fs::exists(old, e)) fs::remove_all(old, e);
+    }
 #endif
 }
 
@@ -1613,6 +1717,47 @@ std::string InstallWindows(const fs::path& zip) {
     S.restart_into = install / "msr-native.exe";
     return {};
 }
+#elif defined(__APPLE__)
+// the downloaded app in place of this one (see above); "" when done
+std::string InstallMac(const fs::path& zip) {
+    std::error_code e;
+    const fs::path bundle = AppBundle(), unpacked = UpdateFolder() / "unpacked";
+    if (bundle.empty()) return "This program is not in an app bundle.";
+    fs::remove_all(unpacked, e);
+    fs::create_directories(unpacked, e);
+    UpdateStatus(Snapshot::Update::Working, "Unpacking");
+    if (!UpdateTool({"/usr/bin/ditto", "-x", "-k", Utf8(zip), Utf8(unpacked)})) return "The download could not be unpacked.";
+    const auto is_package = [&](const fs::path& app) {
+        return app.extension() == ".app" &&
+               fs::is_regular_file(app / "Contents" / "Resources" / "recomp" / "tools" / "msr" / "recomp" / "build_module.py", e) &&
+               fs::is_regular_file(app / "Contents" / "MacOS" / "msr-native", e);
+    };
+    fs::path app;   // the package's app: at the top or in its folder
+    for (const auto& entry : fs::directory_iterator(unpacked, e)) {
+        if (is_package(entry.path())) { app = entry.path(); break; }
+        if (entry.is_directory(e))
+            for (const auto& inner : fs::directory_iterator(entry.path(), e))
+                if (is_package(inner.path())) { app = inner.path(); break; }
+        if (!app.empty()) break;
+    }
+    if (app.empty()) return "The download is not an msr-native package.";
+    UpdateStatus(Snapshot::Update::Working, "Putting the new version in place");
+    fs::path old = bundle;
+    old += ".updating-old";
+    fs::remove_all(old, e);
+    fs::rename(bundle, old, e);
+    if (e) return "Could not replace " + Utf8(bundle.filename()) + " (" + e.message() + ").";
+    fs::rename(app, bundle, e);
+    if (e) {
+        const std::string why = e.message();
+        std::error_code u;
+        fs::rename(old, bundle, u);
+        return "Could not put the new version in place (" + why + ").";
+    }
+    UpdateLog("installed " + Utf8(bundle));
+    S.restart_into = bundle / "Contents" / "MacOS" / "msr-native";
+    return {};
+}
 #else
 // the new AppImage over the running one (see above); "" when done
 std::string InstallLinux(const fs::path& download) {
@@ -1651,7 +1796,7 @@ void StartUpdate() {
             if (curl.empty()) return "Downloading needs curl, which this system does not have.";
             std::error_code e;
             fs::create_directories(UpdateFolder(), e);
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
             const fs::path file = UpdateFolder() / "msr-native-update.zip";
 #else
             fs::path file = FromUtf8(std::getenv("APPIMAGE"));
@@ -1673,6 +1818,8 @@ void StartUpdate() {
             }
 #ifdef _WIN32
             return InstallWindows(file);
+#elif defined(__APPLE__)
+            return InstallMac(file);
 #else
             return InstallLinux(file);
 #endif
@@ -1694,21 +1841,32 @@ void OpenPage(const std::string& url) {
     ShellExecuteW(nullptr, L"open", Wide(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 #else
     Child c;
+#ifdef __APPLE__
+    if (Spawn({"/usr/bin/open", url}, {}, false, {}, true, c)) std::thread([c]() mutable { Poll(c, true); Close(c); }).detach();
+#else
     if (Spawn({"xdg-open", url}, {}, false, {}, true, c)) std::thread([c]() mutable { Poll(c, true); Close(c); }).detach();
+#endif
 #endif
 }
 
 // ---- the direct start: the game without the launcher ----
 // Once the native code is built (CheckCode finds it ready), the launcher writes a program beside itself that starts the
-// game directly: msr-native-direct.exe on Windows (runtime/win/direct.c, inside this program as resource 200), or
-// msr-native-direct.sh beside the AppImage on Linux. Either runs this program with --direct (msr_launcher_direct): Play
+// game directly: msr-native-direct.exe on Windows (runtime/win/direct.c, inside this program as resource 200),
+// msr-native-direct.sh beside the AppImage on Linux, or msr-native-direct.app beside msr-native.app on macOS (an app
+// whose program is a shell script; DirectPath is that script). Each runs this program with --direct (msr_launcher_direct): Play
 // without the launcher's window, Restart included; while the game cannot start (no game file, the native code missing
 // or built by another version), the launcher opens instead. A shortcut, Steam or a frontend can start it. Written
 // again when this version's differs (after an update; the old one, perhaps running, renamed aside as an update's old
 // files are), and left out when the program's folder cannot be written to.
+#ifdef __APPLE__
+constexpr const char* DirectApp = "msr-native-direct.app";
+#endif
 fs::path DirectPath() {
 #ifdef _WIN32
     return ExePath().parent_path() / "msr-native-direct.exe";
+#elif defined(__APPLE__)
+    const fs::path bundle = AppBundle();
+    return bundle.empty() ? fs::path{} : bundle.parent_path() / DirectApp / "Contents" / "MacOS" / "msr-native-direct";
 #else
     const char* image = std::getenv("APPIMAGE");
     return (image && *image ? FromUtf8(image) : ExePath()).parent_path() / "msr-native-direct.sh";
@@ -1721,6 +1879,16 @@ std::string DirectContent() {
     HGLOBAL loaded = found ? LoadResource(nullptr, found) : nullptr;
     const void* bytes = loaded ? LockResource(loaded) : nullptr;
     return bytes ? std::string(static_cast<const char*>(bytes), SizeofResource(nullptr, found)) : std::string{};
+#elif defined(__APPLE__)
+    // msr-native.app by its name, from the direct app's own folder (both can move together)
+    const fs::path bundle = AppBundle();
+    if (bundle.empty()) return {};
+    std::string quoted = "'";
+    for (char c : Utf8(bundle.filename())) quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    quoted += "'";
+    return "#!/bin/sh\n"
+           "# msr-native without its launcher (the launcher wrote this once the native code was built)\n"
+           "exec \"$(cd \"$(dirname \"$0\")/../../..\" && pwd)\"/" + quoted + "/Contents/MacOS/msr-native --direct\n";
 #else
     // the AppImage (or the program) by its name, from the script's own folder: the folder can move
     const char* image = std::getenv("APPIMAGE");
@@ -1740,6 +1908,32 @@ void WriteDirect() {
     if (content.empty()) return;
     const fs::path path = DirectPath();
     std::error_code e;
+#ifdef __APPLE__
+    {   // the direct app's Info.plist, beside its script
+        const fs::path plist = path.parent_path().parent_path() / "Info.plist";
+        const std::string info =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+            "<plist version=\"1.0\">\n<dict>\n"
+            " <key>CFBundleExecutable</key><string>msr-native-direct</string>\n"
+            " <key>CFBundleIdentifier</key><string>io.github.gminustwo.msrnative.direct</string>\n"
+            " <key>CFBundleName</key><string>msr-native-direct</string>\n"
+            " <key>CFBundlePackageType</key><string>APPL</string>\n"
+            " <key>CFBundleShortVersionString</key><string>" MSR_NATIVE_VERSION "</string>\n"
+            " <key>CFBundleIconFile</key><string>msr-native</string>\n"
+            "</dict>\n</plist>\n";
+        if (ReadText(plist) != info && !WriteText(plist, info)) {
+            std::fprintf(stderr, "launcher: could not write %s\n", Utf8(plist).c_str());
+            return;
+        }
+        const fs::path icon = AppBundle() / "Contents" / "Resources" / "msr-native.icns",
+                       direct_icon = path.parent_path().parent_path() / "Resources" / "msr-native.icns";
+        if (fs::is_regular_file(icon, e) && !fs::exists(direct_icon, e)) {
+            fs::create_directories(direct_icon.parent_path(), e);
+            fs::copy_file(icon, direct_icon, e);
+        }
+    }
+#endif
     if (ReadText(path) != content) {   // missing, or another version's
         fs::path temp = path;
         temp += ".new";
@@ -1769,7 +1963,11 @@ void WriteDirect() {
         std::fprintf(stderr, "launcher: wrote %s\n", Utf8(path).c_str());
     }
     std::scoped_lock lock{S.lock};
+#ifdef __APPLE__
+    S.direct = DirectApp;
+#else
     S.direct = Utf8(path.filename());
+#endif
     S.dirty = true;
 }
 

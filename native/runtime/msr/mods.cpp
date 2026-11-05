@@ -429,8 +429,13 @@ void OpenFolder(const std::string& path) {
     ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 #else
     pid_t pid;
-    char* const args[] = {const_cast<char*>("xdg-open"), const_cast<char*>(path.c_str()), nullptr};
-    if (posix_spawnp(&pid, "xdg-open", nullptr, nullptr, args, environ) == 0) waitpid(pid, nullptr, WNOHANG);
+#ifdef __APPLE__
+    const char* opener = "open";
+#else
+    const char* opener = "xdg-open";
+#endif
+    char* const args[] = {const_cast<char*>(opener), const_cast<char*>(path.c_str()), nullptr};
+    if (posix_spawnp(&pid, opener, nullptr, nullptr, args, environ) == 0) waitpid(pid, nullptr, WNOHANG);
 #endif
 }
 

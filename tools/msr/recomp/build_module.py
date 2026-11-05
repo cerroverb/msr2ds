@@ -10,7 +10,8 @@ itself holds no code from the game. The steps, like Woohoo! Flight School's pipe
   2. extract  the decompressed ExeFS .code and the ExHeader (ctr.py)
   3. analyze  find the code and recompile it to C++ (analyze.py, generate.py), with the timing
               table built from the emulator's own ARM11 cycle model (ticks.cpp)
-  4. compile  the generated C++ in parallel, then link msr_aot.dll / libmsr_aot.so
+  4. compile  the generated C++ in parallel, then link msr_aot.dll / libmsr_aot.so /
+              libmsr_aot.dylib (macOS)
   5. install  into <user>/msr/recomp/ with module.json; the game loads it at the next boot
               (src/core/arm/msr_aot/arm_aot.cpp) and checks it against its own aot_runtime.h
               and the program it runs
@@ -32,7 +33,8 @@ Options:
   --target T       host (default: this PC's msr-native), or android-arm64: libmsr_aot.so for the
                    Android app, cross-compiled with the kit's Zig into <user>/msr/recomp-android/
                    (the generated code is the same; aot_runtime.h's SSE intrinsics come from
-                   src/core/arm/msr_aot/a64/ there, on AArch64's FPCR)
+                   src/core/arm/msr_aot/a64/ there, on AArch64's FPCR). On a Mac (Apple Silicon)
+                   host is AArch64 too: libmsr_aot.dylib, with the same a64/ intrinsics
 
 Output protocol for the launcher (stdout, one per line): "@step <n> <count> <text>",
 "@progress <done> <total>", "@done <json>", "@error <text>". Everything else is log.
@@ -45,6 +47,7 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import queue
 import shutil
 import struct
@@ -66,7 +69,11 @@ PROGRAM_ID = '00040000001BB200'
 CODE_SHA256 = '669090e6caeef405aaf4d2b884749460f8f0b868ecd158c7f1943ac235c102c6'
 STEPS = 5
 WINDOWS = os.name == 'nt'
-LIBRARY = 'msr_aot.dll' if WINDOWS else 'libmsr_aot.so'
+MACOS = sys.platform == 'darwin'
+# A Mac with Apple Silicon: the host library is AArch64 code, its SSE intrinsics a64/'s (as the Android app's), and
+# msr-native's runtime hash covers a64/msr_sse_a64.h as native/CMakeLists.txt adds it on AArch64
+HOST_A64 = platform.machine().lower() in ('arm64', 'aarch64')
+LIBRARY = 'msr_aot.dll' if WINDOWS else 'libmsr_aot.dylib' if MACOS else 'libmsr_aot.so'
 NO_WINDOW = 0x08000000 if WINDOWS else 0  # CREATE_NO_WINDOW
 ANDROID = 'android-arm64'
 # The C library functions the Android library may call, for the stand-in libc.so it links against
@@ -87,11 +94,16 @@ def log(text):
     print(text, flush=True)
 
 
+def uses_a64(target='host'):
+    """The library is AArch64 code with a64/'s intrinsics: the Android app's, or a Mac's own."""
+    return target == ANDROID or (target == 'host' and HOST_A64)
+
+
 def runtime_sha256(target='host'):
-    """aot_runtime.h without carriage returns, as src/core/CMakeLists.txt hashes it; for Android
-    followed by a64/msr_sse_a64.h, as native/CMakeLists.txt hashes them there."""
+    """aot_runtime.h without carriage returns, as src/core/CMakeLists.txt hashes it; on AArch64
+    (Android, a Mac) followed by a64/msr_sse_a64.h, as native/CMakeLists.txt hashes them there."""
     text = (RUNTIME / 'aot_runtime.h').read_bytes().replace(b'\r', b'')
-    if target == ANDROID:
+    if uses_a64(target):
         text += (A64 / 'msr_sse_a64.h').read_bytes().replace(b'\r', b'')
     return hashlib.sha256(text).hexdigest()
 
@@ -100,7 +112,7 @@ def recipe_sha256(target='host'):
     """Everything besides the dump that decides the library's contents."""
     digest = hashlib.sha256()
     files = sorted(HERE.glob('*.py')) + sorted(HERE.glob('*.txt')) + [HERE / 'ticks.cpp'] + \
-        sorted(RUNTIME.glob('aot_*')) + (sorted(A64.glob('*.h')) if target == ANDROID else [])
+        sorted(RUNTIME.glob('aot_*')) + (sorted(A64.glob('*.h')) if uses_a64(target) else [])
     for path in files:
         digest.update(path.name.encode() + b'\0' + path.read_bytes().replace(b'\r', b''))
     return digest.hexdigest()
@@ -115,6 +127,7 @@ class Compiler:
         self.zig = None
         self.cache = None
         self.android = getattr(args, 'target', 'host') == ANDROID
+        self.a64 = uses_a64(getattr(args, 'target', 'host'))
         # Each parallel compile gets its own Zig cache: many at once in one cache sometimes
         # failed with exit code 5 (access denied) and no message on Windows.
         self.slots = queue.Queue()
@@ -144,6 +157,10 @@ class Compiler:
                            '-mcpu=x86_64_v2']
         else:
             self.target = ['-march=x86-64-v2']
+        if MACOS and not self.android:
+            # Any Apple Silicon Mac (M1 or newer) on macOS 13 or newer, as msr-native itself
+            self.target = (['-target', 'aarch64-macos.13.0', '-mcpu=apple_m1'] if self.zig else
+                           ['-arch', 'arm64', '-mmacosx-version-min=13.0', '-mcpu=apple-m1'])
         if self.android:
             # Any 64-bit ARM phone (ARMv8.0). musl's headers stand in for Android's C library: the
             # library calls only memcpy-like functions, linked against a stand-in libc.so (link).
@@ -160,7 +177,7 @@ class Compiler:
             return self.name
 
     def flags(self):
-        flags = self.target + (['-I', str(A64)] if self.android else []) + \
+        flags = self.target + (['-I', str(A64)] if self.a64 else []) + \
             ['-std=c++20', '-O1', '-g0', '-w', '-ffp-contract=off', '-fno-strict-aliasing',
              '-fno-exceptions', '-fno-rtti', '-fvisibility=hidden',
              '-DMSR_AOT_SHARED', '-I', str(RUNTIME)]
@@ -212,6 +229,9 @@ class Compiler:
                     str(stub / 'libc.so')]
         if not self.zig and WINDOWS:
             cmd += ['-static-libgcc', '-static-libstdc++']
+        if MACOS and not self.android:
+            # Only libSystem: the library calls memcpy-like functions and no C++ library (no exceptions or RTTI)
+            cmd += ['-nostdlib++', '-Wl,-install_name,@rpath/' + LIBRARY]
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd), creationflags=NO_WINDOW)
         if result.returncode != 0:
             raise BuildError('Linking failed:\n%s' % (result.stderr or result.stdout)[-4000:])
@@ -221,6 +241,9 @@ class Compiler:
 
     def ticks_command(self):
         """For generate.instruction_ticks: compiles the timing helper for this machine."""
+        if MACOS:
+            return self.command + (['-target', 'aarch64-macos.13.0' if HOST_A64 else 'x86_64-macos.13.0']
+                                   if self.zig else [])
         return self.command + (['-target', 'x86_64-windows-gnu' if WINDOWS else 'x86_64-linux-gnu.2.28']
                                if self.zig else [])
 
@@ -426,14 +449,17 @@ def build(args):
 
 # -- the kit ------------------------------------------------------------------------------------
 
-# Zig's parts for systems other than this one (C library sources and headers, sanitizers).
-ZIG_TRIM_COMMON = ['doc', 'lib/libtsan', 'lib/libc/musl', 'lib/libc/wasi', 'lib/libc/darwin',
-                   'lib/libc/freebsd', 'lib/libc/netbsd', 'lib/libc/openbsd']
-ZIG_TRIM = ZIG_TRIM_COMMON + (['lib/libc/glibc'] if WINDOWS else ['lib/libc/mingw'])
+# Zig's parts for systems other than this one (C library sources and headers, sanitizers). A Mac
+# keeps lib/libc/darwin (libSystem's stubs, which the library links against).
+ZIG_TRIM_COMMON = ['doc', 'lib/libtsan', 'lib/libc/musl', 'lib/libc/wasi',
+                   'lib/libc/freebsd', 'lib/libc/netbsd', 'lib/libc/openbsd'] + ([] if MACOS else ['lib/libc/darwin'])
+ZIG_TRIM = ZIG_TRIM_COMMON + (['lib/libc/glibc'] if WINDOWS else
+                              ['lib/libc/mingw', 'lib/libc/glibc'] if MACOS else ['lib/libc/mingw'])
 # The C library headers kept (lib/libc/include/<target>): this system's, and the Android library's
 # (--target android-arm64 compiles against musl's AArch64 headers; about 7 MB).
 ZIG_HEADERS_ANDROID = {'any-linux-any', 'generic-musl', 'aarch64-linux-any', 'aarch64-linux-musl'}
 ZIG_HEADERS_KEEP = ({'any-windows-any'} if WINDOWS else
+                    {'any-macos-any', 'aarch64-macos-none', 'x86_64-macos-none'} if MACOS else
                     {'any-linux-any', 'generic-glibc', 'x86-linux-any', 'x86-linux-gnu'}) | ZIG_HEADERS_ANDROID
 
 
@@ -474,7 +500,7 @@ def setup_kit(args):
     with zipfile.ZipFile(args.wheel) as z:
         z.extractall(site)
     if not WINDOWS:
-        for lib in site.rglob('libcapstone.so*'):
+        for lib in list(site.rglob('libcapstone.so*')) + list(site.rglob('libcapstone*.dylib')):
             lib.chmod(0o755)
     emit('done', json.dumps({'zig': str(zig), 'site': str(site)}))
 

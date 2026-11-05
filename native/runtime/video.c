@@ -494,11 +494,19 @@ int video_init(int scale) {
     /* every pad's face buttons by position (A = bottom), as input.c, glyphs.cpp and the settings take them: SDL 2 names a
        Nintendo pad's by label unless told (its A, on the right, came as SDL's A, the bottom button) */
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
+#ifdef __APPLE__
+    /* MoltenVK: its errors only in the log (not its device report, nor a warning for each pipeline that Metal always
+       restarts primitives); MVK_CONFIG_LOG_LEVEL set by the player wins */
+    setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | (g_input_none ? 0 : SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK))) { fprintf(stderr, "video: SDL_Init: %s\n", SDL_GetError()); return -1; }
     static const int cw[L_COUNT] = { TOP_W, TOP_W + BOT_W, TOP_W + BOT_W / 2, TOP_W, BOT_W, 0, TOP_W }, chh[L_COUNT] = { 2 * SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, 2 * SCR_H };
     int win_w = opt_layout == L_SINGLE ? (int)lroundf(SCR_H * scale * opt_window_aspect) : cw[opt_layout] * scale;   /* single: 16:9 (1280x720 at 3) */
 #ifdef __ANDROID__
     const Uint32 win_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN;   /* the whole screen, without the system bars */
+#elif defined(__APPLE__)
+    /* a Retina display's own pixels (the drawable is then larger than the window; input and the overlay map between them) */
+    const Uint32 win_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 #else
     const Uint32 win_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
 #endif
@@ -507,16 +515,23 @@ int video_init(int scale) {
     SDL_SetWindowMinimumSize(win, BOT_W, SCR_H);
     if (opt_fs) apply_fullscreen();
     unsigned ne = 0; SDL_Vulkan_GetInstanceExtensions(win, &ne, NULL);
-    const char *exts[17]; if (ne > 16) ne = 16; SDL_Vulkan_GetInstanceExtensions(win, &ne, exts);
+    const char *exts[20]; if (ne > 16) ne = 16; SDL_Vulkan_GetInstanceExtensions(win, &ne, exts);
+    int has_portability_enum = 0;
     {   /* HDR swapchain colour spaces */
         uint32_t n = 0; vkEnumerateInstanceExtensionProperties(NULL, &n, NULL);
         VkExtensionProperties *ep = calloc(n ? n : 1, sizeof *ep); vkEnumerateInstanceExtensionProperties(NULL, &n, ep);
         for (uint32_t i = 0; i < n; i++) if (!strcmp(ep[i].extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) has_colorspace_ext = 1;
+#ifdef __APPLE__
+        /* MoltenVK is a portability driver: through the Vulkan loader it is listed only when asked for */
+        for (uint32_t i = 0; i < n; i++) if (!strcmp(ep[i].extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) has_portability_enum = 1;
+#endif
         free(ep);
         if (has_colorspace_ext) exts[ne++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
+        if (has_portability_enum) exts[ne++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
     }
     VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "msr-native", .apiVersion = VK_API_VERSION_1_3 };
-    VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = ne, .ppEnabledExtensionNames = exts };
+    VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = ne, .ppEnabledExtensionNames = exts,
+        .flags = has_portability_enum ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0 };
     VK(vkCreateInstance(&ici, NULL, &inst));
     if (!SDL_Vulkan_CreateSurface(win, inst, &surf)) { fprintf(stderr, "video: surface: %s\n", SDL_GetError()); return -1; }
     uint32_t np = 8; VkPhysicalDevice pds[8]; VK(vkEnumeratePhysicalDevices(inst, &np, pds));
@@ -538,6 +553,8 @@ int video_init(int scale) {
     uint32_t nde = 0; vkEnumerateDeviceExtensionProperties(phys, NULL, &nde, NULL);
     VkExtensionProperties *dep = calloc(nde ? nde : 1, sizeof *dep); vkEnumerateDeviceExtensionProperties(phys, NULL, &nde, dep);
     int has_push = 0; for (uint32_t i = 0; i < nde; i++) if (!strcmp(dep[i].extensionName, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) has_push = 1;
+    int has_portability_subset = 0;   /* MoltenVK: a device that has it must enable it */
+    for (uint32_t i = 0; i < nde; i++) if (!strcmp(dep[i].extensionName, "VK_KHR_portability_subset")) has_portability_subset = 1;
     for (uint32_t i = 0; i < nde; i++) if (!strcmp(dep[i].extensionName, VK_EXT_HDR_METADATA_EXTENSION_NAME)) has_hdr_metadata = 1;
     free(dep);
     if (pp.apiVersion >= VK_API_VERSION_1_3) vkGetPhysicalDeviceFeatures2(phys, &f2);
@@ -546,7 +563,8 @@ int video_init(int scale) {
     VkPhysicalDeviceVulkan13Features en13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = VK_TRUE, .shaderDemoteToHelperInvocation = VK_TRUE };
     VkPhysicalDeviceFeatures2 en2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &en13 };
     en2.features.samplerAnisotropy = f2.features.samplerAnisotropy;   /* pica_vk.c: anisotropic filtering option */
-    const char *dext[3] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME }; uint32_t ndext = 1;
+    const char *dext[4] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME }; uint32_t ndext = 1;
+    if (has_portability_subset) dext[ndext++] = "VK_KHR_portability_subset";
     if (vk13 && has_push) dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
     if (vk13 && has_hdr_metadata) dext[ndext++] = VK_EXT_HDR_METADATA_EXTENSION_NAME; else has_hdr_metadata = 0;
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = vk13 ? &en2 : NULL, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
