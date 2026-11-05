@@ -379,8 +379,25 @@ def install(work, user, compiler, objects, stats, args, started):
     return info
 
 
+def raise_fd_limit():
+    """Zig's linker keeps every object open while it links the library (372 of them), and macOS starts an app
+    opened from the Finder with a limit of 256 open files: the compiler and linker inherit a higher one from
+    here (macOS refuses an unlimited one). Windows has no such limit."""
+    if WINDOWS:
+        return
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = 10240 if hard == resource.RLIM_INFINITY else min(hard, 10240)
+    if soft != resource.RLIM_INFINITY and soft < want:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+        except (ValueError, OSError):
+            pass
+
+
 def build(args):
     started = time.time()
+    raise_fd_limit()
     user = pathlib.Path(args.user).resolve()
     work = user / 'msr' / ('recomp-build-android' if args.target == ANDROID else 'recomp-build')
     compiler = Compiler(args)
