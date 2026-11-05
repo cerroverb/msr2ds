@@ -1,5 +1,6 @@
 # msr2ds (Metroid Samus Returns 2DS)
-> [!Submitting Issues]
+
+> [!SUBMITTING ISSUES]
 > Windows users: it would be very helpful to upload your log file. This can be found under user/msr-native.log
 
 > [!IMPORTANT]
