@@ -60,7 +60,7 @@
 #define MSR_NATIVE_VERSION "dev"
 #endif
 #ifndef MSR_UPDATE_REPO
-#define MSR_UPDATE_REPO "gminustwo/msr-native"
+#define MSR_UPDATE_REPO "gminustwo/msr2ds"
 #endif
 
 extern "C" {
