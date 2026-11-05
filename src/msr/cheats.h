@@ -10,7 +10,9 @@
 // Fusion) always comes up. The Fusion suit follows one flag of the game object (+0x1859, set
 // from the save's difficulty), read separately by each thing that draws Samus; those reads are
 // replaced by true, apart from the one that raises the damage Samus takes, so the suit leaves
-// the difficulty as chosen; the models already built then switch too (msr/suit_swap.h).
+// the difficulty as chosen; the models already built then switch too (msr/suit_swap.h). Hard Mode
+// from the start: the same list for every save's New Game, and a new file's Play goes to it too
+// (the game otherwise starts a new file on Normal).
 // Nothing is written to the saves by these patches.
 // Shared by the frontend and video_core; header-only and inert until the frontend sets `enabled`.
 
@@ -29,6 +31,7 @@ enum Flag : u32 {
     InfiniteEnergy = 1 << 3,   ///< Energy kept full
     InfiniteMissiles = 1 << 4, ///< Missiles, Super Missiles and Power Bombs kept full
     InfiniteAeion = 1 << 5,    ///< Aeion kept full
+    HardMode = 1 << 6,   ///< The difficulty list (Normal, Hard) for a new file and every New Game
 };
 
 /// The flags chosen by the player.
@@ -56,7 +59,7 @@ inline constexpr u32 MovR0One = 0xE3A00001;  // mov r0, #1
 inline constexpr u32 MovR1One = 0xE3A01001;  // mov r1, #1
 inline constexpr u32 StoreR0 = 0xE5C30000;   // strb r0, [r3]: the call's flag
 
-inline constexpr std::array<Patch, 26> Patches{{
+inline constexpr std::array<Patch, 27> Patches{{
     // The profile summary of a save (0x3F8xxx): ldr r0, [sp, #0x88]; bl 0x1EDC10 for
     // FusionMode, GalleryMetroidIIUnlocked, GalleryConceptArtUnlocked and GalleryMusicUnlocked.
     {FusionMode, 0x3F8D40, 0xE59D0088, MovR0One},
@@ -73,8 +76,14 @@ inline constexpr std::array<Patch, 26> Patches{{
     {FusionMode, 0x4DD3F4, 0xE5D0006C, MovR0One},
     {FusionMode, 0x4E2134, 0xE5D1106C, MovR1One},
     // New Game goes to the difficulty list once the game is beaten (+0x68), else straight to
-    // Normal: ldrb r0, [r0, #0x68] -> mov r0, #1.
-    {FusionMode, 0x4E3430, 0xE5D00068, MovR0One},
+    // Normal: ldrb r0, [r0, #0x68] -> mov r0, #1 (the handler of its "Start a new game?" Yes).
+    {static_cast<Flag>(FusionMode | HardMode), 0x4E3430, 0xE5D00068, MovR0One},
+    // A new file's Play (the empty slot's "A new file will be created.") starts on Normal: its
+    // handler's push {r4-r8, lr} -> b 0x4E33E0, that Yes handler, which opens the list. The list's
+    // choices then start the game as they do for a used slot, with the difficulty in the slot's
+    // summary (+0x7C). The list was made for a used slot: msr-native adapts it to an empty one with
+    // call hooks (native/runtime/msr/patches.cpp); a host without them must leave HardMode off.
+    {HardMode, 0x4E30C8, 0xE92D41F0, 0xEA0000C4},
     // The galleries' own screens: str r4, [sp] (the default); bl 0x1EDC10, for the sound test,
     // Metroid II art and concept art.
     {Galleries, 0x492504, 0xE58D4000, MovR0One},

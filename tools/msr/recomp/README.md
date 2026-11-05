@@ -69,8 +69,6 @@ resumes at:
 - Memory goes through Azahar's page table, with the memory system as the slow path.
 - Floating point runs on SSE, with MXCSR set from the guest FPSCR (the 3DS runs games in
   flush-to-zero, default-NaN mode). The NaN canonicalization is applied after each operation.
-  On an AArch64 host (macOS on Apple Silicon) the guest's RMode, FZ and DN bits go into FPCR
-  unchanged.
 - The recompiled code is used only when the loaded program's text matches the SHA-256 it was
   generated from. Any other program runs on the JIT.
 
@@ -101,7 +99,45 @@ Every difference traces to the verifier or to undefined behaviour, not to the tr
 A planted bug in the overflow flag was caught in about 5% of cases, so the comparison has
 teeth.
 
-## Building
+## Built on the player's PC
+
+Like [Woohoo! Flight School](https://github.com/thefixinhixon/woohoo-flight-school/blob/main/docs/architecture.md), a
+package can carry the recompiler instead of the recompiled code. The launcher's Game tab
+(**Native code**) builds a library from the player's own dump, so even the public build runs
+recompiled while it contains nothing from the game:
+
+```
+launcher (src/citra_qt/msr_recomp.cpp)
+  1. build tools, once, into <user>/msr/recomp-kit/ (curl, SHA-256 pinned in the launcher):
+       Windows: Python 3.12 embeddable (python.org), Zig 0.15.2 (ziglang.org), capstone 5.0.9 (PyPI)
+       Linux:   the system's python3 (else python-build-standalone), Zig 0.15.2, capstone 5.0.9
+     build_module.py --setup-kit unpacks Zig (other systems' C libraries removed) and capstone
+  2. build_module.py --dump <rom> --user <user> --kit <kit>
+       check    title 00040000001BB200 and the SHA-256 of the decompressed .code
+       extract  ctr.py
+       analyze  analyze.py + generate.py; ticks.cpp compiled with the kit's compiler
+       compile  every shard with `zig c++` (-O1, x86-64-v2, no exceptions or RTTI), in parallel
+       install  <user>/msr/recomp/msr_aot.dll | libmsr_aot.so + module.json
+game boot (src/core/arm/msr_aot/arm_aot.cpp, ARM_AOT::LoadModule)
+  loads the library, checks msr_aot_module(): Module version, sizeof(Ctx) and the SHA-256 of
+  aot_runtime.h it was compiled with (CMake passes the program's own), then CheckProgram as before
+```
+
+- The package's `recomp/` folder mirrors the source tree (`bundle_files.txt` lists the files),
+  so the scripts run unchanged from it. Nothing in it comes from the game.
+- `aot_module.cpp` is the library's only export (`msr_aot_module`). The generated code needs
+  nothing from the C++ runtime, so the library depends only on system libraries (on Linux, on
+  nothing at all).
+- Generated code and objects are deleted after a build (`--keep-work` keeps them in
+  `<user>/msr/recomp-build/` for faster rebuilds).
+- Under heavy parallel load on Windows, `zig c++` sometimes exits with code 5 (access denied)
+  and no message; those files are compiled again on their own afterwards.
+- A library built by another version of the port is refused at boot (the launcher offers a
+  rebuild); `MSR_AOT_MODULE=<path>` loads another library, for tests.
+- Tested 2026-11-01: Windows (the launcher downloading and building, 156 s on an i9-14900K),
+  and Linux in WSL (the system's Python, 185 s on 16 jobs, then the public AppImage loading it).
+
+## Building a personal build with the code linked in
 
 ```sh
 python -m pip install capstone          # once, for the analysis

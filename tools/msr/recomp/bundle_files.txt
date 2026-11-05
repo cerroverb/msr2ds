@@ -1,0 +1,22 @@
+# Files the packages ship in recomp/ (same layout as here), so the launcher can build the
+# game's code from the player's own dump: CMakeLists.txt (bundle target) and
+# tools/msr/linux/build_appimage.sh read this list. No game code.
+tools/msr/recomp/analyze.py
+tools/msr/recomp/build_module.py
+tools/msr/recomp/ctr.py
+tools/msr/recomp/emit_arm.py
+tools/msr/recomp/emit_thumb.py
+tools/msr/recomp/extra_entries.txt
+tools/msr/recomp/generate.py
+tools/msr/recomp/patchable.txt
+tools/msr/recomp/ticks.cpp
+src/common/common_types.h
+src/common/string_literal.h
+src/core/arm/dynarmic/arm_tick_counts.cpp
+src/core/arm/dynarmic/arm_tick_counts.h
+src/core/arm/msr_aot/aot_generated.h
+src/core/arm/msr_aot/aot_module.cpp
+src/core/arm/msr_aot/aot_runtime.h
+src/core/arm/msr_aot/a64/emmintrin.h
+src/core/arm/msr_aot/a64/msr_sse_a64.h
+src/core/arm/msr_aot/a64/xmmintrin.h

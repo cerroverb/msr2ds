@@ -195,7 +195,11 @@ inline Presentation::Page TitleMenuPage(const Image& image) {
 /// middle entirely, but a lit slot is never empty. One slot is always lit, reaching 255. In Morph
 /// Ball the game greys the whole row out: the lit slot dims (brightest 156-216), sometimes below
 /// the lit test, and the unlit icons fade into their slots (30-34, read as empty). `greyed`
-/// says so: no slot is lit at full brightness.
+/// says so: no slot is lit at full brightness. The beam can still be changed then, so the lit
+/// slot is the one with by far the most samples brighter than 120 (265-420 of 1024, 279-366 at
+/// 9x with the HD texture pack; unlit ones 0-89, the Grapple slot's stripes the most), and -1
+/// while that is unclear (one fading out, the next in). 2026-11-03, the user: cycling the beams
+/// in Morph Ball left the HUD's highlight on the old slot ("a shadow over it").
 inline constexpr std::array<std::array<int, 4>, 3> BeamSlotRects = {{
     {253, 13, 317, 77},   // Aeion ability: the usual beam
     {253, 88, 317, 152},  // Ice Beam
@@ -209,6 +213,7 @@ struct BeamSlots {
 inline BeamSlots ReadBeamSlots(const Image& image) {
     BeamSlots beams;
     int lit_peak = 0;
+    std::array<int, BeamSlotRects.size()> soft{};
     for (int i = 0; i < static_cast<int>(BeamSlotRects.size()); ++i) {
         const auto& [x0, y0, x1, y1] = BeamSlotRects[i];
         int bright = 0, total = 0, peak = 0;
@@ -216,6 +221,7 @@ inline BeamSlots ReadBeamSlots(const Image& image) {
             for (int x = x0; x < x1; x += 2) {
                 const int brightness = image.Brightness(x, y);
                 bright += brightness > 200;
+                soft[i] += brightness > 120;
                 peak = std::max(peak, brightness);
                 ++total;
             }
@@ -239,6 +245,18 @@ inline BeamSlots ReadBeamSlots(const Image& image) {
         }
     }
     beams.greyed = lit_peak < 240;
+    if (beams.greyed) {
+        int best = 0;
+        for (int i = 1; i < static_cast<int>(soft.size()); ++i) {
+            if (soft[i] > soft[best]) best = i;
+        }
+        int second = 0;
+        for (int i = 0; i < static_cast<int>(soft.size()); ++i) {
+            if (i != best) second = std::max(second, soft[i]);
+        }
+        beams.lit = soft[best] >= 160 && soft[best] >= 2 * second ? best : -1;
+        if (beams.lit >= 0) beams.present |= 1 << beams.lit;
+    }
     return beams;
 }
 
@@ -252,8 +270,11 @@ inline constexpr std::array<int, 4> MapRect = {0, 58, 252, 213};
 /// orange helmet by turns. The game keeps it in the middle of its map (x 125, y 135) but stops
 /// scrolling near an area's edges, where the marker moves instead, a map tile (10 px) at a time.
 /// The red and orange pixels are counted in 4 px cells, and the marker is the 12 px square
-/// holding most: about 42 when fully lit, under 32 while it fades (and its edges with it). Not
-/// found when it is faint or something else on the map is as red.
+/// holding most: 36-38 when fully lit (about 29 with the HD texture pack at 9x, as the read-back
+/// samples the larger picture), under 20 while it fades. Not found when it is faint or something
+/// else on the map is as red. Its red is deep (green and blue under 0.3 of it but at the pack's
+/// edges); the red map pin's is lighter (a third) and is not counted (2026-11-03, the user: with
+/// a pin placed the minimap stayed on the pin, found while the marker faded).
 struct Marker {
     bool found = false;
     float x = 0.f, y = 0.f; ///< Its middle
@@ -266,7 +287,7 @@ inline Marker FindMapMarker(const Image& image) {
     const auto marker = [&image](int x, int y) {
         int r, g, b;
         image.Rgb(x, y, r, g, b);
-        const bool red = r >= 0x60 && g * 5 <= r * 2 && b * 5 <= r * 2;
+        const bool red = r >= 0x60 && g * 10 <= r * 3 && b * 10 <= r * 3;
         const bool visor = r >= 0xc0 && g * 20 >= r * 9 && g * 4 <= r * 3 && b * 10 <= r * 3;
         return red || visor;
     };
@@ -296,7 +317,7 @@ inline Marker FindMapMarker(const Image& image) {
             }
         }
     }
-    if (best < 32 || total - best > 24) {
+    if (best < 20 || total - best > 24) {
         return {};
     }
     // Its middle: the box around its pixels in that square.
@@ -375,6 +396,14 @@ inline Result Classify(const Image& image) {
     if (LongestRule(image).length >= 100) {
         if (DarkFraction(image, 6) > .3f) {
             return {Bottom::Menu, TitleMenuPage(image)};
+        }
+        // The pause menu's pages and boxes stand over its bottom bar, a rule in the last rows
+        // (unlit 132-273); a picture with a cyan edge does not, such as the ship's cockpit the
+        // bottom screen shows after a file's Continue (the windscreen's edge, 123-135 px; 88 at
+        // most there). Hidden, as the emblem (2026-11-03, the user: its panel's outline showed
+        // over the view for a few frames).
+        if (LongestRule(image, 195, Height, 70, 15).length < 110) {
+            return {Bottom::Logo};
         }
         Page page = Page::Other;
         if (title.length >= 60) {

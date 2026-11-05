@@ -1,0 +1,3 @@
+// msr-native-direct.exe's resources (direct.c): the program's manifest and icon, as msr-native.exe's (pwr.rc)
+1 24 "pwr.manifest"
+100 ICON "msr-native.ico"

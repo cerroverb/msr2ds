@@ -7,9 +7,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <span>
-#include <QFileInfo>
+#include <utility>
+#ifndef MSR_NATIVE
 #include <QSettings>
+#endif
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
 #include "common/logging/log.h"
@@ -43,8 +46,9 @@ void CheckResult(VkResult result) {
     }
 }
 
-/// A control reminder: the game's buttons by their 3DS names, shown as the game's icons name them
-/// (an Xbox pad's labels, msr/button_glyphs.h); the port's own by gamepad / keyboard.
+/// A control reminder: the game's buttons and the port's controls as tokens ({A}, {Touch}...),
+/// named for the device in use (msr/button_glyphs.h Keys: the pad's labels or the keyboard's keys;
+/// in the emulator-based build the 3DS names as the game's icons show them, and both devices').
 struct ControlHint {
     const char* keys;
     const char* action;
@@ -53,37 +57,37 @@ struct ControlHint {
 // The game offers the map tools, file copy and delete only by touch (its buttons do nothing
 // there); touch mode reaches them.
 constexpr ControlHint PauseMapHints[] = {
-    {"R", "Samus page"},
-    {"B", "Back to the game"},
-    {"L3 / Tab", "Touch mode: scan, map pins, info, settings"},
+    {"{R}", "Samus page"},
+    {"{B}", "Back to the game"},
+    {"{Touch}", "Touch mode: scan, map pins, info, settings"},
 };
 constexpr ControlHint PauseSamusHints[] = {
-    {"Circle Pad", "Choose an item"},
-    {"A", "Read more"},
-    {"L", "Map"},
-    {"B", "Back to the game"},
+    {"{Stick}", "Choose an item"},
+    {"{A}", "Read more"},
+    {"{L}", "Map"},
+    {"{B}", "Back to the game"},
 };
 constexpr ControlHint MapPinsHints[] = {
-    {"L3 / Tab", "Touch mode: move the pins"},
-    {"B", "Back to the map"},
+    {"{Touch}", "Touch mode: move the pins"},
+    {"{B}", "Back to the map"},
 };
 constexpr ControlHint FileListHints[] = {
-    {"A", "Open a file"},
-    {"L3 / Tab", "Touch mode: copy or delete an open file"},
+    {"{A}", "Open a file"},
+    {"{Touch}", "Touch mode: copy or delete an open file"},
 };
 constexpr ControlHint FileOpenHints[] = {
-    {"L3 / Tab", "Touch mode: copy or delete"},
-    {"B", "Back to the files"},
+    {"{Touch}", "Touch mode: copy or delete"},
+    {"{B}", "Back to the files"},
 };
 constexpr ControlHint TouchHints[] = {
-    {"D-pad / stick / arrows", "Move"},
-    {"A / Enter", "Tap; hold to drag"},
-    {"B / Esc", "Leave touch mode"},
+    {"{Move}", "Move"},
+    {"{Tap}", "Tap; hold to drag"},
+    {"{Leave}", "Leave touch mode"},
 };
 constexpr ControlHint MapPinsTouchHints[] = {
-    {"D-pad / stick / arrows", "Move"},
-    {"Hold A / Enter on a pin", "Drag it to the map, or to the bin to remove it"},
-    {"B / Esc", "Leave touch mode"},
+    {"{Move}", "Move"},
+    {"Hold {Tap} on a pin", "Drag it to the map, or to the bin to remove it"},
+    {"{Leave}", "Leave touch mode"},
 };
 constexpr std::span<const ControlHint> HintSets[] = {
     PauseMapHints, PauseSamusHints, MapPinsHints, FileListHints,
@@ -121,6 +125,7 @@ void ApplyStyle() {
     colors[ImGuiCol_SliderGrabActive] = {.5f, .85f, 1.f, 1.f};
     colors[ImGuiCol_Header] = colors[ImGuiCol_HeaderHovered] = accent_dim;
     colors[ImGuiCol_NavCursor] = {.6f, .9f, 1.f, 1.f};
+    colors[ImGuiCol_PlotHistogram] = accent;   // the launcher's build progress
 }
 
 /// A row's label, wrapped before `column` (window local) so no font runs it under the row's
@@ -148,9 +153,11 @@ float NoteHeight(const char* text) {
 
 } // namespace
 
+#ifndef MSR_NATIVE
 void PlayerSettings::Load(const QString& path) {
     QSettings file(path, QSettings::IniFormat);
     widescreen = file.value(QStringLiteral("widescreen"), widescreen).toBool();
+    ultrawide = file.value(QStringLiteral("ultrawide"), ultrawide).toBool() && widescreen;   // never on without 16:9
     camera_zoom = std::clamp(file.value(QStringLiteral("camera_zoom"), camera_zoom).toFloat(),
                              CameraZoomMin, CameraZoomMax);
     hud_scale = file.value(QStringLiteral("hud_scale"), hud_scale).toFloat();
@@ -160,14 +167,17 @@ void PlayerSettings::Load(const QString& path) {
     minimap_opacity = file.value(QStringLiteral("minimap_opacity"), minimap_opacity).toFloat();
     show_counters = file.value(QStringLiteral("show_counters"), show_counters).toBool();
     show_abilities = file.value(QStringLiteral("show_abilities"), show_abilities).toBool();
+    hud_within_16_9 = file.value(QStringLiteral("hud_within_16_9"), hud_within_16_9).toBool();
     panel_scale = file.value(QStringLiteral("panel_scale"), panel_scale).toFloat();
     menu_backdrop = file.value(QStringLiteral("menu_backdrop"), menu_backdrop).toFloat();
     control_hints = file.value(QStringLiteral("control_hints"), control_hints).toBool();
     menu_scale = file.value(QStringLiteral("menu_scale"), menu_scale).toFloat();
     show_fps = file.value(QStringLiteral("show_fps"), show_fps).toBool();
     frame_rate = file.value(QStringLiteral("frame_rate"), frame_rate).toInt();
-    background_shaders =
-        file.value(QStringLiteral("background_shaders"), background_shaders).toBool();
+    bloom = std::clamp(file.value(QStringLiteral("bloom"), bloom).toFloat(), 0.f, 1.f);
+    hdr = file.value(QStringLiteral("hdr"), hdr).toBool();
+    hdr_peak = file.value(QStringLiteral("hdr_peak"), hdr_peak).toFloat();
+    hdr_paper = file.value(QStringLiteral("hdr_paper"), hdr_paper).toFloat();
     if (std::find(FrameRate::Choices.begin(), FrameRate::Choices.end(), frame_rate) ==
         FrameRate::Choices.end()) {
         frame_rate = 60;
@@ -175,6 +185,7 @@ void PlayerSettings::Load(const QString& path) {
     unlock_galleries = file.value(QStringLiteral("unlock_galleries"), unlock_galleries).toBool();
     unlock_fusion_mode =
         file.value(QStringLiteral("unlock_fusion_mode"), unlock_fusion_mode).toBool();
+    unlock_hard_mode = file.value(QStringLiteral("unlock_hard_mode"), unlock_hard_mode).toBool();
     fusion_suit = file.value(QStringLiteral("fusion_suit"), fusion_suit).toBool();
     infinite_energy = file.value(QStringLiteral("infinite_energy"), infinite_energy).toBool();
     infinite_missiles = file.value(QStringLiteral("infinite_missiles"), infinite_missiles).toBool();
@@ -184,6 +195,7 @@ void PlayerSettings::Load(const QString& path) {
 void PlayerSettings::Save(const QString& path) const {
     QSettings file(path, QSettings::IniFormat);
     file.setValue(QStringLiteral("widescreen"), widescreen);
+    file.setValue(QStringLiteral("ultrawide"), ultrawide);
     file.setValue(QStringLiteral("camera_zoom"), camera_zoom);
     file.setValue(QStringLiteral("hud_scale"), hud_scale);
     file.setValue(QStringLiteral("hud_opacity"), hud_opacity);
@@ -192,24 +204,31 @@ void PlayerSettings::Save(const QString& path) const {
     file.setValue(QStringLiteral("minimap_opacity"), minimap_opacity);
     file.setValue(QStringLiteral("show_counters"), show_counters);
     file.setValue(QStringLiteral("show_abilities"), show_abilities);
+    file.setValue(QStringLiteral("hud_within_16_9"), hud_within_16_9);
     file.setValue(QStringLiteral("panel_scale"), panel_scale);
     file.setValue(QStringLiteral("menu_backdrop"), menu_backdrop);
     file.setValue(QStringLiteral("control_hints"), control_hints);
     file.setValue(QStringLiteral("menu_scale"), menu_scale);
     file.setValue(QStringLiteral("show_fps"), show_fps);
     file.setValue(QStringLiteral("frame_rate"), frame_rate);
-    file.setValue(QStringLiteral("background_shaders"), background_shaders);
+    file.setValue(QStringLiteral("bloom"), bloom);
+    file.setValue(QStringLiteral("hdr"), hdr);
+    file.setValue(QStringLiteral("hdr_peak"), hdr_peak);
+    file.setValue(QStringLiteral("hdr_paper"), hdr_paper);
     file.setValue(QStringLiteral("unlock_galleries"), unlock_galleries);
     file.setValue(QStringLiteral("unlock_fusion_mode"), unlock_fusion_mode);
+    file.setValue(QStringLiteral("unlock_hard_mode"), unlock_hard_mode);
     file.setValue(QStringLiteral("fusion_suit"), fusion_suit);
     file.setValue(QStringLiteral("infinite_energy"), infinite_energy);
     file.setValue(QStringLiteral("infinite_missiles"), infinite_missiles);
     file.setValue(QStringLiteral("infinite_aeion"), infinite_aeion);
 }
+#endif
 
 void PlayerSettings::Publish() const {
     namespace P = Presentation;
     P::widescreen = widescreen;
+    P::ultrawide = ultrawide;
     P::zoom = camera_zoom;
     P::hud_scale = hud_scale;
     P::hud_opacity = hud_opacity;
@@ -218,11 +237,17 @@ void PlayerSettings::Publish() const {
     P::minimap_opacity = minimap_opacity;
     P::show_counters = show_counters;
     P::show_abilities = show_abilities;
+    P::hud_within_16_9 = hud_within_16_9;
     P::panel_scale = panel_scale;
     P::menu_backdrop = menu_backdrop;
+    P::bloom = bloom;
+    P::hdr = hdr;
+    P::hdr_peak = hdr_peak;
+    P::hdr_paper = hdr_paper;
     FrameRate::target = frame_rate;
     Cheats::enabled = (unlock_galleries ? Cheats::Galleries : 0u) |
                       (unlock_fusion_mode ? Cheats::FusionMode : 0u) |
+                      (unlock_hard_mode ? Cheats::HardMode : 0u) |
                       (fusion_suit ? Cheats::FusionSuit : 0u) |
                       (infinite_energy ? Cheats::InfiniteEnergy : 0u) |
                       (infinite_missiles ? Cheats::InfiniteMissiles : 0u) |
@@ -238,7 +263,8 @@ Overlay::Overlay() {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     // The game's layout, Nintendo's: its A is the right face button (Xbox B) and chooses, its B
-    // the bottom one (Xbox A) and goes back.
+    // the bottom one (Xbox A) and goes back. msr-native gives the pad's choosing button as the
+    // right one (overlay_host.cpp PadKeyOf: an Xbox or PlayStation pad chooses with the bottom one).
     io.ConfigNavSwapGamepadButtons = true;
     io.ConfigNavCursorVisibleAuto = true;
     ApplyStyle();
@@ -255,7 +281,8 @@ Overlay::Overlay() {
                                  "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"};
     ImFont* font = nullptr;
     for (const char* path : fonts) {
-        if (QFileInfo::exists(QString::fromUtf8(path))) {
+        std::error_code error;
+        if (std::filesystem::exists(path, error)) {
             font = io.Fonts->AddFontFromFileTTF(path, font_size);
             if (font) {
                 break;
@@ -276,6 +303,9 @@ Overlay::~Overlay() {
 }
 
 void Overlay::SetVisible(bool show) {
+    if (!show && launcher_active.load()) {
+        return;   // the launcher is this menu: it stays open
+    }
     visible = show;
     // Input goes back to the game only once the closing button is released (InputBridge).
     if (show) {
@@ -337,9 +367,20 @@ std::vector<OverlayAction> Overlay::TakeActions() {
     return std::exchange(actions, {});
 }
 
-void Overlay::Act(OverlayAction::Kind kind, int value) {
+void Overlay::Act(OverlayAction::Kind kind, int value, std::string text) {
     std::scoped_lock lock{mutex};
-    actions.push_back({kind, emulator, value});
+    actions.push_back({kind, emulator, value, std::move(text)});
+}
+
+void Overlay::SetLauncher(const LauncherSnapshot& snapshot) {
+    {
+        std::scoped_lock lock{mutex};
+        launcher = snapshot;
+    }
+    launcher_active = snapshot.active;
+    if (snapshot.active) {
+        visible = true;
+    }
 }
 
 void Overlay::SetControls(const ControlsSnapshot& snapshot) {
@@ -380,6 +421,13 @@ void Overlay::Init(const OverlayHook::VulkanContext& vulkan) {
     info.QueueFamily = vulkan.queue_family;
     info.Queue = vulkan.queue;
     info.RenderPass = vulkan.render_pass;
+    if (!vulkan.render_pass) {
+        // msr-native draws its presentation with dynamic rendering
+        info.UseDynamicRendering = true;
+        info.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+        info.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+        info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &vulkan.color_format;
+    }
     info.MinImageCount = 2;
     // One spare vertex buffer set beyond the frames the presenter keeps in flight.
     info.ImageCount = std::max(3u, vulkan.image_count + 1);
@@ -468,11 +516,14 @@ void Overlay::Draw(VkCommandBuffer command, std::uint32_t width, std::uint32_t h
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
-    DrawHint(scale, static_cast<float>(width), static_cast<float>(height));
+    const bool launching = launcher_active.load();   // the launcher: no game behind the menu
+    if (!launching) {
+        DrawHint(scale, static_cast<float>(width), static_cast<float>(height));
+    }
     if (!show) {
         DrawControlHints(static_cast<float>(width), static_cast<float>(height));
     }
-    if (GetPlayerSettings().show_fps) {
+    if (GetPlayerSettings().show_fps && !launching) {
         DrawFps(scale, static_cast<float>(width));
     }
     if (show) {
@@ -568,7 +619,7 @@ void Overlay::DrawControlHints(float width, float height) {
     const auto hints = HintSets[hint_set];
     std::vector<std::string> keys;
     for (const auto& hint : hints) {
-        keys.push_back(ButtonGlyphs::Rename(hint.keys, ButtonGlyphs::shown.load()));
+        keys.push_back(ButtonGlyphs::Keys(hint.keys));
     }
     float box_h = pad * 2.f;
     for (std::size_t i = 0; i < hints.size(); ++i) {
@@ -615,16 +666,54 @@ void Overlay::DrawControls(float scale, float label_width,
     if (ImGui::Button("Keyboard layout", {half, 0.f})) {
         Act(OverlayAction::Kind::KeyboardLayout);
     }
+    // msr-native: the Aeion abilities (the 3DS D-pad) on the right stick, the pad's D-pad moving
+    // Samus as the left stick does
+    if (snapshot.right_stick_option) {
+        bool on = snapshot.right_stick_dpad;
+        if (ImGui::Checkbox("Aeion abilities on the right stick (the D-pad moves)", &on)) {
+            Act(OverlayAction::Kind::RightStickDpad, on ? 1 : 0);
+        }
+    }
+    // msr-native: menus choose with the game's A as bound below (on: the 3DS's layout, A on the right), not with A /
+    // Cross, the bottom button (off, the default)
+    if (snapshot.menu_layout_option) {
+        bool on = snapshot.menu_confirm_right;
+        if (ImGui::Checkbox("Nintendo menu layout (the game's A confirms, as bound below)", &on)) {
+            Act(OverlayAction::Kind::MenuConfirmRight, on ? 1 : 0);
+        }
+    }
 
-    // The bindings scroll in their own region; the reference stays below them.
-    constexpr const char* reference[] = {
-        "Beams: ZR (right trigger)        Morph Ball: ZL (left trigger)",
-        "Settings: F1 or Select        Fullscreen: F11",
-        "Touch navigation: Tab, or L3 in menus",
-    };
+    // The bindings scroll in their own region; the reference stays below them. msr-native names
+    // the keys or buttons of the device in use (ButtonGlyphs::Keys) and aims with the mouse (video.c).
+    const bool native = snapshot.profile == "msr-native";
+    std::vector<std::string> reference;
+    if (native) {
+        reference = {
+            "Mouse: the left button shoots, the right one held aims at the pointer, the wheel changes beams",
+            ButtonGlyphs::Keys("Move: {Stick}        Beams: {Beams}        Morph Ball: {Morph}"),
+            ButtonGlyphs::Keys("Settings: {Close}        Fullscreen: F11"),
+            ButtonGlyphs::Keys("Touch navigation: {Touch} in menus"),
+        };
+        // a pad chooses and goes back in menus with its own layout's buttons (msr/glyphs.cpp), whatever A and B do in play
+        const u32 dev = ButtonGlyphs::device.load();
+        if (dev == ButtonGlyphs::Xbox || dev == ButtonGlyphs::PlayStation || dev == ButtonGlyphs::Nintendo) {
+            reference.push_back(ButtonGlyphs::Keys(snapshot.menu_confirm_right
+                ? "In menus: {Choose} chooses, {Back} goes back"
+                : "In menus: {Choose} chooses, {Back} goes back (the rows above are for play)"));
+        }
+        if (snapshot.right_stick_dpad) {
+            reference.push_back("Aeion abilities: the right stick        The D-pad moves, as the left stick");
+        }
+    } else {
+        reference = {
+            "Beams: ZR (right trigger)        Morph Ball: ZL (left trigger)",
+            "Settings: F1 or Select        Fullscreen: F11",
+            "Touch navigation: Tab, or L3 in menus",
+        };
+    }
     float reference_height = 0.f;
-    for (const char* line : reference) {
-        reference_height += NoteHeight(line);
+    for (const auto& line : reference) {
+        reference_height += NoteHeight(line.c_str());
     }
     const float height =
         std::max(80.f * scale, ImGui::GetContentRegionAvail().y - reference_height);
@@ -648,14 +737,18 @@ void Overlay::DrawControls(float scale, float label_width,
     }
     ImGui::EndChild();
 
-    for (const char* line : reference) {
-        Note(line);
+    for (const auto& line : reference) {
+        Note(line.c_str());
     }
 }
 
 ModsSnapshot Overlay::ModsCopy() {
     std::scoped_lock lock{mutex};
     return mods;
+}
+
+bool Overlay::ModsTabShown() const {
+    return was_visible && (tab == 4 || tab == 5);   // DrawMenu's Mods and Textures
 }
 
 void Overlay::ChangeMods(OverlayAction::Kind kind, int value,
@@ -758,9 +851,11 @@ void Overlay::DrawGameMods(const std::function<void()>& default_focus) {
                                   default_focus);
     ImGui::EndChild();
 
+#ifndef __ANDROID__   // msr-native's Android app: the folder above, reached from a PC over USB
     if (ImGui::Button("Open the mods folder", {-FLT_MIN, 0.f})) {
         Act(OverlayAction::Kind::GameModsFolder);
     }
+#endif
     if (count == 0) {
         default_focus();
     }
@@ -788,9 +883,11 @@ void Overlay::DrawTexturePacks(float label_width, const std::function<void()>& d
                                   OverlayAction::Kind::TexturePackDown, default_focus);
     ImGui::EndChild();
 
+#ifndef __ANDROID__   // msr-native's Android app: the folder above, reached from a PC over USB
     if (ImGui::Button("Open the texture packs folder", {-FLT_MIN, 0.f})) {
         Act(OverlayAction::Kind::ModsFolder);
     }
+#endif
     if (count == 0) {
         default_focus();
     }
@@ -801,10 +898,12 @@ void Overlay::DrawTexturePacks(float label_width, const std::function<void()>& d
             ChangeMods(kind, value ? 1 : 0, [field, value](ModsSnapshot& m) { m.*field = value; });
         }
     };
+    ImGui::BeginDisabled(!snapshot.texture_options);
     toggle("Preload textures", "##preload", snapshot.preload, OverlayAction::Kind::PreloadTextures,
            &ModsSnapshot::preload);
     toggle("Dump game textures", "##dump", snapshot.dump, OverlayAction::Kind::DumpTextures,
            &ModsSnapshot::dump);
+    ImGui::EndDisabled();
     DrawModsFooter(snapshot, packs_note);
 }
 
@@ -826,20 +925,22 @@ void Overlay::DrawMenu(float scale, bool appearing) {
     // Snapshots edited by the widgets; changes are published or queued below.
     PlayerSettings p;
     EmulatorSettings e;
+    LauncherSnapshot l;
     {
         std::scoped_lock lock{mutex};
         p = player;
         e = emulator;
+        l = launcher;
     }
     const PlayerSettings before = p;
     bool player_changed = false;
     bool emulator_changed = false;
 
     constexpr int TabCount = 7;
-    if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_PageUp, false)) {
         requested_tab = (tab + TabCount - 1) % TabCount;
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_PageDown, false)) {
         requested_tab = (tab + 1) % TabCount;
     }
 
@@ -883,12 +984,18 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             }
         };
         if (tab_item("Game", 0)) {
+            if (l.active) {
+                DrawLauncher(l, label_width, default_focus);
+            }
             row("Volume");
             emulator_changed |= ImGui::SliderInt("##volume", &e.volume, 0, 100, "%d%%");
             row("Unlock amiibo galleries");
             player_changed |= ImGui::Checkbox("##galleries", &p.unlock_galleries);
             row("Unlock Fusion Mode");
             player_changed |= ImGui::Checkbox("##fusionmode", &p.unlock_fusion_mode);
+            row("Hard Mode from the start");
+            player_changed |= ImGui::Checkbox("##hardmode", &p.unlock_hard_mode);
+            Note("A new file and every New Game offer Normal and Hard (Fusion too).");
             row("Fusion suit, any difficulty");
             if (Cheats::randomizer.load(std::memory_order_relaxed)) {
                 // The randomizer has its own Fusion suit option (msr/cheats.h): kept off.
@@ -896,28 +1003,44 @@ void Overlay::DrawMenu(float scale, bool appearing) {
                 ImGui::BeginDisabled();
                 ImGui::Checkbox("##fusionsuit", &off);
                 ImGui::EndDisabled();
-                Note("Off with the randomizer. Fusion Mode: a save's New Game.");
+                Note("Off with the randomizer. Fusion Mode: chosen when a game starts.");
             } else {
                 player_changed |= ImGui::Checkbox("##fusionsuit", &p.fusion_suit);
-                Note("Fusion Mode: a save's New Game. The suit switches at once.");
+                Note("Fusion Mode: chosen when a game starts. The suit switches at once.");
             }
             ImGui::Spacing();
             const ImVec2 button{-FLT_MIN, 0.f};
-            if (ImGui::Button("Resume", button)) {
-                SetVisible(false);
-            }
-            default_focus();
-            if (ImGui::Button("Quick save", button)) {
-                Act(OverlayAction::Kind::QuickSave);
-                SetVisible(false);
-            }
-            if (ImGui::Button("Quick load", button)) {
-                Act(OverlayAction::Kind::QuickLoad);
-                SetVisible(false);
-            }
-            if (ImGui::Button("Restart", button)) {
-                Act(OverlayAction::Kind::Restart);
-                SetVisible(false);
+            if (l.active) {
+#ifdef __ANDROID__
+                // msr-native's Android app: no folders to open; a PC reaches this one over USB
+                Note(("The user folder (saves, settings, game mods, texture packs, the game file and the native "
+                      "code): " + l.folder + ". From a PC over USB: Android/data/io.github.gminustwo.msrnative/files/user.")
+                         .c_str());
+#else
+                if (ImGui::Button("Open the user folder", button)) {
+                    Act(OverlayAction::Kind::LauncherFolder);
+                }
+                Note(("Saves, settings, game mods and texture packs: " + l.folder).c_str());
+#endif
+            } else {
+                if (ImGui::Button("Resume", button)) {
+                    SetVisible(false);
+                }
+                default_focus();
+                ImGui::BeginDisabled(!e.quick_saves);
+                if (ImGui::Button("Quick save", button)) {
+                    Act(OverlayAction::Kind::QuickSave);
+                    SetVisible(false);
+                }
+                if (ImGui::Button("Quick load", button)) {
+                    Act(OverlayAction::Kind::QuickLoad);
+                    SetVisible(false);
+                }
+                ImGui::EndDisabled();
+                if (ImGui::Button("Restart", button)) {
+                    Act(OverlayAction::Kind::Restart);
+                    SetVisible(false);
+                }
             }
             if (ImGui::Button("Quit", button)) {
                 Act(OverlayAction::Kind::Quit);
@@ -925,18 +1048,88 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             end_tab_item();
         }
         if (tab_item("Display", 1)) {
+            if (e.deck_preset) {
+                // Measured on a Steam Deck OLED with the 4x texture pack (2026-11-03): 3x, the Deck's own 720p,
+                // left 40% of the GPU spare at 60 FPS (about 100 without a limit); 4x held 60 with less to spare.
+                const bool in_use = e.resolution == 3 && e.vsync && p.frame_rate == 60;
+                if (ImGui::Button("Steam Deck: 60 FPS with texture packs", {-FLT_MIN, 0.f})) {
+                    e.resolution = 3;
+                    e.vsync = true;
+                    emulator_changed = true;
+                    p.frame_rate = 60;
+                    player_changed = true;
+                }
+                default_focus();
+                Note(in_use ? "In use: 3x internal resolution, 60 FPS, V-Sync. For even frames, set the Deck's refresh "
+                              "rate to 60 Hz (Quick Access menu, Performance)."
+                            : "Sets 3x internal resolution (the Deck's 720p), 60 FPS and V-Sync. For even frames, set "
+                              "the Deck's refresh rate to 60 Hz (Quick Access menu, Performance).");
+                ImGui::Spacing();
+            }
             row("Fullscreen");
             emulator_changed |= ImGui::Checkbox("##fullscreen", &e.fullscreen);
-            default_focus();
+            if (!e.deck_preset) {
+                default_focus();
+            }
+            // Ultrawide widens the 16:9 view: on, it turns Widescreen on; Widescreen off turns it off
             row("Widescreen (16:9)");
-            player_changed |= ImGui::Checkbox("##widescreen", &p.widescreen);
+            if (ImGui::Checkbox("##widescreen", &p.widescreen)) {
+                player_changed = true;
+                p.ultrawide = p.ultrawide && p.widescreen;
+            }
+            if (e.ultrawide_option) {
+                row("Ultrawide (up to 32:9)");
+                if (ImGui::Checkbox("##ultrawide", &p.ultrawide)) {
+                    player_changed = true;
+                    p.widescreen = p.widescreen || p.ultrawide;
+                }
+                Note("In play, a window wider than 16:9 shows more of the level. It needs Widescreen "
+                     "(16:9), which it turns on.");
+            }
             row("Camera zoom");
             player_changed |= ImGui::SliderFloat("##zoom", &p.camera_zoom, CameraZoomMin,
                                                  CameraZoomMax, "%.2f");
+            if (e.bloom_option) {
+                row("Bloom");
+                int bloom = static_cast<int>(std::lround(p.bloom * 100.f));
+                if (ImGui::SliderInt("##bloom", &bloom, 0, 100, "%d%%")) {
+                    p.bloom = static_cast<float>(bloom) / 100.f;
+                    player_changed = true;
+                }
+            }
+            if (e.hdr_option) {
+                row("HDR");
+                bool hdr = p.hdr && e.hdr_option == 2;
+                ImGui::BeginDisabled(e.hdr_option < 2);
+                if (ImGui::Checkbox("##hdr", &hdr)) {
+                    p.hdr = hdr;
+                    player_changed = true;
+                }
+                ImGui::EndDisabled();
+                if (e.hdr_option < 2) {
+                    Note("Turn on Use HDR in Windows' display settings first.");
+                }
+                if (hdr) {
+                    row("HDR highlights");
+                    int peak = static_cast<int>(p.hdr_peak > 0.f ? p.hdr_peak : e.display_peak);
+                    if (ImGui::SliderInt("##hdrpeak", &peak, 400, 4000, "%d nits")) {
+                        p.hdr_peak = static_cast<float>(peak);
+                        player_changed = true;
+                    }
+                    row("HDR paper white");
+                    int paper = static_cast<int>(p.hdr_paper > 0.f ? p.hdr_paper : e.display_paper);
+                    if (ImGui::SliderInt("##hdrpaper", &paper, 80, 500, "%d nits")) {
+                        p.hdr_paper = static_cast<float>(paper);
+                        player_changed = true;
+                    }
+                    Note("Highlights: the brightest lights and glows. Paper white: the game's white, menus and HUD.");
+                }
+            }
             row("Internal resolution");
-            int resolution = std::clamp(e.resolution, 0, static_cast<int>(ResolutionNames.size()) - 1);
-            if (ImGui::Combo("##resolution", &resolution, ResolutionNames.data(),
-                             static_cast<int>(ResolutionNames.size()))) {
+            const int resolutions =
+                std::clamp(e.max_resolution + 1, 2, static_cast<int>(ResolutionNames.size()));
+            int resolution = std::clamp(e.resolution, 0, resolutions - 1);
+            if (ImGui::Combo("##resolution", &resolution, ResolutionNames.data(), resolutions)) {
                 e.resolution = resolution;
                 emulator_changed = true;
             }
@@ -974,6 +1167,11 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             player_changed |= ImGui::Checkbox("##counters", &p.show_counters);
             row("Aeion abilities");
             player_changed |= ImGui::Checkbox("##abilities", &p.show_abilities);
+            if (e.ultrawide_option) {
+                row("HUD within 16:9");
+                player_changed |= ImGui::Checkbox("##hud169", &p.hud_within_16_9);
+                Note("On an ultrawide screen, the HUD nearer the middle.");
+            }
             row("Menu panel size");
             player_changed |= ImGui::SliderFloat("##panel", &p.panel_scale, .5f, 1.f, "%.2f");
             row("Title menu background");
@@ -1012,8 +1210,8 @@ void Overlay::DrawMenu(float scale, bool appearing) {
     requested_tab = -1;
 
     ImGui::Separator();
-    const std::string help = ButtonGlyphs::Rename(
-        "A choose   B back   LB / RB tabs   Select or F1 close", ButtonGlyphs::shown.load());
+    const std::string help = ButtonGlyphs::Keys(l.active ? "{Choose} choose   {Tabs} tabs"
+                                                         : "{Choose} choose   {Back} back   {Tabs} tabs   {Close} close");
     ImGui::TextDisabled("%s", help.c_str());
     ImGui::End();
 
@@ -1023,7 +1221,8 @@ void Overlay::DrawMenu(float scale, bool appearing) {
         emulator = e;
     }
     if (player_changed) {
-        PlayerChanged(p.widescreen != before.widescreen || p.panel_scale != before.panel_scale);
+        PlayerChanged(p.widescreen != before.widescreen || p.ultrawide != before.ultrawide ||
+                      p.panel_scale != before.panel_scale);
         if (p.frame_rate != before.frame_rate) {
             Act(OverlayAction::Kind::FrameRate);
         }
@@ -1032,12 +1231,166 @@ void Overlay::DrawMenu(float scale, bool appearing) {
         EmulatorChanged();
     }
 
+    // The focus shown from the start, so Enter, Space or the pad's button works on the focused button at once
+    // (ImGui hides it until a direction is pressed, and ignores activation while it is hidden).
+    if (appearing) {
+        ImGui::SetNavCursorVisible(true);
+    }
+
     // Back out of the menu with B (the bottom face button) or Escape when nothing is being edited.
     if (!ImGui::IsAnyItemActive() && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) ||
                                       ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
                                       ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false))) {
         SetVisible(false);
     }
+}
+
+void Overlay::DrawLauncher(const LauncherSnapshot& l, float label_width,
+                           const std::function<void()>& default_focus) {
+    using Code = LauncherSnapshot::Code;
+    using Update = LauncherSnapshot::Update;
+    const auto& style = ImGui::GetStyle();
+    const ImVec4 good{.53f, .89f, .6f, 1.f}, bad{1.f, .55f, .45f, 1.f}, accent{.43f, .8f, .98f, 1.f};
+    // A newer release (msr-native's launcher looks when it starts): put in place here, or its page
+    if (l.update != Update::None) {
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextColored(accent, "msr-native %s is available.", l.update_version.c_str());
+        ImGui::PopTextWrapPos();
+        const float half = (ImGui::GetContentRegionAvail().x - style.ItemSpacing.x) / 2.f;
+        if (l.update == Update::Working) {
+            if (l.update_progress >= 0.f) {
+                ImGui::ProgressBar(l.update_progress, {-FLT_MIN, 0.f});
+            }
+        } else if (l.update_installable) {
+            if (ImGui::Button(l.update == Update::Failed ? "Try again" : "Update now", {half, 0.f})) {
+                Act(OverlayAction::Kind::LauncherUpdate);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("What's new", {half, 0.f})) {
+                Act(OverlayAction::Kind::LauncherUpdatePage);
+            }
+        } else if (ImGui::Button("Open the download page", {-FLT_MIN, 0.f})) {
+            Act(OverlayAction::Kind::LauncherUpdatePage);
+        }
+        if (!l.update_note.empty()) {
+            ImGui::PushTextWrapPos(0.f);
+            if (l.update == Update::Failed) {
+                ImGui::TextColored(bad, "%s", l.update_note.c_str());
+            } else {
+                Note(l.update_note.c_str());
+            }
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::Separator();
+        ImGui::Spacing();
+    }
+    // Play: the first and largest button, focused when it can start the game
+    ImGui::BeginDisabled(!l.can_play);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered));
+    if (ImGui::Button("Play", {-FLT_MIN, ImGui::GetFrameHeight() * 1.7f})) {
+        Act(OverlayAction::Kind::LauncherPlay);
+    }
+    ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    if (l.can_play) {
+        default_focus();
+    }
+    ImGui::Spacing();
+
+    // The game file: typed or chosen with the file dialog
+    if (l.game != game_input_from) {
+        game_input_from = l.game;
+        std::snprintf(game_input.data(), game_input.size(), "%s", l.game.c_str());
+    }
+    Label("Game file", label_width);
+    const float browse = l.can_browse ? ImGui::CalcTextSize("Browse...").x + style.FramePadding.x * 2.f : 0.f;
+    ImGui::SetNextItemWidth(l.can_browse ? -(browse + style.ItemSpacing.x) : -FLT_MIN);
+    ImGui::InputTextWithHint("##game", "Samus Returns (USA), a decrypted .3ds, .cci, .cxi or .zcci", game_input.data(),
+                             game_input.size());
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        Act(OverlayAction::Kind::LauncherGame, 0, game_input.data());
+    }
+    if (!l.can_play && l.game.empty()) {
+        default_focus();
+    }
+    if (l.can_browse) {
+        ImGui::SameLine();
+        if (ImGui::Button("Browse...")) {
+            Act(OverlayAction::Kind::LauncherBrowse);
+        }
+    }
+    if (!l.game_note.empty()) {
+        ImGui::SetCursorPosX(label_width);
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextColored(bad, "%s", l.game_note.c_str());
+        ImGui::PopTextWrapPos();
+    }
+
+    // The native code: the game's code recompiled from the game file, built once
+    Label("Native code", label_width);
+    static constexpr const char* states[] = {"Not built yet", "Ready", "Built by another version: rebuild it",
+                                             "Building...", "The build failed"};
+    const ImVec4 color = l.code == Code::Ready ? good : l.code == Code::Building ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : bad;
+    ImGui::PushTextWrapPos(0.f);
+    ImGui::TextColored(color, "%s", states[static_cast<int>(l.code)]);
+    ImGui::PopTextWrapPos();
+    ImGui::SetCursorPosX(label_width);
+    ImGui::BeginGroup();
+    const float width = ImGui::GetContentRegionAvail().x;
+    if (l.code == Code::Building) {
+        if (l.progress >= 0.f) {
+            ImGui::ProgressBar(l.progress, {width, 0.f});
+        }
+        if (ImGui::Button("Cancel", {width, 0.f})) {
+            Act(OverlayAction::Kind::LauncherCancel);
+        }
+    } else if (!l.can_build) {
+        // msr-native's Android app: the native code comes from a PC (its launcher's Build for Android)
+        if (l.code != Code::Ready) {
+            ImGui::PushTextWrapPos(0.f);
+            Note("Build it on a PC: in msr-native for Windows or Linux, choose the same game file and click Build for "
+                 "Android on its Game tab. Then copy the recomp-android folder it makes (in its user/msr folder) into "
+                 "this app's user/msr folder, shown below.");
+            ImGui::PopTextWrapPos();
+        }
+    } else {
+        ImGui::BeginDisabled(l.game.empty() || !l.game_note.empty());
+        if (ImGui::Button(l.code == Code::Missing ? "Build the native code" : "Rebuild the native code", {width, 0.f})) {
+            Act(OverlayAction::Kind::LauncherBuild);
+        }
+        ImGui::EndDisabled();
+        if (!l.can_play && !l.game.empty() && l.game_note.empty()) {
+            default_focus();
+        }
+    }
+    if (!l.code_note.empty()) {
+        ImGui::PushTextWrapPos(0.f);
+        Note(l.code_note.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    if (l.code == Code::Ready && !l.direct.empty()) {
+        ImGui::PushTextWrapPos(0.f);
+        Note(("To play without this menu, start " + l.direct + " in the program's folder.").c_str());
+        ImGui::PopTextWrapPos();
+    }
+    if (l.android_build && l.code != Code::Building) {   // the Android app's native code, built here for it
+        ImGui::Spacing();
+        ImGui::BeginDisabled(l.game.empty() || !l.game_note.empty());
+        if (ImGui::Button("Build for Android", {width, 0.f})) {
+            Act(OverlayAction::Kind::LauncherBuildAndroid);
+        }
+        ImGui::EndDisabled();
+        ImGui::PushTextWrapPos(0.f);
+        Note(l.android_note.empty() ? "The native code for msr-native's Android app, from the same game file: a few "
+                                      "minutes, then copied to the phone or handheld."
+                                    : l.android_note.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::EndGroup();
+    ImGui::Spacing();
+    Note((l.version + ": the game's code runs as native code built from your own dump, on a small "
+          "3DS runtime of its own. Nothing of the game comes with this program.").c_str());
+    ImGui::Separator();
 }
 
 Overlay& GetOverlay() {

@@ -42,3 +42,6 @@
 0x4DD3F4
 0x4E2134
 0x4E3430
+# Hard Mode from the start (2026-11-03): native code built before it does not check this word, so
+# msr-native runs its function on the interpreter (native/runtime/msr/patches.cpp).
+0x4E30C8

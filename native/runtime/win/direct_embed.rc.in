@@ -1,0 +1,3 @@
+// msr-native-direct.exe (direct.c) inside msr-native.exe, for the launcher to write beside it (launcher.cpp, the
+// direct start). CMake fills in the path (native/CMakeLists.txt).
+200 RCDATA "@MSR_DIRECT_EXE@"

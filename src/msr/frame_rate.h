@@ -18,7 +18,7 @@
 namespace MSR::FrameRate {
 
 /// The rates offered to the player.
-inline constexpr std::array<int, 4> Choices{30, 60, 120, 144};
+inline constexpr std::array<int, 5> Choices{30, 60, 90, 120, 144};
 
 /// Frames per second chosen by the player; 0 leaves the emulator as upstream.
 inline std::atomic<int> target{0};
@@ -38,7 +38,7 @@ constexpr double RefreshRate(int fps) {
 }
 
 /// The game's frame limit in whole milliseconds. Above 30 FPS it stays just under the frame
-/// period, so the VBlank wait that follows sets the pace: 16, 8 and 6 ms.
+/// period, so the VBlank wait that follows sets the pace: 16, 11, 8 and 6 ms.
 constexpr u32 LimitMs(int fps) {
     return fps <= 30 ? 33 : static_cast<u32>((1000 + fps - 1) / fps - 1);
 }

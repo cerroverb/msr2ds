@@ -188,6 +188,8 @@ def localize(line):
 
 
 REPO = HERE.parents[2]
+# The compiler for the timing helper; build_module.py sets the player's (Zig from the kit).
+TICKS_COMMAND = ['g++']
 
 
 def instruction_ticks(an, work_dir):
@@ -197,8 +199,9 @@ def instruction_ticks(an, work_dir):
     exe = work_dir / 'ticks.exe'
     sources = [HERE / 'ticks.cpp', REPO / 'src/core/arm/dynarmic/arm_tick_counts.cpp']
     if not exe.exists() or any(src.stat().st_mtime > exe.stat().st_mtime for src in sources):
-        subprocess.run(['g++', '-std=c++20', '-O1', '-I', str(REPO / 'src'), '-o', str(exe)] +
-                       [str(src) for src in sources], check=True)
+        subprocess.run(TICKS_COMMAND + ['-std=c++20', '-O1', '-I', str(REPO / 'src'), '-o', str(exe)] +
+                       [str(src) for src in sources], check=True,
+                       creationflags=0x08000000 if sys.platform == 'win32' else 0)
     keys = sorted(an.insns)
     words = bytearray()
     for addr, thumb in keys:
@@ -213,7 +216,8 @@ def instruction_ticks(an, work_dir):
             word = an.word(addr)
         words += struct.pack('<II', 1 if thumb else 0, word)
     (work_dir / 'ticks.in').write_bytes(bytes(words))
-    subprocess.run([str(exe), str(work_dir / 'ticks.in'), str(work_dir / 'ticks.out')], check=True)
+    subprocess.run([str(exe), str(work_dir / 'ticks.in'), str(work_dir / 'ticks.out')], check=True,
+                   creationflags=0x08000000 if sys.platform == 'win32' else 0)
     costs = struct.unpack('<%dI' % len(keys), (work_dir / 'ticks.out').read_bytes())
     return dict(zip(keys, costs))
 
@@ -288,6 +292,24 @@ def generate(an, regions, out_dir, shard_size=6000, code_hash=None, shard_span=0
         patches.append('    {0x%08Xu, %du, 0x%08Xu},' % (address, size, original))
     registry += ['const Patchable kPatchable[] = {'] + (patches or ['    {0u, 0u, 0u},']) + ['};']
     registry.append('const u32 kPatchableCount = %du;' % len(patches))
+    # Each function's code by its entry, as runs of nearby instructions (a function may jump to code far
+    # away, a shared tail, so one range would take in much of the game): msr-native interprets the
+    # functions a game mod's code patch changes (native/runtime/dispatch.cpp).
+    spans = []
+    for region in regions:
+        lo = hi = None
+        for a in sorted(region.insns):
+            end = a + region.insns[a]['size']
+            if lo is not None and a <= hi + 0x100:
+                hi = max(hi, end)
+                continue
+            if lo is not None:
+                spans.append('    {0x%08Xu, %du, 0x%08Xu, 0x%08Xu},' % (region.entry, region.thumb, lo, hi))
+            lo, hi = a, end
+        if lo is not None:
+            spans.append('    {0x%08Xu, %du, 0x%08Xu, 0x%08Xu},' % (region.entry, region.thumb, lo, hi))
+    registry += ['const RegionSpan kRegionSpans[] = {'] + (spans or ['    {0u, 0u, 0u, 0u},']) + ['};']
+    registry.append('const u32 kRegionSpanCount = %du;' % len(spans))
     registry.append('} // namespace MsrAot')
     write_if_changed(out_dir / 'aot_registry.cpp', '\n'.join(registry) + '\n')
 

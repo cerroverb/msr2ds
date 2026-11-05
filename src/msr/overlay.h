@@ -15,7 +15,9 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#ifndef MSR_NATIVE
 #include <QString>
+#endif
 #include "msr/overlay_hook.h"
 
 struct ImGuiContext;
@@ -25,6 +27,7 @@ namespace MSR {
 /// Options of the single-screen presentation, saved in user/msr/settings.ini.
 struct PlayerSettings {
     bool widescreen = true;
+    bool ultrawide = true;   ///< With widescreen: the view fills a window wider than 16:9, up to 32:9 (never on without it)
     float camera_zoom = 1.f; ///< The view in play: below 1 wider, above 1 closer
     float hud_scale = .6f;
     float hud_opacity = 1.f;
@@ -33,27 +36,36 @@ struct PlayerSettings {
     float minimap_opacity = .85f;
     bool show_counters = true;
     bool show_abilities = true;
+    bool hud_within_16_9 = false; ///< Ultrawide: the HUD at the corners of the view's middle 16:9
     float panel_scale = 1.f;
     float menu_backdrop = .75f; ///< Opacity of the card behind the title menus
     bool control_hints = true;  ///< Help text beside the pause menu, file select and touch mode
     float menu_scale = 1.34f;
     bool show_fps = false;
     int frame_rate = 60; ///< One of FrameRate::Choices (msr/frame_rate.h)
-    /// macOS: shaders built in the background (async_shader_compilation, msr/defaults.cpp), so the
-    /// first sight of an effect does not pause the game while Metal compiles it; the effect is
-    /// missing for those frames instead (flicker).
-    bool background_shaders = false;
+    // msr-native's picture (EmulatorSettings::bloom_option, hdr_option)
+    float bloom = .75f;    ///< The game's glow, 1 = as the game draws it
+    bool hdr = false;      ///< HDR output
+    float hdr_peak = 0.f;  ///< HDR: the brightest highlights in nits, 0 = the display's peak
+    float hdr_paper = 0.f; ///< HDR: the game's white in nits, 0 = Windows' SDR content brightness
     // Extras otherwise given by amiibo (msr/cheats.h)
     bool unlock_galleries = true;
     bool unlock_fusion_mode = true;
+    bool unlock_hard_mode = true;  ///< Hard Mode from the start: a new file and every New Game offer it
     bool fusion_suit = false;
     // Cheats: inventory items kept at their maximum (msr/cheats.h Refills)
     bool infinite_energy = false;
     bool infinite_missiles = false; ///< Super Missiles and Power Bombs too
     bool infinite_aeion = false;
 
+#ifdef MSR_NATIVE
+    // msr-native reads and writes settings.ini without Qt (native/runtime/msr/settings.cpp)
+    void Load(const std::string& path);
+    void Save(const std::string& path) const;
+#else
     void Load(const QString& path);
     void Save(const QString& path) const;
+#endif
     /// Pushes the values to the renderer (msr/presentation.h).
     void Publish() const;
 };
@@ -63,8 +75,8 @@ inline constexpr float CameraZoomMin = .7f;
 inline constexpr float CameraZoomMax = 1.5f;
 
 /// Frame rate choices, as FrameRate::Choices.
-inline constexpr std::array<const char*, 4> FrameRateNames = {"30 FPS (original)", "60 FPS",
-                                                              "120 FPS", "144 FPS"};
+inline constexpr std::array<const char*, 5> FrameRateNames = {"30 FPS (original)", "60 FPS",
+                                                              "90 FPS", "120 FPS", "144 FPS"};
 
 /// Internal resolution choices, by factor (0 = match the window).
 inline constexpr std::array<const char*, 11> ResolutionNames = {
@@ -77,6 +89,13 @@ struct EmulatorSettings {
     int resolution = 9; ///< Internal resolution factor, 0 = match the window
     bool vsync = true;
     int volume = 100;   ///< Percent
+    int max_resolution = 10; ///< The largest factor offered
+    bool quick_saves = true; ///< Quick save and load
+    bool bloom_option = false; ///< The Bloom slider (msr-native)
+    bool ultrawide_option = false; ///< The Ultrawide and HUD within 16:9 rows (msr-native)
+    bool deck_preset = false;  ///< The Steam Deck preset button (msr-native on a Steam Deck)
+    int hdr_option = 0;        ///< The HDR rows: 0 none (the emulator build), 1 the display is not in HDR mode, 2 HDR possible
+    float display_peak = 1000.f, display_paper = 200.f; ///< The display's peak brightness, Windows' SDR white (nits)
 };
 
 /// The controls shown in the overlay's Controls tab. Built and applied on the Qt thread.
@@ -90,6 +109,10 @@ struct ControlsSnapshot {
     std::vector<Row> rows;
     int capturing = -1; ///< Row waiting for a new input, or -1
     bool controller_connected = false;
+    bool right_stick_option = false; ///< msr-native: the Aeion abilities can be put on the right stick
+    bool right_stick_dpad = false;   ///< The right stick is the D-pad, the pad's D-pad the Circle Pad
+    bool menu_layout_option = false; ///< msr-native: menus can confirm as the game does (Nintendo menu layout)
+    bool menu_confirm_right = false; ///< Menus choose with the game's A as bound (else A / Cross, the bottom button)
 };
 
 /// The Mods and Textures tabs: game mods and texture packs (msr/mods.h). Built and applied on
@@ -107,6 +130,39 @@ struct ModsSnapshot {
     bool preload = false;
     bool dump = false;
     bool restart_needed = false; ///< Changed since the game booted
+    bool texture_options = true; ///< Preload and dump can be changed (msr-native always preloads, never dumps)
+};
+
+/// msr-native's launcher: the menu before the game runs (native/runtime/msr/launcher.cpp). Its
+/// Game tab starts with Play, the game file and the native code (the game's code recompiled from
+/// the player's dump). Built and applied on the launcher's thread.
+struct LauncherSnapshot {
+    enum class Code { Missing, Ready, Outdated, Building, Failed };
+    bool active = false;     ///< The menu is the launcher (no game running)
+    std::string version;     ///< "msr-native 0.1.0"
+    std::string game;        ///< The dump's path, empty when none was chosen
+    std::string game_note;   ///< What is wrong with it, or empty
+    Code code = Code::Missing;
+    std::string code_note;   ///< When it was built, the build's step, or what failed
+    float progress = -1.f;   ///< The build's progress, 0..1, or -1 when unknown
+    bool can_play = false;
+    bool can_browse = false; ///< A file dialog is there
+    std::string folder;      ///< The user folder (saves, settings, mods)
+    /// A newer release (launcher.cpp looks when it starts): offered, being put in place, or failed
+    enum class Update { None, Available, Working, Failed };
+    Update update = Update::None;
+    std::string update_version;      ///< "0.2.0"
+    std::string update_note;         ///< Its size, the download's progress, or what failed
+    float update_progress = -1.f;    ///< The download's progress, 0..1, or -1
+    bool update_installable = false; ///< The launcher can put it in place (else: its download page)
+    /// The program beside the launcher that starts the game without it (msr-native-direct.exe), once
+    /// the native code is built; empty when there is none
+    std::string direct;
+    /// The native code can be built here (not in msr-native's Android app: a PC builds it there)
+    bool can_build = true;
+    /// msr-native on a PC: the Android app's native code can be built too (Build for Android)
+    bool android_build = false;
+    std::string android_note; ///< The Android build's result: where to copy it, or what failed
 };
 
 struct OverlayAction {
@@ -122,6 +178,8 @@ struct OverlayAction {
         CancelBind,
         GamepadLayout,    ///< Map every control to the connected gamepad, by position
         KeyboardLayout,   ///< Restore the default keyboard bindings
+        RightStickDpad,   ///< msr-native: the Aeion abilities on the right stick (`value` 0 or 1)
+        MenuConfirmRight, ///< msr-native: the Nintendo menu layout (`value` 0 or 1)
         FrameRate,        ///< The frame rate changed: apply the CPU clock and presentation
         GameMod,          ///< Enable or disable game mod `value` (an index in ModsSnapshot)
         GameModUp,        ///< Raise game mod `value`'s priority
@@ -133,10 +191,20 @@ struct OverlayAction {
         ModsFolder,       ///< Open the texture packs folder
         PreloadTextures,  ///< Load every pack texture at boot (`value` 0 or 1)
         DumpTextures,     ///< Save the game's textures for making packs (`value` 0 or 1)
+        LauncherPlay,     ///< Start the game
+        LauncherBuild,    ///< Build the native code from the game file
+        LauncherBuildAndroid, ///< msr-native: build the Android app's native code (on a PC)
+        LauncherCancel,   ///< Stop the build
+        LauncherBrowse,   ///< Choose the game file with a file dialog
+        LauncherGame,     ///< The game file typed in: `text`
+        LauncherFolder,   ///< Open the user folder
+        LauncherUpdate,   ///< Download the newer release and put it in place
+        LauncherUpdatePage, ///< Open the newer release's page (what's new; its download)
     };
     Kind kind;
     EmulatorSettings emulator{};
     int value = 0;
+    std::string text{};
 };
 
 class Overlay final : public OverlayHook::Interface {
@@ -157,6 +225,11 @@ public:
     void SetPlayerSettings(const PlayerSettings& settings);
     void SetControls(const ControlsSnapshot& controls);
     void SetMods(const ModsSnapshot& mods);
+    /// msr-native: the launcher's state; while it is active the menu stays open.
+    void SetLauncher(const LauncherSnapshot& launcher);
+    bool LauncherActive() const {
+        return launcher_active.load();
+    }
     PlayerSettings GetPlayerSettings();
     /// ImGui key events (ImGuiKey values), mouse in framebuffer pixels.
     void Key(int key, bool down);
@@ -170,6 +243,9 @@ public:
     void Init(const OverlayHook::VulkanContext& context) override;
     void Draw(VkCommandBuffer command, std::uint32_t width, std::uint32_t height) override;
     void Shutdown() override;
+    /// msr-native: the menu shows the Mods or Textures tab, so their folders are scanned again for what the player
+    /// added or removed meanwhile. Renderer thread.
+    bool ModsTabShown() const;
 
 private:
     struct Event {
@@ -180,7 +256,10 @@ private:
     };
 
     void Push(const Event& event);
-    void Act(OverlayAction::Kind kind, int value = 0);
+    void Act(OverlayAction::Kind kind, int value = 0, std::string text = {});
+    /// The launcher's part of the Game tab: Play, the game file, the native code.
+    void DrawLauncher(const LauncherSnapshot& launcher, float label_width,
+                      const std::function<void()>& default_focus);
     void DrawControls(float scale, float label_width, const std::function<void()>& default_focus);
     void DrawGameMods(const std::function<void()>& default_focus);
     void DrawTexturePacks(float label_width, const std::function<void()>& default_focus);
@@ -205,6 +284,7 @@ private:
     void EmulatorChanged();
 
     std::atomic<bool> visible{false};
+    std::atomic<bool> launcher_active{false};
     std::atomic<double> hint_started{-1.0};
 
     std::mutex mutex; ///< Guards the queues and the settings snapshots below
@@ -214,6 +294,7 @@ private:
     EmulatorSettings emulator;
     ControlsSnapshot controls;
     ModsSnapshot mods;
+    LauncherSnapshot launcher;
 
     // Renderer thread only
     ImGuiContext* context{};
@@ -228,6 +309,8 @@ private:
     float hint_alpha = 0.f;
     std::uint64_t fps_frames = 0; ///< Game frames when the count started
     double fps_started = 0.0;
+    std::array<char, 1024> game_input{}; ///< The launcher's game file field
+    std::string game_input_from;         ///< The path it was last filled from
 };
 
 /// The overlay registered with the renderer, created by the frontend.

@@ -24,6 +24,20 @@ inline constexpr float NativeAspect = 400.f / 240.f;
 inline constexpr float WideAspect = 16.f / 9.f;
 inline constexpr float WideScale = NativeAspect / WideAspect; // 15/16
 
+/// Ultrawide: with widescreen, the view fills a window wider than 16:9, up to 32:9, the squeeze
+/// following it; off, it stays 16:9 there, with bars at the sides. Everything stays on the one
+/// screen: the HUD at the view's corners, the menus centred.
+inline std::atomic<bool> ultrawide{true};
+inline constexpr float UltraAspect = 32.f / 9.f;
+/// The view's aspect in effect, set by the single-screen layout from the window (msr-native's
+/// compositor.cpp): 16:9 to 32:9 with widescreen, else 5:3.
+inline std::atomic<float> view_aspect{WideAspect};
+/// The squeeze of the world draws for that view: NativeAspect / its aspect (WideScale at 16:9).
+inline float ViewScale() {
+    const float a = view_aspect.load(std::memory_order_relaxed);
+    return a > NativeAspect ? NativeAspect / a : 1.f;
+}
+
 /// The player's camera zoom: above 1 closer, below 1 wider. It scales the top screen's world draws
 /// (the depth-tested draws the widescreen squeeze takes; the sky and other backdrops, drawn
 /// without depth test, keep filling the screen) and leaves 2D layers and the HUD as they are.
@@ -40,6 +54,8 @@ inline std::atomic<float> minimap_size{1.15f};
 inline std::atomic<bool> show_minimap{true};
 inline std::atomic<bool> show_counters{true};
 inline std::atomic<bool> show_abilities{true};
+/// On a view wider than 16:9 (ultrawide), the HUD's corners are those of its middle 16:9.
+inline std::atomic<bool> hud_within_16_9{false};
 
 /// Height of the bottom-screen panel (pause menu, file select...) relative to the game view.
 inline std::atomic<float> panel_scale{1.f};
@@ -47,6 +63,12 @@ inline std::atomic<float> panel_scale{1.f};
 /// Opacity of the dark card behind the title menus (file select, gallery...), which are drawn
 /// without their backdrop over the game view.
 inline std::atomic<float> menu_backdrop{.75f};
+
+/// msr-native's picture: the game's glow (1 = as drawn), HDR output and its brightness (nits, 0 = the display's).
+inline std::atomic<float> bloom{.75f};
+inline std::atomic<bool> hdr{false};
+inline std::atomic<float> hdr_peak{0.f};
+inline std::atomic<float> hdr_paper{0.f};
 
 /// What the bottom screen is showing, classified from its pixels by the renderer.
 enum class Bottom : int {
