@@ -53,6 +53,10 @@ void PlayerSettings::Load(const std::string& path) {
     flag("infinite_energy", infinite_energy);
     flag("infinite_missiles", infinite_missiles);
     flag("infinite_aeion", infinite_aeion);
+    language = static_cast<int>(file.Number("General", "language", language));
+    if (std::none_of(Languages.begin(), Languages.end(), [&](const Language& l) { return l.value == language; })) {
+        language = 1;   // English
+    }
 }
 
 void PlayerSettings::Save(const std::string& path) const {
@@ -87,6 +91,7 @@ void PlayerSettings::Save(const std::string& path) const {
     flag("infinite_energy", infinite_energy);
     flag("infinite_missiles", infinite_missiles);
     flag("infinite_aeion", infinite_aeion);
+    number("language", language);
     if (!file.Save()) std::fprintf(stderr, "msr: could not write %s\n", path.c_str());
 }
 
@@ -110,6 +115,18 @@ extern "C" int msr_settings_load(const char* path) {
 
 extern "C" int msr_settings_frame_rate(void) {
     return MSR::GetOverlay().GetPlayerSettings().frame_rate;
+}
+
+extern "C" int msr_settings_language(void) {
+    return MSR::GetOverlay().GetPlayerSettings().language;
+}
+
+extern "C" int msr_settings_region(void) {
+    const int language = msr_settings_language();
+    for (const auto& l : MSR::Languages) {
+        if (l.value == language) return l.european ? 2 : 1;   // Europe, else the game's own (USA)
+    }
+    return 1;
 }
 
 extern "C" int msr_settings_save(void) {

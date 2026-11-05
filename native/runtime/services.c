@@ -4,6 +4,7 @@
 #include "kernel.h"
 #include "input.h"
 #include "state.h"
+#include "msr/msr.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -91,7 +92,7 @@ static void cfg_block(uint32_t id, uint8_t *out, uint32_t size) {
         static const float st[8] = { 62.0f, 289.0f, 76.80000305f, 46.08000183f, 10.0f, 5.0f, 55.58000183f, 21.56999969f };
         memcpy(out, st, size < sizeof st ? size : sizeof st); return;
     }
-    case 0x000A0002: out[0] = 1; return;                               /* language: English */
+    case 0x000A0002: out[0] = (uint8_t)msr_settings_language(); return;   /* language: the launcher's (English by default) */
     case 0x000B0000: if (size >= 4) { out[2] = 0; out[3] = 49; } return; /* country: USA (49), no province */
     case 0x000A0000: { const char *n = "PWR"; for (int i = 0; n[i] && 2u * (uint32_t)i + 1 < size; i++) out[2 * i] = (uint8_t)n[i]; return; }   /* username (UTF-16) */
     case 0x000A0001: if (size >= 2) { out[0] = 1; out[1] = 1; } return;   /* birthday: month, day */
@@ -115,9 +116,11 @@ static void cfg_handle(KThread *t, uint32_t *cmd, KObject *s) {
         cfg_block(blk, g_mem + ptr, size);
         k_trace("cfg: GetConfigInfoBlk2 %08x size %u", blk, size);
         cmd[0] = HDR(1, 1, 2); cmd[1] = RES_OK; cmd[2] = (size << 4) | 0xC; cmd[3] = ptr; return; }
-    case 0x02: cmd[0] = HDR(2, 2, 0); cmd[1] = RES_OK; cmd[2] = 1; return;   /* SecureInfoGetRegion: USA */
+    /* the region: USA, or Europe for German, Italian and Dutch, the languages the game shows only there (the country
+       stays USA, as the emulator-based 1.x left it) */
+    case 0x02: cmd[0] = HDR(2, 2, 0); cmd[1] = RES_OK; cmd[2] = (uint32_t)msr_settings_region(); return;   /* SecureInfoGetRegion */
     case 0x03: cmd[0] = HDR(3, 3, 0); cmd[1] = RES_OK; cmd[2] = 0x12345678; cmd[3] = 0x9abcdef0 & 0xffff; return;   /* GenHashConsoleUnique */
-    case 0x04: cmd[0] = HDR(4, 2, 0); cmd[1] = RES_OK; cmd[2] = 1; return;   /* GetRegionCanadaUSA */
+    case 0x04: cmd[0] = HDR(4, 2, 0); cmd[1] = RES_OK; cmd[2] = msr_settings_region() == 1; return;   /* GetRegionCanadaUSA */
     case 0x05: cmd[0] = HDR(5, 2, 0); cmd[1] = RES_OK; cmd[2] = 0; return;   /* GetSystemModel: CTR */
     case 0x06: cmd[0] = HDR(6, 2, 0); cmd[1] = RES_OK; cmd[2] = 1; return;   /* GetModelNintendo2DS: 1 = not a 2DS */
     default: unhandled("cfg:u", cmd);

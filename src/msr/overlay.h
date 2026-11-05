@@ -57,6 +57,7 @@ struct PlayerSettings {
     bool infinite_energy = false;
     bool infinite_missiles = false; ///< Super Missiles and Power Bombs too
     bool infinite_aeion = false;
+    int language = 1; ///< The game's text: a 3DS system language, one of Languages (msr-native)
 
 #ifdef MSR_NATIVE
     // msr-native reads and writes settings.ini without Qt (native/runtime/msr/settings.cpp)
@@ -69,6 +70,23 @@ struct PlayerSettings {
     /// Pushes the values to the renderer (msr/presentation.h).
     void Publish() const;
 };
+
+/// The languages the North American game has text for, by 3DS system language (cfg block 0x000A0002). The game keeps
+/// the system language only where the console's region has it (0x1007D6): German, Italian and Dutch need Europe, which
+/// msr-native's cfg service then reports (native/runtime/services.c), as the emulator-based 1.x did.
+struct Language {
+    const char* name;
+    int value;
+    bool european;
+};
+inline constexpr std::array<Language, 6> Languages{{
+    {"English", 1, false},
+    {"Fran\xC3\xA7" "ais", 2, false},
+    {"Espa\xC3\xB1" "ol", 5, false},
+    {"Deutsch", 3, true},
+    {"Italiano", 4, true},
+    {"Nederlands", 8, true},
+}};
 
 /// Camera zoom range: the widest and the closest view in play (1 is the game's).
 inline constexpr float CameraZoomMin = .7f;

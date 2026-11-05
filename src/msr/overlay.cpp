@@ -986,6 +986,24 @@ void Overlay::DrawMenu(float scale, bool appearing) {
         if (tab_item("Game", 0)) {
             if (l.active) {
                 DrawLauncher(l, label_width, default_focus);
+                // The game reads the language when it starts: in the launcher only, as in the emulator-based 1.x
+                row("Language");
+                static constexpr auto names = [] {
+                    std::array<const char*, Languages.size()> n{};
+                    for (std::size_t i = 0; i < n.size(); ++i) n[i] = Languages[i].name;
+                    return n;
+                }();
+                int language = static_cast<int>(
+                    std::find_if(Languages.begin(), Languages.end(),
+                                 [&](const Language& entry) { return entry.value == p.language; }) -
+                    Languages.begin());
+                if (ImGui::Combo("##language", &language, names.data(), static_cast<int>(names.size())) &&
+                    language < static_cast<int>(Languages.size())) {
+                    p.language = Languages[language].value;
+                    player_changed = true;
+                }
+                Note("The game's text. German, Italian and Dutch set the 3DS region to Europe, which the game "
+                     "needs for them.");
             }
             row("Volume");
             emulator_changed |= ImGui::SliderInt("##volume", &e.volume, 0, 100, "%d%%");

@@ -237,8 +237,9 @@ keys.
 The launcher and the in-game menu (F1 or Select) have the same tabs, saved to the
 same `settings.ini`; LB and RB switch tabs.
 
-- **Game:** in the launcher, Play, the game file, the native code and saves;
-  volume; **Unlock amiibo galleries**, **Unlock Fusion Mode** and **Hard Mode
+- **Game:** in the launcher, Play, the game file, the native code, saves and the
+  language (English, French, Spanish, German, Italian or Dutch: the last three
+  set the 3DS region to Europe, which the game needs for them); volume; **Unlock amiibo galleries**, **Unlock Fusion Mode** and **Hard Mode
   from the start** (all on by default) and **Fusion suit, any difficulty** (off);
   in the game, Resume, Quick save, Quick load, Restart and Quit.
 - **Display:** fullscreen; Widescreen (16:9) and Ultrawide (up to 32:9), both on

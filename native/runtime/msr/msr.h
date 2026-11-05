@@ -14,6 +14,10 @@ extern "C" {
 int msr_settings_load(const char *path);
 /* Game frame rate the settings ask for (30, 60, 90, 120 or 144). */
 int msr_settings_frame_rate(void);
+/* The game's language (a 3DS system language: 1 English, 2 French, 5 Spanish, 3 German, 4 Italian, 8 Dutch) and the
+   console region it needs (1 USA, 2 Europe: the game shows German, Italian and Dutch only there) */
+int msr_settings_language(void);
+int msr_settings_region(void);
 void msr_state_quick_save(void);             /* state.c: the settings' Quick save and Quick load (main thread) */
 void msr_state_quick_load(void);
 const char *msr_state_message(void);          /* state.c: "Saved", "Loaded"... once, for the screen */
