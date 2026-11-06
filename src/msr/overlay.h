@@ -29,6 +29,7 @@ namespace MSR {
 struct PlayerSettings {
     bool widescreen = true;
     bool ultrawide = true;   ///< With widescreen: the view fills a window wider than 16:9, up to 32:9 (never on without it)
+    bool fill_16_10 = true;  ///< With widescreen: the view fills a window taller than 16:9, down to 16:10 (never on without it)
     float camera_zoom = 1.f; ///< The view in play: below 1 wider, above 1 closer
     bool wide_culling = true; ///< msr-native: the game draws all of a wider view (Presentation::wide_culling)
     float hud_scale = .6f;
@@ -190,6 +191,8 @@ struct ControlsSnapshot {
     bool right_stick_dpad = false;   ///< The right stick is the D-pad, the pad's D-pad the Circle Pad
     bool menu_layout_option = false; ///< msr-native: menus can confirm as the game does (Nintendo menu layout)
     bool menu_confirm_right = false; ///< Menus choose with the game's A as bound (else A / Cross, the bottom button)
+    bool trigger_option = false;     ///< msr-native: the triggers are buttons with a press point (#35)
+    int trigger_press = 50;          ///< How far a trigger is pulled to press it, % of its travel (10..90)
 };
 
 /// The Mods and Textures tabs: game mods and texture packs (msr/mods.h). Built and applied on
@@ -265,6 +268,7 @@ struct OverlayAction {
         KeyboardLayout,   ///< Restore the default keyboard bindings
         RightStickDpad,   ///< msr-native: the Aeion abilities on the right stick (`value` 0 or 1)
         MenuConfirmRight, ///< msr-native: the Nintendo menu layout (`value` 0 or 1)
+        TriggerPress,     ///< msr-native: the triggers' press point (`value` %)
         FrameRate,        ///< The frame rate changed: apply the CPU clock and presentation
         GameMod,          ///< Enable or disable game mod `value` (an index in ModsSnapshot)
         GameModUp,        ///< Raise game mod `value`'s priority

@@ -40,6 +40,13 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   RT tapped the same slot again). A picture on the bottom screen with a cyan edge, such as the ship's cockpit after a
   file's Continue, is not taken for a menu (it had shown as the panel, its outline over the view for about a second):
   the pause menu's pages stand over its bottom bar, a rule in the last rows, which the picture lacks.
+- Fill 16:10 screens (2026-11-06, issue 38; on by default, `settings.ini` `fill_16_10`, never on without Widescreen,
+  as Ultrawide): in play the view also takes a window's aspect when it is taller than 16:9, down to 16:10 (the Steam
+  Deck, most laptops, a Mac in fullscreen below its notch), keeping 16:9's width and showing more above and below:
+  `presentation.h` ViewScaleV squeezes the world up the view (0.9 at 16:10, `msr_world_scale`'s clip x), and the
+  camera's gain takes the larger of the two squeezes (1/0.9). The mouse's aim reads the same scale. Off, 16:9 with bars
+  above and below. Where a room's camera limits hold the 3DS's frame at its edge, the extra rows (5.5% at the top and
+  the bottom) may show past the room.
 - Ultrawide (2026-11-03; the Display tab's Ultrawide, on by default, `settings.ini` `ultrawide`): in play the view
   takes the window's aspect when it is wider than 16:9, up to 32:9, everything still on the one screen
   (`compositor.cpp` ViewAspectWanted; wider still, bars at the sides). It widens Widescreen (16:9), so it is never on

@@ -22,6 +22,13 @@ int input_pad_bound(int c, int menu);           /* the pad button control c has 
 void input_binding_text(int c, char *buf, size_t n);   /* "Key X, Gamepad B" */
 void input_bind_key(int c, int sdl_keycode);
 void input_bind_pad(int c, int sdl_button);
+/* The triggers as buttons a control can be bound to (#35), pressed past the press point (input_trigger_press, % of their
+   travel) and let go under 60% of it; ZL and ZR's by default. Beyond SDL's buttons, so a pad button is never one. */
+#define PAD_TRIGGER_LEFT 100
+#define PAD_TRIGGER_RIGHT 101
+void input_set_trigger_press(int percent);       /* 10..90 */
+int input_trigger_press(void);                    /* the press point, % */
+int input_trigger_pulled(int right, int value, int *held);   /* a trigger's axis (0..32767) -> pressed or not, with *held its state */
 void input_pad_button(int pos_button, int down); /* raw joysticks, positional: 0=south 1=east 2=west 3=north 4=L 5=R 6=select 7=start 8..11=dpad up/down/left/right */
 void input_pad_release(void);                   /* the pad went away: its buttons come up */
 void input_pad_stick(int x, int y);             /* -32768..32767, y up positive */

@@ -262,10 +262,14 @@ void Consume(const BC::Image& image, s64 now) {
 // (camera_fov.cpp) follow it through P::view_aspect. The title menus, the gallery and the prologue stay 16:9: the game
 // draws their scenes for its own view only, and their art (the title's logo) flat, as camera-facing quads without depth
 // test, which the squeeze leaves as they are (they would stretch to the window's width).
+// Fill 16:10 (2026-11-06, #38): in play the view also takes a taller window's aspect, down to 16:10, keeping 16:9's
+// width and showing more above and below (P::ViewScaleV); the camera culls for that too.
 float ViewAspectWanted(float ww, float wh) {
     if (!P::widescreen.load(std::memory_order_relaxed)) return P::NativeAspect;
-    if (!P::ultrawide.load(std::memory_order_relaxed) || !st.in_play || wh <= 0.f) return P::WideAspect;
-    return std::clamp(ww / wh, P::WideAspect, P::UltraAspect);
+    if (!st.in_play || wh <= 0.f) return P::WideAspect;
+    const float lo = P::fill_16_10.load(std::memory_order_relaxed) ? P::TallAspect : P::WideAspect;
+    const float hi = P::ultrawide.load(std::memory_order_relaxed) ? P::UltraAspect : P::WideAspect;
+    return std::clamp(ww / wh, lo, hi);
 }
 
 // emu_window.cpp MsrSingleScreenLayout: the view (its aspect in effect, P::view_aspect) centred in the window, the panel
@@ -306,7 +310,7 @@ extern "C" int msr_beams_held(void) { return st.beams_held ? 1 : 0; }
 
 extern "C" void msr_world_scale(float* sx, float* sy) {
     const float zoom = P::world_zoom.load(std::memory_order_relaxed);
-    *sx = zoom;
+    *sx = P::ViewScaleV() * zoom;   // clip x is the screen's vertical (the 3DS's top screen is turned)
     *sy = P::ViewScale() * zoom;
 }
 

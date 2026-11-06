@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 
 namespace MSR::Presentation {
@@ -29,13 +30,29 @@ inline constexpr float WideScale = NativeAspect / WideAspect; // 15/16
 /// screen: the HUD at the view's corners, the menus centred.
 inline std::atomic<bool> ultrawide{true};
 inline constexpr float UltraAspect = 32.f / 9.f;
+/// Fill 16:10 (msr-native, #38): with widescreen, in play, the view fills a window taller than 16:9,
+/// down to 16:10 (the Steam Deck, most laptops, a Mac in fullscreen), with 16:9's width and more of
+/// the level above and below; off, it stays 16:9 there, with bars above and below.
+inline std::atomic<bool> fill_16_10{true};
+inline constexpr float TallAspect = 16.f / 10.f;
 /// The view's aspect in effect, set by the single-screen layout from the window (msr-native's
-/// compositor.cpp): 16:9 to 32:9 with widescreen, else 5:3.
+/// compositor.cpp): 16:10 to 32:9 with widescreen, else 5:3.
 inline std::atomic<float> view_aspect{WideAspect};
-/// The squeeze of the world draws for that view: NativeAspect / its aspect (WideScale at 16:9).
+/// The narrowest view at its full height: 16:9 with widescreen, else the 3DS's 5:3. A view wider than it
+/// shows more at the sides; one narrower (16:10) keeps its width and shows more above and below.
+inline float ViewFloor() {
+    return widescreen.load(std::memory_order_relaxed) ? WideAspect : NativeAspect;
+}
+/// The squeeze of the world draws across the view: NativeAspect / its aspect (WideScale at 16:9, and at
+/// 16:10, which keeps 16:9's width).
 inline float ViewScale() {
     const float a = view_aspect.load(std::memory_order_relaxed);
-    return a > NativeAspect ? NativeAspect / a : 1.f;
+    return NativeAspect / std::max(a, ViewFloor());
+}
+/// The squeeze up the view: 1 down to 16:9, 0.9 at 16:10 (a ninth more of the level above and below).
+inline float ViewScaleV() {
+    const float a = view_aspect.load(std::memory_order_relaxed);
+    return a / std::max(a, ViewFloor());
 }
 
 /// The player's camera zoom: above 1 closer, below 1 wider. It scales the top screen's world draws

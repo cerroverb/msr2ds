@@ -20,6 +20,9 @@
 #include "msr/frame_rate.h"
 #include "msr/overlay.h"
 #include "msr/presentation.h"
+extern "C" {
+#include "input.h"   // the triggers as buttons (PAD_TRIGGER_*), their press point
+}
 
 extern "C" {
 const char* input_control_label(int c);
@@ -87,6 +90,8 @@ void RefreshControls() {
     s.right_stick_dpad = input_right_stick_dpad() != 0;
     s.menu_layout_option = true;
     s.menu_confirm_right = msr_menu_confirm_right() != 0;
+    s.trigger_option = true;
+    s.trigger_press = input_trigger_press();
     O().SetControls(s);
 }
 
@@ -99,6 +104,8 @@ void SaveControls() {
     }
     file.SetBool("native_controls", "right_stick_dpad", input_right_stick_dpad() != 0);
     file.SetBool("native_controls", "menu_confirm_right", msr_menu_confirm_right() != 0);
+    file.SetNumber("native_controls", "trigger_press", input_trigger_press());
+    file.SetBool("native_controls", "triggers_bound", true);   // the triggers are bindings (2.0.3); LoadControls
     if (!file.Save()) std::fprintf(stderr, "msr: could not save the controls\n");
 }
 
@@ -106,6 +113,7 @@ void LoadControls() {
     const MsrIni::File file(msr_settings_file());
     input_set_right_stick_dpad(file.Bool("native_controls", "right_stick_dpad", input_right_stick_dpad() != 0));
     msr_set_menu_confirm_right(file.Bool("native_controls", "menu_confirm_right", msr_menu_confirm_right() != 0));
+    input_set_trigger_press(static_cast<int>(file.Number("native_controls", "trigger_press", input_trigger_press())));
     for (int c = 0; c < Controls; ++c) {
         const std::string key = input_control_key(c);
         if (file.Raw("native_controls", key + "_key")) {
@@ -114,6 +122,13 @@ void LoadControls() {
         if (file.Raw("native_controls", key + "_pad")) {
             input_pad_binds()[c] = static_cast<int>(file.Number("native_controls", key + "_pad", input_pad_binds()[c]));
         }
+    }
+    // Before 2.0.3 the triggers were always ZL and ZR's, beside any button bound to them (a pad binding of -1, the
+    // default, meant the trigger alone): such a file gets the triggers as ZL and ZR's buttons where those have none
+    if (!file.Bool("native_controls", "triggers_bound", false)) {
+        int* pad = input_pad_binds();
+        if (pad[C_ZL] < 0) pad[C_ZL] = PAD_TRIGGER_LEFT;
+        if (pad[C_ZR] < 0) pad[C_ZR] = PAD_TRIGGER_RIGHT;
     }
 }
 
@@ -482,6 +497,16 @@ extern "C" int msr_overlay_event(const SDL_Event* e, float sx, float sy) {
             RefreshControls();
             return 1;
         }
+        // a trigger pulled past the press point: bound as a button (#35)
+        if (e->type == SDL_CONTROLLERAXISMOTION && capture_armed &&
+            (e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) &&
+            e->caxis.value > input_trigger_press() * 32767 / 100) {
+            input_bind_pad(capturing, e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT ? PAD_TRIGGER_RIGHT : PAD_TRIGGER_LEFT);
+            SaveControls();
+            capturing = -1;
+            RefreshControls();
+            return 1;
+        }
         if (e->type == SDL_KEYDOWN || e->type == SDL_KEYUP || e->type == SDL_CONTROLLERBUTTONDOWN ||
             e->type == SDL_CONTROLLERBUTTONUP || e->type == SDL_CONTROLLERAXISMOTION) {
             return 1;
@@ -640,6 +665,11 @@ extern "C" void msr_overlay_frame(void) {
             break;
         case Kind::MenuConfirmRight:
             msr_set_menu_confirm_right(action.value);
+            SaveControls();
+            RefreshControls();
+            break;
+        case Kind::TriggerPress:
+            input_set_trigger_press(action.value);
             SaveControls();
             RefreshControls();
             break;

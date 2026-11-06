@@ -289,6 +289,7 @@ void PlayerSettings::Publish() const {
     namespace P = Presentation;
     P::widescreen = widescreen;
     P::ultrawide = ultrawide;
+    P::fill_16_10 = fill_16_10;
     P::zoom = camera_zoom;
     P::wide_culling = wide_culling;
     P::hud_scale = hud_scale;
@@ -744,6 +745,20 @@ void Overlay::DrawControls(float scale, float label_width,
             Act(OverlayAction::Kind::MenuConfirmRight, on ? 1 : 0);
         }
     }
+    // msr-native (#35): the triggers are buttons like the others below; how far one is pulled before it counts. It shows
+    // at once and is saved when let go.
+    if (snapshot.trigger_option) {
+        int press = snapshot.trigger_press;
+        Label("Trigger press point", label_width);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::SliderInt("##triggerpress", &press, 10, 90, "%d%% of its travel")) {
+            std::scoped_lock lock{mutex};
+            controls.trigger_press = press;
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            Act(OverlayAction::Kind::TriggerPress, press);
+        }
+    }
 
     // The bindings scroll in their own region; the reference stays below them. msr-native names
     // the keys or buttons of the device in use (ButtonGlyphs::Keys) and aims with the mouse (video.c).
@@ -785,7 +800,7 @@ void Overlay::DrawControls(float scale, float label_width,
         Label(row.label.c_str(), label_width);
         if (snapshot.capturing == row.id) {
             const char* prompt = row.id >= 100 ? "Move a stick...   (Esc cancels)"
-                                               : "Press a button or key...   (Esc cancels)";
+                                               : "Press a button, trigger or key...   (Esc cancels)";
             // The same ID whatever the label, so focus stays on the row while it changes.
             ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
             if (ImGui::Button((std::string(prompt) + "###bind").c_str(), {-FLT_MIN, 0.f})) {
@@ -1199,6 +1214,7 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             if (ImGui::Checkbox("##widescreen", &p.widescreen)) {
                 player_changed = true;
                 p.ultrawide = p.ultrawide && p.widescreen;
+                p.fill_16_10 = p.fill_16_10 && p.widescreen;
             }
             if (e.ultrawide_option) {
                 row("Ultrawide (up to 32:9)");
@@ -1207,6 +1223,15 @@ void Overlay::DrawMenu(float scale, bool appearing) {
                     p.widescreen = p.widescreen || p.ultrawide;
                 }
                 Note("In play, a window wider than 16:9 shows more of the level. It needs Widescreen "
+                     "(16:9), which it turns on.");
+                // #38: the same below 16:9, down to 16:10
+                row("Fill 16:10 screens");
+                if (ImGui::Checkbox("##fill1610", &p.fill_16_10)) {
+                    player_changed = true;
+                    p.widescreen = p.widescreen || p.fill_16_10;
+                }
+                Note("In play, a window taller than 16:9, down to 16:10 (Steam Deck, most laptops, a Mac in "
+                     "fullscreen), shows more of the level above and below instead of bars. It needs Widescreen "
                      "(16:9), which it turns on.");
             }
             row("Camera zoom");
@@ -1417,7 +1442,7 @@ void Overlay::DrawMenu(float scale, bool appearing) {
         emulator = e;
     }
     if (player_changed) {
-        PlayerChanged(p.widescreen != before.widescreen || p.ultrawide != before.ultrawide ||
+        PlayerChanged(p.widescreen != before.widescreen || p.ultrawide != before.ultrawide || p.fill_16_10 != before.fill_16_10 ||
                       p.panel_scale != before.panel_scale);
         if (p.frame_rate != before.frame_rate) {
             Act(OverlayAction::Kind::FrameRate);
