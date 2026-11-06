@@ -565,8 +565,9 @@ void Overlay::DrawHint(float scale, float width, float height) {
 
 void Overlay::DrawControlHints(float width, float height) {
     namespace P = Presentation;
+    // (not a menu beside the view: the game's own screen over play, whose buttons are not the pause menu's)
     const bool menu = static_cast<P::Bottom>(P::bottom.load()) == P::Bottom::Menu &&
-                      P::panel_visible.load();
+                      P::panel_visible.load() && !P::menu_beside.load();
     const auto page = static_cast<P::Page>(P::page.load());
     // The menu's "Menu help text" option turns off every set, touch mode's too.
     const bool enabled = GetPlayerSettings().control_hints;

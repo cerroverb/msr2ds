@@ -232,6 +232,8 @@ keys.
 - **The mouse stays in the window** while you play with it, so a shot beside a
   windowed game doesn't switch away. The settings menu (F1), the title and file
   menus, a controller or Alt+Tab let it go.
+- **Screens the game shows over play** without the pause menu, like an elevator's
+  map, stand beside the view so its prompts stay readable.
 - **Gamepad layout** and **Keyboard layout** on the Controls tab put the
   defaults back.
 
