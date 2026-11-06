@@ -130,7 +130,9 @@ can't update itself or make `msr-native-direct.app`: move it first.
 texture packs**: 3x internal resolution (the Deck's 720p), 60 FPS and V-Sync.
 4x (960p) also holds 60, with less to spare. For even frames, set the Deck's
 refresh rate to 60 Hz (Quick Access menu, Performance). To play from Game Mode,
-add `msr-native-direct.sh` to Steam as a non-Steam game.
+add `msr-native-direct.sh` to Steam as a non-Steam game. In play the view fills
+the Deck's 16:10 screen, with more of the level above and below (**Fill 16:10
+screens** on the Display tab; off, 16:9 with bars above and below).
 
 **Mac:** Macs have no Vulkan of their own, so the app includes MoltenVK, which
 runs the renderer on Metal. The first time an effect appears, its shaders
@@ -247,8 +249,10 @@ same `settings.ini`; LB and RB switch tabs.
   set the 3DS region to Europe, which the game needs for them); volume; **Unlock amiibo galleries**, **Unlock Fusion Mode** and **Hard Mode
   from the start** (all on by default) and **Fusion suit, any difficulty** (off);
   in the game, Resume, Quick save, Quick load, Restart and Quit.
-- **Display:** a video preset (below); fullscreen; Widescreen (16:9) and
-  Ultrawide (up to 32:9), both on by default; camera zoom (0.70-1.50); bloom
+- **Display:** a video preset (below); fullscreen; Widescreen (16:9),
+  Ultrawide (up to 32:9) and Fill 16:10 screens (the Steam Deck, most laptops,
+  a Mac in fullscreen: more of the level above and below instead of bars), all
+  on by default; camera zoom (0.70-1.50); bloom
   (0-100%, default 75%); HDR (Windows, once Use HDR is on in Windows' display
   settings) with its highlights and paper white; internal resolution (Match
   window, or 1x-10x: 9x is 2160p, 4K); anisotropic filtering (off, 2x-16x);

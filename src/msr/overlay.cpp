@@ -289,6 +289,7 @@ void PlayerSettings::Publish() const {
     namespace P = Presentation;
     P::widescreen = widescreen;
     P::ultrawide = ultrawide;
+    P::fill_16_10 = fill_16_10;
     P::zoom = camera_zoom;
     P::wide_culling = wide_culling;
     P::hud_scale = hud_scale;
@@ -1199,6 +1200,7 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             if (ImGui::Checkbox("##widescreen", &p.widescreen)) {
                 player_changed = true;
                 p.ultrawide = p.ultrawide && p.widescreen;
+                p.fill_16_10 = p.fill_16_10 && p.widescreen;
             }
             if (e.ultrawide_option) {
                 row("Ultrawide (up to 32:9)");
@@ -1207,6 +1209,15 @@ void Overlay::DrawMenu(float scale, bool appearing) {
                     p.widescreen = p.widescreen || p.ultrawide;
                 }
                 Note("In play, a window wider than 16:9 shows more of the level. It needs Widescreen "
+                     "(16:9), which it turns on.");
+                // #38: the same below 16:9, down to 16:10
+                row("Fill 16:10 screens");
+                if (ImGui::Checkbox("##fill1610", &p.fill_16_10)) {
+                    player_changed = true;
+                    p.widescreen = p.widescreen || p.fill_16_10;
+                }
+                Note("In play, a window taller than 16:9, down to 16:10 (Steam Deck, most laptops, a Mac in "
+                     "fullscreen), shows more of the level above and below instead of bars. It needs Widescreen "
                      "(16:9), which it turns on.");
             }
             row("Camera zoom");
@@ -1417,7 +1428,7 @@ void Overlay::DrawMenu(float scale, bool appearing) {
         emulator = e;
     }
     if (player_changed) {
-        PlayerChanged(p.widescreen != before.widescreen || p.ultrawide != before.ultrawide ||
+        PlayerChanged(p.widescreen != before.widescreen || p.ultrawide != before.ultrawide || p.fill_16_10 != before.fill_16_10 ||
                       p.panel_scale != before.panel_scale);
         if (p.frame_rate != before.frame_rate) {
             Act(OverlayAction::Kind::FrameRate);
