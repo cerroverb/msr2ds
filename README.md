@@ -229,6 +229,9 @@ keys.
   leaves. The pause map's tools (scan, map pins, info) and copying or deleting
   files are touch-only in the game. The mouse also touches the bottom-screen
   panel when it shows.
+- **The mouse stays in the window** while you play with it, so a shot beside a
+  windowed game doesn't switch away. The settings menu (F1), the title and file
+  menus, a controller or Alt+Tab let it go.
 - **Gamepad layout** and **Keyboard layout** on the Controls tab put the
   defaults back.
 
