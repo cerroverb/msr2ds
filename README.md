@@ -344,6 +344,12 @@ pack. New packs join the top of the list, smallest first, so add-ons override th
 pack they extend. Packs found in a `textures` folder beside the program are
 listed the same way, marked as included with the game.
 
+The prologue's nine pictures have different names in 2.0 than in the packs (the
+game leaves part of each picture's memory unwritten, and the emulator held other
+bytes there), so 2.0 also looks for them under the names the HD Texture Pack and
+its **Higher Res Intro** add-on use. Whichever name a pack uses, the pack higher
+in the list wins.
+
 ### Making a pack
 
 2.0 can't dump textures yet (**Dump game textures** on the Textures tab is
