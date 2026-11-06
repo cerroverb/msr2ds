@@ -544,7 +544,19 @@ int video_init(int scale) {
     }
     if (!phys) { fprintf(stderr, "video: no Vulkan device can present to the window\n"); return -1; }
     VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(phys, &pp);
-    fprintf(stderr, "video: Vulkan device %s\n", pp.deviceName);
+    {   /* its kind and memory, for the logs players send (integrated graphics share the computer's memory) */
+        VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(phys, &mp);
+        double local = 0; for (uint32_t h = 0; h < mp.memoryHeapCount; h++) if (mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) local += (double)mp.memoryHeaps[h].size;
+        const char *kind = pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "discrete" : pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated"
+                         : pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "software" : "other";
+        const uint32_t v = pp.driverVersion; char driver[32];   /* NVIDIA's and Intel's (Windows) own encodings, else Vulkan's */
+        if (pp.vendorID == 0x10DE) snprintf(driver, sizeof driver, "%u.%02u", v >> 22, (v >> 14) & 0xff);
+#ifdef _WIN32
+        else if (pp.vendorID == 0x8086) snprintf(driver, sizeof driver, "%u.%u", v >> 14, v & 0x3fff);
+#endif
+        else snprintf(driver, sizeof driver, "%u.%u.%u", v >> 22, (v >> 12) & 0x3ff, v & 0xfff);
+        fprintf(stderr, "video: Vulkan device %s (%s, %.1f GB of graphics memory, driver %s)\n", pp.deviceName, kind, local / 1073741824.0, driver);
+    }
     float prio = 1;
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = qfam, .queueCount = 1, .pQueuePriorities = &prio };
     /* the hardware PICA renderer (pica_vk.c) and the GPU presenter need Vulkan 1.3 dynamic rendering + extended dynamic state and push descriptors */
@@ -675,6 +687,13 @@ void video_set_resolution(int factor) {
     opt_res = factor > 10 ? 10 : factor; pica_vk_quality(opt_res, opt_aniso);
 }
 int video_resolution(void) { return opt_res_match ? 0 : opt_res; }
+/* anisotropic filtering: 1 (off), 2, 4, 8 or 16, the largest of them up to `aniso`; pica_vk.c makes samplers for it from
+   the next draw (its sampler cache is keyed by the level) */
+void video_set_aniso(int aniso) {
+    opt_aniso = aniso >= 16 ? 16 : aniso >= 8 ? 8 : aniso >= 4 ? 4 : aniso >= 2 ? 2 : 1; pica_vk_quality(opt_res, opt_aniso);
+}
+int video_aniso(void) { return opt_aniso; }
+int video_filter_fsr(void) { return opt_filter == F_FSR; }
 int video_fullscreen(void) { return opt_fs != 0; }
 int video_vsync(void) { return opt_vsync; }
 /* every gamepad SDL can map is open (Steam can show a pad twice, a player can switch pads); gc is the one used last: its

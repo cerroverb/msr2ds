@@ -34,7 +34,11 @@
 #include <windows.h>
 #include <timeapi.h>
 #else
+#include <sys/resource.h>
 #include <unistd.h>
+#endif
+#ifdef __APPLE__
+#include <sys/sysctl.h>
 #endif
 #ifdef __ANDROID__
 #include "android.h"
@@ -175,18 +179,25 @@ static int exists(const char *p) { struct stat st; return stat(p, &st) == 0; }
    runs VBlank at the rate above 60), and the interface parts that step a fixed 1/30 s per frame take the measured frame
    time. Everything else in the game already advances by measured time, and this runtime's ticks are the host's clock, so
    the emulator's faster CPU clock has no counterpart here. The recompiled code notices the rewritten words and runs
-   them through interp.c. Returns the rate in effect. */
+   them through interp.c. Returns the rate in effect.
+   Power-saving waits (main_set_power_saving): above 30 FPS the limit is a millisecond shorter (15 ms at 60), so the
+   limiter, waking on the timer alone, still has the time to the VBlank to spare; the VBlank wait sets the pace as before.
+   At 30 FPS the limit itself sets the pace (the VBlank after it was signalled during the frame, so the wait returns at
+   once: 33 ms gives 30.3 FPS, 32 ms gave 31.2, measured 2026-11-05), and a late wake-up only lengthens that one frame. */
+static int power_saving;
 static int set_frame_rate(int fps) {
     static int applied;   /* 1 once the words were checked and changed: then they may be changed again, or put back */
-    uint32_t limit = (uint32_t)((1000 + (fps > 30 ? fps : 60) - 1) / (fps > 30 ? fps : 60) - 1);
-    const struct { uint32_t addr, original, replacement; } patches[] = {
-        { 0x156484, 0xE3500021, 0xE3500000 | limit },   /* cmp r0, #33 -> #limit */
-        { 0x15648C, 0xE2606021, 0xE2606000 | limit },   /* rsb r6, r0, #33 -> #limit */
-        { 0x49DFF8, 0xED9F8AA6, 0xEEB08A40 },           /* the HUD: vldr s16, =1/30 -> vmov.f32 s16, s0 */
-        { 0x4E3BA4, 0xED9F8AD5, 0xE1A00000 },           /* an interface class: vldr s16, =1/30 -> mov r0, r0 */
-        { 0x10C6B4, 0x1D940AD0, 0xE1A00000 },           /* the interface's fixed-step mode: vldrne s0, [r4, #0x340] -> nop */
+    uint32_t limit = fps > 30 ? (uint32_t)((1000 + fps - 1) / fps - 1) : 33u;
+    if (power_saving && fps > 30) limit--;
+    const int limit_patched = limit != 33u, steps_patched = fps > 30;   /* the steps take the measured time above 30 FPS */
+    const struct { uint32_t addr, original, replacement; int on; } patches[] = {
+        { 0x156484, 0xE3500021, 0xE3500000 | limit, limit_patched },   /* cmp r0, #33 -> #limit */
+        { 0x15648C, 0xE2606021, 0xE2606000 | limit, limit_patched },   /* rsb r6, r0, #33 -> #limit */
+        { 0x49DFF8, 0xED9F8AA6, 0xEEB08A40, steps_patched },           /* the HUD: vldr s16, =1/30 -> vmov.f32 s16, s0 */
+        { 0x4E3BA4, 0xED9F8AD5, 0xE1A00000, steps_patched },           /* an interface class: vldr s16, =1/30 -> mov r0, r0 */
+        { 0x10C6B4, 0x1D940AD0, 0xE1A00000, steps_patched },           /* the interface's fixed-step mode: vldrne s0, [r4, #0x340] -> nop */
     };
-    if (fps <= 30 && !applied) return 30;
+    if (!limit_patched && !steps_patched && !applied) return 30;
     if (!applied) {
         for (size_t i = 0; i < sizeof patches / sizeof *patches; i++)
             if (rd32(patches[i].addr) != patches[i].original) {
@@ -195,10 +206,9 @@ static int set_frame_rate(int fps) {
             }
         applied = 1;
     }
-    for (size_t i = 0; i < sizeof patches / sizeof *patches; i++) wr32(patches[i].addr, fps <= 30 ? patches[i].original : patches[i].replacement);
-    if (fps <= 30) { fprintf(stderr, "native: 30 FPS\n"); return 30; }
-    fprintf(stderr, "native: %d FPS (frame limit %u ms)\n", fps, limit);
-    return fps;
+    for (size_t i = 0; i < sizeof patches / sizeof *patches; i++) wr32(patches[i].addr, patches[i].on ? patches[i].replacement : patches[i].original);
+    fprintf(stderr, "native: %d FPS (frame limit %u ms%s)\n", fps > 30 ? fps : 30, limit, power_saving ? ", power-saving waits" : "");
+    return fps > 30 ? fps : 30;
 }
 
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + t.tv_nsec * 1e-9; }
@@ -246,6 +256,14 @@ void main_set_frame_rate(int fps) {
     g_fps = set_frame_rate(fps);
     video_set_fps(g_fps);
 }
+/* Power-saving waits: the GX worker (gsp.c) and every precise sleep (kernel.c k_sleep_ns) wait without spinning, and the
+   frame limit leaves a millisecond more before the VBlank (set_frame_rate). By default with 4 processor threads or fewer. */
+static int power_saving_default(void) { return k_cpu_threads() <= 4; }
+void main_set_power_saving(int on) {
+    power_saving = on != 0;
+    k_set_power_saving(power_saving);
+    g_fps = set_frame_rate(g_fps);
+}
 void main_exit(int code) { g_exit = code; }
 
 /* the folder holding a file ("a/b/c.ini" -> "a/b/"), "" for none */
@@ -273,6 +291,98 @@ static void log_buffered(void) {
 
 int msr_launcher_main(void);
 int msr_launcher_direct(void);
+
+/* ---- what a slow computer is short of, in the log players send (2026-11-06) ---- */
+/* the process's processor time, all its threads, in seconds */
+static double process_cpu_s(void) {
+#ifdef _WIN32
+    FILETIME created, ended, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &ended, &kernel, &user)) return 0;
+    ULARGE_INTEGER k, u; k.LowPart = kernel.dwLowDateTime; k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime; u.HighPart = user.dwHighDateTime;
+    return (double)(k.QuadPart + u.QuadPart) * 1e-7;
+#else
+    struct rusage r; if (getrusage(RUSAGE_SELF, &r)) return 0;
+    return (double)(r.ru_utime.tv_sec + r.ru_stime.tv_sec) + (r.ru_utime.tv_usec + r.ru_stime.tv_usec) * 1e-6;
+#endif
+}
+static void cpu_name(char *out, size_t n) {
+    out[0] = 0;
+#ifdef _WIN32
+    HKEY key; DWORD size = (DWORD)n - 1;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &key) == ERROR_SUCCESS) {
+        if (RegQueryValueExA(key, "ProcessorNameString", NULL, NULL, (LPBYTE)out, &size) == ERROR_SUCCESS) out[size < n ? size : n - 1] = 0;
+        else out[0] = 0;
+        RegCloseKey(key);
+    }
+#elif defined(__APPLE__)
+    size_t size = n; if (sysctlbyname("machdep.cpu.brand_string", out, &size, NULL, 0)) out[0] = 0;
+#else
+    FILE *f = fopen("/proc/cpuinfo", "r"); char line[256];
+    while (f && fgets(line, sizeof line, f)) {   /* x86's "model name"; on ARM "Hardware", where there is one */
+        char *c = strchr(line, ':');
+        if (!c || (strncmp(line, "model name", 10) && strncmp(line, "Hardware", 8))) continue;
+        for (c++; *c == ' ' || *c == '\t'; c++) {}
+        c[strcspn(c, "\r\n")] = 0; snprintf(out, n, "%s", c); break;
+    }
+    if (f) fclose(f);
+#endif
+    size_t len = strlen(out); while (len && out[len - 1] == ' ') out[--len] = 0;   /* Windows pads it */
+    if (!out[0]) snprintf(out, n, "an unknown processor");
+}
+static double memory_gb(void) {
+#ifdef _WIN32
+    MEMORYSTATUSEX m; memset(&m, 0, sizeof m); m.dwLength = sizeof m;
+    return GlobalMemoryStatusEx(&m) ? (double)m.ullTotalPhys / 1073741824.0 : 0;
+#else
+    long pages = sysconf(_SC_PHYS_PAGES), size = sysconf(_SC_PAGESIZE);
+    return pages > 0 && size > 0 ? (double)pages * (double)size / 1073741824.0 : 0;
+#endif
+}
+/* once, at boot: the settings that decide the load, and the computer (video.c has logged the graphics) */
+static void settings_line(int fps) {
+    char cpu[160]; cpu_name(cpu, sizeof cpu);
+    const int res = video_resolution(), aniso = video_aniso();
+    char res_text[48];
+    if (res) snprintf(res_text, sizeof res_text, "%dx internal resolution", res); else snprintf(res_text, sizeof res_text, "the window's internal resolution");
+    char aniso_text[24];
+    if (aniso > 1) snprintf(aniso_text, sizeof aniso_text, "%dx", aniso); else snprintf(aniso_text, sizeof aniso_text, "off");
+    fprintf(stderr, "native: running at %s, %d FPS, V-Sync %s, %s upscaling, anisotropic filtering %s, power-saving waits %s, %s; "
+            "on %s, %d threads, %.1f GB of memory\n", res_text, fps, video_vsync() ? "on" : "off", video_filter_fsr() ? "FSR 1" : "linear",
+            aniso_text, k_power_saving() ? "on" : "off", msr_settings_wide_culling() ? "the wider view drawn" : "only the 3DS's view drawn",
+            cpu, k_cpu_threads(), memory_gb());
+}
+/* Every 2 s, per game frame: the game's frame thread at work (the frame less its time waiting or asleep: kernel.c), the
+   GX commands' time (the worker's, and the small ones the game's thread runs), the GPU's drawing (the 3D batches'
+   timestamps, not the upscaling and HUD after them), and the processor threads the program kept busy. With the frame
+   rate under the one asked for, the likeliest shortage. */
+static void load_line(double seconds, unsigned game_frames, double frame_max_ms, int target) {
+    extern volatile uint64_t g_k_frame_idle_ns; extern int g_k_frame_thread; extern unsigned long long g_gx_busy_ns, g_vk_gpu_us;
+    static uint64_t idle0; static unsigned long long gx0, gpu0; static double cpu0 = -1;
+    const double cpu = process_cpu_s();
+    const uint64_t idle = g_k_frame_idle_ns; const unsigned long long gx = g_gx_busy_ns, gpu = g_vk_gpu_us;
+    const int first = cpu0 < 0;
+    const double threads_busy = (cpu - cpu0) / seconds, idle_s = (double)(idle - idle0) / 1e9;
+    const double gx_s = (double)(gx - gx0) / 1e9, gpu_s = (double)(gpu - gpu0) / 1e6;
+    cpu0 = cpu; idle0 = idle; gx0 = gx; gpu0 = gpu;
+    if (first || game_frames < 2 || seconds <= 0) return;   /* the first interval, or loading: nothing to say */
+    const double n = game_frames, fps = n / seconds, frame_ms = 1000.0 / fps;
+    const double work_ms = g_k_frame_thread >= 0 && idle_s <= seconds ? (seconds - idle_s) * 1e3 / n : -1;
+    const double gx_ms = gx_s * 1e3 / n, gpu_ms = gpu_s * 1e3 / n;
+    const int threads = k_cpu_threads();
+    const char *limit = "";
+    if (fps < target * 0.95)
+        limit = gpu_ms >= frame_ms * 0.8 ? "; likely short of: the graphics"
+              : gx_ms >= frame_ms * 0.8 ? "; likely short of: one processor thread (GX commands)"
+              : work_ms >= frame_ms * 0.8 ? "; likely short of: the processor (the game's own work)"
+              : threads_busy >= threads * 0.85 ? "; likely short of: the processor (every thread busy)"
+              : "";
+    char work[32];
+    if (work_ms >= 0) snprintf(work, sizeof work, "%.1f ms", work_ms); else snprintf(work, sizeof work, "?");
+    fprintf(stderr, "native: load: %.1f of %d FPS (%.1f ms a frame, longest %.1f); per frame: the game's thread at work %s, GX commands "
+            "%.1f ms, GPU drawing %.1f ms; processor %.1f of %d threads busy%s\n", fps, target, frame_ms, frame_max_ms, work, gx_ms, gpu_ms,
+            threads_busy, threads, limit);
+}
 
 #ifdef __ANDROID__
 /* The Android app runs one of the two in each process (android.c): the launcher (no arguments), whose Play starts the
@@ -311,7 +421,7 @@ int main(int argc, char **argv) {
     log_buffered();
     if (argc == 1 || (argc == 2 && !strcmp(argv[1], "--launcher"))) return msr_launcher_main();
     if (argc == 2 && !strcmp(argv[1], "--direct")) return msr_launcher_direct();
-    int scale = 2, fps = 0, volume = 100, packs_given = 0;
+    int scale = 2, fps = 0, volume = 100, packs_given = 0, saving = -1;
     const char *dump = getenv("MSR_DUMP"), *module = NULL, *settings = NULL;
     static char game_path[4096], module_path[4096], save_path[4096];
     settings_file(&scale);
@@ -330,6 +440,7 @@ int main(int argc, char **argv) {
         else if (!strncmp(argv[i], "--scale=", 8)) scale = atoi(argv[i] + 8) > 0 ? atoi(argv[i] + 8) : 2;
         else if (!strncmp(argv[i], "--fps=", 6)) fps = atoi(argv[i] + 6);
         else if (!strcmp(argv[i], "--preload-shaders=off")) { extern void pica_vk_preload(int on); pica_vk_preload(0); }   /* the launcher's "Preload shaders" */
+        else if (!strncmp(argv[i], "--power-saving=", 15)) saving = !strcmp(argv[i] + 15, "on") || !strcmp(argv[i] + 15, "1");
         else if (!strncmp(argv[i], "--", 2) && strchr(argv[i], '=')) {   /* display options: --name=value -> video_option */
             char name[32]; const char *eq = strchr(argv[i], '='); size_t n = (size_t)(eq - argv[i] - 2);
             if (n >= sizeof name) n = sizeof name - 1;
@@ -338,6 +449,8 @@ int main(int argc, char **argv) {
         }
         else { fprintf(stderr, "native: unknown option %s\n", argv[i]); return 2; }
     }
+    power_saving = saving < 0 ? power_saving_default() : saving;   /* applied to the frame limit by set_frame_rate below */
+    k_set_power_saving(power_saving);
     if (!dump) {   /* the launcher's choice */
         FILE *g = fopen("user/msr/game-path.txt", "rb");
         if (g) { size_t n = fread(game_path, 1, sizeof game_path - 1, g); fclose(g); game_path[n] = 0;
@@ -383,6 +496,7 @@ int main(int argc, char **argv) {
     if (load_dump(dump)) return 1;
     fps = g_fps = set_frame_rate(fps);
     video_set_fps(fps);
+    { extern uint32_t g_k_limiter_lr; g_k_limiter_lr = 0x156498; }   /* the frame limiter's svcSleepThread returns there (the load line) */
     msr_apply_patches();
     if (!exists(module)) { fprintf(stderr, "native: no recompiled code at %s: build it in the launcher (Native code)\n", module); return 1; }
 #ifdef __ANDROID__
@@ -398,8 +512,10 @@ int main(int argc, char **argv) {
     { extern void gsp_hook_enqueue(void); gsp_hook_enqueue(); }   /* command lists copied as the game queues them (gsp.c) */
     k_init();
     dsp_set_volume(g_mute ? 0.f : (float)volume / 100.f);
-    msr_overlay_start(video_fullscreen(), video_resolution(), video_vsync(), g_mute ? 0 : volume);
+    msr_overlay_start(video_fullscreen(), video_resolution(), video_vsync(), g_mute ? 0 : volume, video_aniso(), video_filter_fsr(),
+                      power_saving);
     if (video_init(scale)) { fprintf(stderr, "native: video init failed\n"); return 1; }
+    settings_line(fps);
     fprintf(stderr, "native: boot (input=%s, audio=%s)\n", g_input_none ? "none" : "default", g_mute ? "muted" : "on");
 
     volatile int *done = k_start_main(0x100000);
@@ -413,7 +529,32 @@ int main(int argc, char **argv) {
         fps = g_fps;
         extern double g_main_part_max[5]; double pt0 = now_s(), pt1, pt2, pt3, pt4;   /* PWR_HITCH: each part's longest */
         input_update(); pt1 = now_s();
-        gsp_vblank(); pt2 = now_s();
+        {   /* 30 FPS: the game's VBlank on every other tick (30 Hz) while it keeps up. Its frame limit (33 ms) runs a little
+               short of two 60 Hz VBlanks, so with each tick's VBlank it ran at 30.3 FPS and caught up with a 50 ms frame
+               every 50 frames (1.65 s), a stutter; at 30 Hz each frame is two ticks, 30.0 FPS. A computer that cannot keep
+               up (more than one late frame in half a second) gets every tick again, which let it run faster then (19.8
+               FPS against 17.7 at 30 Hz, overloaded on one processor thread, 2026-11-06); after a second at 30 it goes
+               back. PWR_VBLANK60=1: every tick always (A/B). */
+            extern unsigned g_gsp_top_swaps;
+            static int off = -1, keeping_up = 1, good, told; static unsigned tick, window, swaps;
+            if (off < 0) off = getenv("PWR_VBLANK60") != NULL;
+            int deliver = 1;
+            if (fps <= 30 && !off) {
+                if (++window >= 30) {   /* 0.5 s: 15 game frames when it keeps up */
+                    const unsigned n = g_gsp_top_swaps - swaps; swaps = g_gsp_top_swaps; window = 0;
+                    if (keeping_up && n <= 13) {
+                        keeping_up = 0; good = 0;
+                        if (told++ < 20) fprintf(stderr, "native: 30 FPS behind (%u frames in 0.5 s): VBlank each tick\n", n);
+                    } else if (!keeping_up) {
+                        good = n >= 15 ? good + 1 : 0;
+                        if (good >= 2) { keeping_up = 1; if (told < 20) fprintf(stderr, "native: 30 FPS kept up: VBlank every other tick\n"); }
+                    }
+                }
+                deliver = !keeping_up || (tick++ & 1) == 0;
+            } else { window = 0; swaps = g_gsp_top_swaps; keeping_up = 1; }
+            if (deliver) gsp_vblank();
+        }
+        pt2 = now_s();
         msr_cheats_frame(now_s());   /* Samus Returns' cheats and the extras' patches (msr/cheats.cpp) */
         msr_camera_frame(now_s());   /* the camera zoom: the game's field of view widened for it (msr/camera_fov.cpp) */
         pt3 = now_s();
@@ -434,6 +575,7 @@ int main(int argc, char **argv) {
                     "frame-max=%.1fms over10=%u over20=%u over50=%u\n",
                     frames, lists, draws, g_vid_presented, g_vid_acquire_fail, g_vid_present_fail, g_vid_last_err, (g_gsp_top_swaps - last_swaps) / (t - last_stat),
                     g_frame_max_ms, g_frame_over[0], g_frame_over[1], g_frame_over[2]);
+            load_line(t - last_stat, g_gsp_top_swaps - last_swaps, g_frame_max_ms, fps);
             g_frame_max_ms = 0; memset(g_frame_over, 0, sizeof g_frame_over);
             {   /* no new top-screen frame for 6 s after the game had started drawing: say where everything waits, once */
                 static unsigned still; static int reported;

@@ -212,6 +212,12 @@ internal resolution, 1x included. `PWR_VK_NO_GPUCOPY=1` goes back to the CPU cop
 every batch.
 
 **Known issues:**
+- 30 FPS paced by the display (2026-11-06): the game's 33 ms limit runs a little short of two 60 Hz VBlanks, so with a
+  VBlank on every tick it ran at 30.3 FPS and caught up with a 50 ms frame every 50 frames (1.65 s), a stutter. While it
+  keeps up, main() now gives the game a VBlank on every other tick (30 Hz; presentation, the menu and the HUD stay at
+  60): 30.0 FPS, no frame over 34 ms in play. More than one late frame in half a second goes back to every tick, which
+  let an overloaded game run faster (19.8 FPS against 17.7 at 30 Hz on one processor thread), and a second at 30 returns
+  to 30 Hz (one 50 ms frame then). `PWR_VBLANK60=1`: every tick always.
 - 120 and 144 FPS: the frame limit becomes 8 or 6 ms and main() runs VBlank at that rate, presenting through a
   mailbox swapchain; a VBlank held back while the GX worker lags is delivered as soon as it catches up. The game sends
   ~30 GX commands a frame one after the other, so a frame is their work plus the hand-offs between its threads and the
@@ -296,6 +302,18 @@ Select (the menu), 1/2/3/4 = D-pad up/left/right/down (the Aeion abilities), T =
 left button shoots, the right one held aims at the pointer and the wheel changes beams; the pad by position in play
 (bottom = B, jump; right = A), and in menus and dialogs an Xbox or PlayStation pad's bottom button chooses and its
 right one goes back. F1 opens the menu, F5 quick saves, F8 quick loads, F9 switches the screen layout, F11 fullscreen.
+
+**What a slow computer is short of** (2026-11-06), in every `msr-native.log`, so the logs players send answer it: at boot
+`video: Vulkan device ...` gives the graphics' kind (discrete, integrated), memory and driver, and `native: running at
+...` the settings that decide the load (internal resolution, frame rate, V-Sync, upscaling, anisotropic filtering,
+power-saving waits, the wider view) and the processor, its threads and the memory. Every 2 s, `native: load: ...` gives,
+per game frame: the game's thread at work (its frame less its time waiting or asleep, kernel.c `g_k_frame_idle_ns`; the
+thread that runs the frame limiter), the GX commands' time (worker and inline, gsp.c `g_gx_busy_ns`), the GPU's drawing
+(the 3D batches' timestamps, now always on; not the upscaling and HUD after them), and how many processor threads the
+program kept busy. Under 95% of the frame rate asked for, it names the likeliest shortage: the graphics (GPU drawing at
+80% of the frame or more), one processor thread (GX commands at 80%), the game's own work (80%), or every thread busy.
+Measured overloaded (one processor thread, `PWR_VK_CPU_VS=1`): 21 of 30 FPS, GX commands 45-49 ms a frame, "one processor
+thread (GX commands)".
 
 Debugging switches (environment, as in Woohoo! Flight School): `PWR_SKIP=<first>-<last>` (drop those draws of every
 frame, counted from each top-screen swap: bisects an artifact to its draws; with `PWR_SKIP_DUMP=<frame>` it prints their

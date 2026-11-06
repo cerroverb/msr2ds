@@ -22,15 +22,11 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include "ini.h"
 #include "msr.h"
 #include "common/cityhash.h"
 #ifdef MSR_HAVE_PNG
 #include <png.h>
-#endif
-#ifdef __linux__
-#include <sys/resource.h>
-#include <sys/syscall.h>
-#include <unistd.h>
 #endif
 
 namespace {
@@ -230,7 +226,11 @@ std::list<u64> kept;                       // uploaded images still in memory, o
 std::size_t kept_bytes = 0;
 constexpr std::size_t KeptBudget = 512u << 20;
 std::vector<std::thread> workers;
-std::atomic<unsigned> loaded{0}, failed{0};
+std::atomic<unsigned> loaded{0}, failed{0}, shrunk{0};
+// The menu's "Texture pack size" (settings.ini [native] texture_detail: 1 full, 2 half, 4 quarter), read when the packs
+// start: each replacement is halved this many times on its worker, never below the game's own texture. A 4x pack's
+// 1024x1024 texture (5.3 MiB on the GPU with its mipmaps) becomes 512x512 (1.3 MiB) at half, 256x256 at a quarter.
+unsigned detail_halvings = 0;
 
 bool DecodePng(const fs::path& path, Image& out) {
 #ifdef MSR_HAVE_PNG
@@ -258,6 +258,43 @@ bool DecodePng(const fs::path& path, Image& out) {
 #endif
 }
 
+// The game's own size of the texture a pack file replaces, from its name (tex1_<w>x<h>_...), else 8x8
+void OriginalSize(const fs::path& path, u32& w, u32& h) {
+    w = h = 8;
+    unsigned a = 0, b = 0;
+    if (std::sscanf(Utf8(path.filename()).c_str(), "tex1_%ux%u_", &a, &b) == 2 && a && b) { w = a; h = b; }
+}
+
+// Halves a replacement up to `times` times, never below the game's own size: each pixel the average of four, its colour
+// weighted by their alpha (transparent texels' colour, often black, then stays out of the edges)
+bool Shrink(Image& image, u32 min_w, u32 min_h, unsigned times) {
+    bool any = false;
+    for (; times && image.w % 2 == 0 && image.h % 2 == 0 && image.w / 2 >= min_w && image.h / 2 >= min_h; --times) {
+        const u32 w = image.w / 2, h = image.h / 2, src_w = image.w;
+        std::vector<u8> out(std::size_t{w} * h * 4);
+        for (u32 y = 0; y < h; ++y) {
+            const u8* r0 = image.rgba.data() + (std::size_t{y} * 2) * src_w * 4;
+            const u8* r1 = r0 + std::size_t{src_w} * 4;
+            u8* o = out.data() + std::size_t{y} * w * 4;
+            for (u32 x = 0; x < w; ++x, r0 += 8, r1 += 8, o += 4) {
+                const u32 a[4] = {r0[3], r0[7], r1[3], r1[7]};
+                const u32 sum_a = a[0] + a[1] + a[2] + a[3];
+                for (int c = 0; c < 3; ++c) {
+                    const u32 v[4] = {r0[c], r0[4 + c], r1[c], r1[4 + c]};
+                    o[c] = static_cast<u8>(sum_a ? (v[0] * a[0] + v[1] * a[1] + v[2] * a[2] + v[3] * a[3] + sum_a / 2) / sum_a
+                                                 : (v[0] + v[1] + v[2] + v[3] + 2) / 4);
+                }
+                o[3] = static_cast<u8>((sum_a + 2) / 4);
+            }
+        }
+        image.rgba = std::move(out);
+        image.w = w;
+        image.h = h;
+        any = true;
+    }
+    return any;
+}
+
 // Queues the PNG of a pack hash (lock held)
 void Request(u64 key) {
     Image& image = images[key];
@@ -276,10 +313,8 @@ void Trace(u32 w, u32 h, int fmt, u64 hash, u64 key) {
 }
 
 void Worker() {
-#ifdef __linux__
     // below the game's threads: a PNG decode is never in a hurry (the game's own texture shows meanwhile)
-    setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 5);
-#endif
+    k_background_thread();
     std::unique_lock<std::mutex> guard(lock);
     for (;;) {
         wake.wait(guard, [] { return !queue.empty() || !hash_jobs.empty(); });
@@ -319,6 +354,11 @@ void Worker() {
         guard.unlock();
         Image decoded;
         const bool ok = DecodePng(path, decoded);
+        if (ok && detail_halvings) {
+            u32 min_w, min_h;
+            OriginalSize(path, min_w, min_h);
+            if (Shrink(decoded, min_w, min_h, detail_halvings)) shrunk++;
+        }
         void* staged = ok && stage ? stage_make(decoded.rgba.data(), decoded.w, decoded.h) : nullptr;
         guard.lock();
         if (ok) {
@@ -389,6 +429,11 @@ extern "C" void msr_textures_start(void) {
 #endif
     if (files.empty() || active) return;
     sync_find = std::getenv("PWR_TEXPACK_SYNC") != nullptr;
+    if (const char* settings = msr_settings_file(); settings && *settings) {
+        const int detail = static_cast<int>(MsrIni::File(settings).Number("native", "texture_detail", 1));
+        detail_halvings = detail >= 4 ? 2 : detail >= 2 ? 1 : 0;
+        if (detail_halvings) std::fprintf(stderr, "msr: texture packs at %s size\n", detail_halvings == 2 ? "a quarter" : "half");
+    }
     const unsigned n = std::clamp(std::thread::hardware_concurrency() / 2 - 1, 2u, 4u);
     for (unsigned i = 0; i < n; ++i) workers.emplace_back(Worker).detach();
     active = true;

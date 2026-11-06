@@ -5,8 +5,9 @@
 extern "C" {
 #endif
 
-/* After the settings are loaded: the display and sound settings msr-native started with (resolution 0..4, volume %) */
-void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume);
+/* After the settings are loaded: the display and sound settings msr-native started with (resolution 0..10, volume %,
+   anisotropic filtering 1..16, FSR or linear upscaling, power-saving waits) */
+void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume, int aniso, int fsr, int power_saving);
 /* Once the presenter exists (video.c holds its queue lock): Vulkan and the colour format it draws into */
 void msr_overlay_vk_init(VkInstance instance, VkPhysicalDevice physical, VkDevice device, uint32_t family, VkQueue queue,
                          VkFormat format, uint32_t images);

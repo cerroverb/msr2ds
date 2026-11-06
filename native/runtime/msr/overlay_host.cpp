@@ -37,10 +37,13 @@ int input_right_stick_dpad(void);
 void video_set_fullscreen(int on);
 void video_set_vsync(int on);
 void video_set_resolution(int factor);
+void video_set_aniso(int aniso);
+int video_option(const char* name, const char* value);
 int video_pad_connected(void);
 int video_pad_any_held(void);
 void dsp_set_volume(float volume);
 void main_set_frame_rate(int fps);
+void main_set_power_saving(int on);
 void main_exit(int code);
 void msr_launcher_action(int kind, const char* text);
 extern unsigned g_gsp_top_swaps;
@@ -150,6 +153,7 @@ struct ModsScanner {
     double next = 0;   // render thread: when the next scan is due
 
     void Run() {
+        k_background_thread();
         std::unique_lock guard{lock};
         for (;;) {
             wake.wait(guard, [this] { return wanted || quit; });
@@ -220,6 +224,10 @@ void ApplyEmulator(const MSR::EmulatorSettings& e) {
         file.SetNumber("native", "resolution", e.resolution);
         file.SetBool("native", "vsync", e.vsync);
         file.SetNumber("native", "volume", e.volume);
+        file.SetNumber("native", "aniso", e.aniso);
+        file.SetString("native", "filter", e.fsr ? "fsr" : "linear");
+        file.SetBool("native", "power_saving", e.power_saving);
+        file.SetNumber("native", "texture_detail", e.texture_detail);
         if (!file.Save()) std::fprintf(stderr, "msr: could not save the display settings\n");
         return;
     }
@@ -227,12 +235,19 @@ void ApplyEmulator(const MSR::EmulatorSettings& e) {
     if (e.resolution != emulator.resolution) video_set_resolution(e.resolution);
     if (e.vsync != emulator.vsync) video_set_vsync(e.vsync);
     if (e.volume != emulator.volume) dsp_set_volume(static_cast<float>(e.volume) / 100.f);
+    if (e.aniso != emulator.aniso) video_set_aniso(e.aniso);
+    if (e.fsr != emulator.fsr) video_option("filter", e.fsr ? "fsr" : "linear");
+    if (e.power_saving != emulator.power_saving) main_set_power_saving(e.power_saving);
     emulator = e;
     MsrIni::File file(msr_settings_file());
     if (emulator.fullscreen != launched.fullscreen) file.SetBool("native", "fullscreen", emulator.fullscreen);
     if (emulator.resolution != launched.resolution) file.SetNumber("native", "resolution", emulator.resolution);
     if (emulator.vsync != launched.vsync) file.SetBool("native", "vsync", emulator.vsync);
     if (emulator.volume != launched.volume) file.SetNumber("native", "volume", emulator.volume);
+    if (emulator.aniso != launched.aniso) file.SetNumber("native", "aniso", emulator.aniso);
+    if (emulator.fsr != launched.fsr) file.SetString("native", "filter", emulator.fsr ? "fsr" : "linear");
+    if (emulator.power_saving != launched.power_saving) file.SetBool("native", "power_saving", emulator.power_saving);
+    if (emulator.texture_detail != launched.texture_detail) file.SetNumber("native", "texture_detail", emulator.texture_detail);
     if (!file.Save()) std::fprintf(stderr, "msr: could not save the display settings\n");
 }
 
@@ -301,6 +316,12 @@ void Modifiers(Uint16 mod) {
     O().Key(ImGuiMod_Alt, (mod & KMOD_ALT) != 0);
 }
 
+/// The texture pack size in settings.ini: 1, 2 or 4 (textures.cpp takes it the same way)
+int TextureDetail(const MsrIni::File& file) {
+    const int detail = static_cast<int>(file.Number("native", "texture_detail", 1));
+    return detail >= 4 ? 4 : detail >= 2 ? 2 : 1;
+}
+
 } // namespace
 
 extern "C" void msr_overlay_launcher(int on) {
@@ -315,6 +336,10 @@ extern "C" void msr_overlay_reload(void) {
     emulator.resolution = static_cast<int>(file.Number("native", "resolution", emulator.resolution));
     emulator.vsync = file.Bool("native", "vsync", emulator.vsync);
     emulator.volume = static_cast<int>(file.Number("native", "volume", emulator.volume));
+    emulator.aniso = MSR::AnisoChoice(static_cast<int>(file.Number("native", "aniso", emulator.aniso)));
+    emulator.fsr = file.String("native", "filter", emulator.fsr ? "fsr" : "linear") != "linear";
+    emulator.power_saving = file.Bool("native", "power_saving", emulator.power_saving);
+    emulator.texture_detail = emulator.texture_detail_running = TextureDetail(file);
     O().SetEmulatorSettings(emulator);
     LoadControls();
     RefreshControls();
@@ -342,11 +367,19 @@ static bool SteamDeck() {
 #endif
 }
 
-extern "C" void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume) {
+extern "C" void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume, int aniso, int fsr,
+                                  int power_saving) {
     launched.fullscreen = fullscreen != 0;
     launched.resolution = resolution;
     launched.vsync = vsync != 0;
     launched.volume = volume;
+    launched.aniso = MSR::AnisoChoice(aniso);
+    launched.aniso_option = true;
+    launched.fsr = fsr != 0;
+    launched.power_saving = power_saving != 0;
+    launched.performance_options = true;
+    // read from settings.ini by textures.cpp as the packs start, in the game; the launcher's is the same file
+    launched.texture_detail = launched.texture_detail_running = TextureDetail(MsrIni::File(msr_settings_file()));
     launched.max_resolution = 10;
     launched.quick_saves = true;
     launched.bloom_option = true;

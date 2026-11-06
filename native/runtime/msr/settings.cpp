@@ -24,6 +24,7 @@ void PlayerSettings::Load(const std::string& path) {
     ultrawide = ultrawide && widescreen;   // it widens the 16:9 view: never on without it (the Display tab keeps to that)
     number("camera_zoom", camera_zoom);
     camera_zoom = std::clamp(camera_zoom, CameraZoomMin, CameraZoomMax);
+    flag("wide_culling", wide_culling);
     number("hud_scale", hud_scale);
     number("hud_opacity", hud_opacity);
     flag("show_minimap", show_minimap);
@@ -57,6 +58,16 @@ void PlayerSettings::Load(const std::string& path) {
     if (std::none_of(Languages.begin(), Languages.end(), [&](const Language& l) { return l.value == language; })) {
         language = 1;   // English
     }
+    flag("custom_video", custom_video);
+    custom_resolution = std::clamp(static_cast<int>(file.Number("General", "custom_resolution", custom_resolution)), 0, 10);
+    custom_aniso = AnisoChoice(static_cast<int>(file.Number("General", "custom_aniso", custom_aniso)));
+    flag("custom_fsr", custom_fsr);
+    flag("custom_wide_culling", custom_wide_culling);
+    flag("custom_power_saving", custom_power_saving);
+    custom_frame_rate = static_cast<int>(file.Number("General", "custom_frame_rate", custom_frame_rate));
+    if (std::find(FrameRate::Choices.begin(), FrameRate::Choices.end(), custom_frame_rate) == FrameRate::Choices.end()) {
+        custom_frame_rate = 60;
+    }
 }
 
 void PlayerSettings::Save(const std::string& path) const {
@@ -66,6 +77,7 @@ void PlayerSettings::Save(const std::string& path) const {
     flag("widescreen", widescreen);
     flag("ultrawide", ultrawide);
     number("camera_zoom", camera_zoom);
+    flag("wide_culling", wide_culling);
     number("hud_scale", hud_scale);
     number("hud_opacity", hud_opacity);
     flag("show_minimap", show_minimap);
@@ -92,6 +104,13 @@ void PlayerSettings::Save(const std::string& path) const {
     flag("infinite_missiles", infinite_missiles);
     flag("infinite_aeion", infinite_aeion);
     number("language", language);
+    flag("custom_video", custom_video);
+    number("custom_resolution", custom_resolution);
+    number("custom_aniso", custom_aniso);
+    flag("custom_fsr", custom_fsr);
+    number("custom_frame_rate", custom_frame_rate);
+    flag("custom_wide_culling", custom_wide_culling);
+    flag("custom_power_saving", custom_power_saving);
     if (!file.Save()) std::fprintf(stderr, "msr: could not write %s\n", path.c_str());
 }
 
@@ -115,6 +134,10 @@ extern "C" int msr_settings_load(const char* path) {
 
 extern "C" int msr_settings_frame_rate(void) {
     return MSR::GetOverlay().GetPlayerSettings().frame_rate;
+}
+
+extern "C" int msr_settings_wide_culling(void) {
+    return MSR::GetOverlay().GetPlayerSettings().wide_culling;
 }
 
 extern "C" int msr_settings_language(void) {
