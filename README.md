@@ -236,6 +236,10 @@ keys.
   menus, a controller or Alt+Tab let it go.
 - **Screens the game shows over play** without the pause menu, like an elevator's
   map, stand beside the view so its prompts stay readable.
+- **The triggers** are buttons like the others: pull one while rebinding a
+  control to bind it (Free Aim on LT and Morph Ball on LB, for example).
+  **Trigger press point** on the Controls tab sets how far a trigger is pulled
+  before it counts (50% by default; it lets go under 60% of that).
 - **Gamepad layout** and **Keyboard layout** on the Controls tab put the
   defaults back.
 

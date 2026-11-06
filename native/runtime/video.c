@@ -1010,12 +1010,18 @@ int video_frame(void) {
                 if (c && c != gc && (e.caxis.value > 16000 || e.caxis.value < -16000)) pad_used(c);
                 if (c && c != gc) break;   /* another pad's resting sticks are not read */
             }
-            /* Samus Returns: LT = Morph Ball, RT = the next beam (taps on the HUD, msr_trigger), on the press */
+            /* the triggers as buttons (#35), past the Controls tab's press point: through the bindings as the others. ZL
+               and ZR (LT and RT by default, or any button) are the Morph Ball and the next beam, taps on the HUD
+               (msr_trigger) on the press; bound to another control, a trigger is held as that button */
             static int trig[2];
             if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
-                int t = e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT, on = e.caxis.value > 16000;
-                if (on && !trig[t]) msr_trigger(t);
-                trig[t] = on;
+                const int t = e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT, was = trig[t];
+                const int on = input_trigger_pulled(t, e.caxis.value, &trig[t]);
+                if (on != was) {
+                    const int button = t ? PAD_TRIGGER_RIGHT : PAD_TRIGGER_LEFT, c = input_pad_control_now(button);
+                    if (c == C_ZL || c == C_ZR) { if (on) msr_trigger(c == C_ZR); }
+                    else input_pad_sdl(button, on);
+                }
             }
             else pad_axes(); } break;
         case SDL_JOYBUTTONDOWN: case SDL_JOYBUTTONUP: if (!joy || g_input_none || e.jbutton.button >= 8) break;

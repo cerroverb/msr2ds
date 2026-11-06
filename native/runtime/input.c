@@ -27,6 +27,7 @@ static int touch_down, touch_x, touch_y;
 static uint32_t pad_keys;                    /* digital buttons from a gamepad: what its held buttons pressed (pad_recount) */
 static int pad_cl, pad_cr, pad_cu, pad_cd;   /* the circle pad from pad buttons bound to it */
 static unsigned char pad_held[SDL_CONTROLLER_BUTTON_MAX];   /* each held pad button's control + 1 as at its press (0: none) */
+static unsigned char trigger_held[2];                        /* the same for the triggers as buttons (PAD_TRIGGER_LEFT, _RIGHT) */
 static unsigned char raw_held[12];           /* each held raw joystick button's control + 1 as at its press */
 static int rstick_dpad;                      /* the option: the right stick is the D-pad, the pad's D-pad the circle pad */
 static uint32_t rstick_bits;                 /* the D-pad direction the right stick holds */
@@ -58,7 +59,7 @@ static const uint32_t ctrl_bit[C_COUNT] = { B_A, B_B, B_X, B_Y, B_L, B_R, 0, 0, 
 #define KEY_DEFAULTS { SDLK_f, SDLK_SPACE, SDLK_r, SDLK_v, SDLK_q, SDLK_e, SDLK_LSHIFT, SDLK_c, SDLK_TAB, SDLK_BACKSPACE, \
                        SDLK_1, SDLK_4, SDLK_2, SDLK_3, SDLK_w, SDLK_s, SDLK_a, SDLK_d }
 #define PAD_DEFAULTS { SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_Y, SDL_CONTROLLER_BUTTON_X, \
-                       SDL_CONTROLLER_BUTTON_LEFTSHOULDER, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, -1, -1, \
+                       SDL_CONTROLLER_BUTTON_LEFTSHOULDER, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, PAD_TRIGGER_LEFT, PAD_TRIGGER_RIGHT, \
                        SDL_CONTROLLER_BUTTON_START, SDL_CONTROLLER_BUTTON_BACK, SDL_CONTROLLER_BUTTON_DPAD_UP, \
                        SDL_CONTROLLER_BUTTON_DPAD_DOWN, SDL_CONTROLLER_BUTTON_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, -1, -1, -1, -1 }
 static const int key_default[C_COUNT] = KEY_DEFAULTS, pad_default[C_COUNT] = PAD_DEFAULTS;
@@ -132,8 +133,20 @@ static const char *pad_name(int b) {
     case SDL_CONTROLLER_BUTTON_PADDLE1: return "Paddle 1"; case SDL_CONTROLLER_BUTTON_PADDLE2: return "Paddle 2";
     case SDL_CONTROLLER_BUTTON_PADDLE3: return "Paddle 3"; case SDL_CONTROLLER_BUTTON_PADDLE4: return "Paddle 4";
     case SDL_CONTROLLER_BUTTON_TOUCHPAD: return "Touchpad";
+    case PAD_TRIGGER_LEFT: return "LT"; case PAD_TRIGGER_RIGHT: return "RT";
     }
     return "button";
+}
+/* the triggers' press point (#35: "the second there's any activity on the trigger the action would happen"; the
+   Controls tab, settings.ini [native_controls] trigger_press): pressed past it, let go under 60% of it */
+static int trigger_press = 50;
+void input_set_trigger_press(int percent) { trigger_press = percent < 10 ? 10 : percent > 90 ? 90 : percent; }
+int input_trigger_press(void) { return trigger_press; }
+int input_trigger_pulled(int right, int value, int *held) {
+    (void)right;
+    const int press = trigger_press * 32767 / 100, release = press * 6 / 10;
+    *held = *held ? value > release : value > press;
+    return *held;
 }
 void input_binding_text(int c, char *buf, size_t n) {
     if (c < 0 || c >= C_COUNT) { snprintf(buf, n, "Not set"); return; }
@@ -146,7 +159,6 @@ void input_binding_text(int c, char *buf, size_t n) {
     else if (rstick_dpad && c >= C_CUP)   /* the option: the D-pad (and the left stick, as always) */
         snprintf(pad, sizeof pad, "Gamepad %s%sD-pad %s", own ? pad_name(pad_bind[c]) : "", own ? " / " : "", dir[c - C_CUP]);
     else if (pad_bind[c] >= 0) snprintf(pad, sizeof pad, "Gamepad %s", pad_name(pad_bind[c]));
-    else if (c == C_ZL || c == C_ZR) snprintf(pad, sizeof pad, "Gamepad %s trigger", c == C_ZL ? "left" : "right");
     snprintf(buf, n, "%s%s%s", key, key[0] && pad[0] ? ", " : "", pad[0] || key[0] ? pad : "Not set");
 }
 /* a key or pad button for control c: taken from any other control that had it */
@@ -183,18 +195,21 @@ void input_key(int sym, int down) {
 /* under I: the pad's buttons and its circle pad from what each held button pressed */
 static void pad_recount(void) {
     pad_keys = 0; pad_cu = pad_cd = pad_cl = pad_cr = 0;
-    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX + 12; b++) {
-        const int c = (b < SDL_CONTROLLER_BUTTON_MAX ? pad_held[b] : raw_held[b - SDL_CONTROLLER_BUTTON_MAX]) - 1;
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX + 12 + 2; b++) {
+        const int c = (b < SDL_CONTROLLER_BUTTON_MAX ? pad_held[b] : b < SDL_CONTROLLER_BUTTON_MAX + 12 ? raw_held[b - SDL_CONTROLLER_BUTTON_MAX]
+                       : trigger_held[b - SDL_CONTROLLER_BUTTON_MAX - 12]) - 1;
         if (c == C_CUP) pad_cu = 1; else if (c == C_CDOWN) pad_cd = 1; else if (c == C_CLEFT) pad_cl = 1; else if (c == C_CRIGHT) pad_cr = 1;
         else if (c >= 0) pad_keys |= ctrl_bit[c];
     }
 }
 /* a gamepad button through the bindings (controllers with an SDL mapping), the menus' layout in menus */
 void input_pad_sdl(int button, int down) {
-    if (button < 0 || button >= SDL_CONTROLLER_BUTTON_MAX) return;
+    const int trigger = button == PAD_TRIGGER_LEFT || button == PAD_TRIGGER_RIGHT;
+    if (!trigger && (button < 0 || button >= SDL_CONTROLLER_BUTTON_MAX)) return;
     const int c = down ? input_pad_control_now(button) : -1;
     pthread_mutex_lock(&I);
-    pad_held[button] = (unsigned char)(c + 1);
+    if (trigger) trigger_held[button - PAD_TRIGGER_LEFT] = (unsigned char)(c + 1);
+    else pad_held[button] = (unsigned char)(c + 1);
     pad_recount();
     pthread_mutex_unlock(&I);
 }
@@ -213,7 +228,7 @@ void input_pad_button(int b, int down) {
 }
 /* the pad in use went away: none of its buttons stay held */
 void input_pad_release(void) {
-    pthread_mutex_lock(&I); memset(pad_held, 0, sizeof pad_held); memset(raw_held, 0, sizeof raw_held); pad_recount(); pthread_mutex_unlock(&I);
+    pthread_mutex_lock(&I); memset(pad_held, 0, sizeof pad_held); memset(raw_held, 0, sizeof raw_held); memset(trigger_held, 0, sizeof trigger_held); pad_recount(); pthread_mutex_unlock(&I);
 }
 
 void input_pad_stick(int x, int y) { pthread_mutex_lock(&I); pad_x = x; pad_y = y; pthread_mutex_unlock(&I); }
@@ -234,7 +249,7 @@ void input_touch(int down, int x, int y) {
 
 void input_release_all(void) {
     pthread_mutex_lock(&I); keys = pad_keys = 0; stick_l = stick_r = stick_u = stick_d = 0; pad_cl = pad_cr = pad_cu = pad_cd = 0;
-    memset(pad_held, 0, sizeof pad_held); memset(raw_held, 0, sizeof raw_held); rstick_bits = 0;
+    memset(pad_held, 0, sizeof pad_held); memset(raw_held, 0, sizeof raw_held); memset(trigger_held, 0, sizeof trigger_held); rstick_bits = 0;
     pad_x = pad_y = 0; touch_down = 0;
     mouse_fire = mouse_aim = 0; pthread_mutex_unlock(&I);
 }

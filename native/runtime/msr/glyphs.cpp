@@ -98,18 +98,19 @@ const char* Label(int button) {
     static const char* const xbox[] = {"A", "B", "X", "Y", "View", "Guide", "Menu", "LS", "RS", "LB", "RB", "D-pad up", "D-pad down", "D-pad left", "D-pad right"};
     static const char* const ps[] = {"Cross", "Circle", "Square", "Triangle", "Create", "PS", "Options", "L3", "R3", "L1", "R1", "D-pad up", "D-pad down", "D-pad left", "D-pad right"};
     static const char* const nin[] = {"B", "A", "Y", "X", "-", "Home", "+", "LS", "RS", "L", "R", "D-pad up", "D-pad down", "D-pad left", "D-pad right"};
+    if (button == PAD_TRIGGER_LEFT || button == PAD_TRIGGER_RIGHT) {   // the triggers as buttons (input.h, #35)
+        static const char* const triggers[3][2] = {{"LT", "RT"}, {"L2", "R2"}, {"ZL", "ZR"}};
+        return triggers[dev == G::PlayStation ? 1 : dev == G::Nintendo ? 2 : 0][button == PAD_TRIGGER_RIGHT];
+    }
     if (button < 0 || button > SDL_CONTROLLER_BUTTON_DPAD_RIGHT) return "";
     return dev == G::PlayStation ? ps[button] : dev == G::Nintendo ? nin[button] : xbox[button];
 }
 
+// the pad button a control is bound to, by the device's name for it ("" for none): ZL and ZR's are the triggers by
+// default, any button or trigger once rebound (#35)
 const char* PadName(u32 control) {
-    static const char* const triggers[3][2] = {{"LT", "RT"}, {"L2", "R2"}, {"ZL", "ZR"}};
     const u32 dev = G::device.load(std::memory_order_relaxed);
     const int b = control < C_COUNT ? input_pad_bound(static_cast<int>(control), MenuLayout(dev)) : -1;
-    if (control == G::CZL || control == G::CZR) {
-        if (b >= 0) return Label(b);
-        return triggers[dev == G::PlayStation ? 1 : dev == G::Nintendo ? 2 : 0][control == G::CZR];
-    }
     return b >= 0 ? Label(b) : "";
 }
 

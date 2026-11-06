@@ -745,6 +745,20 @@ void Overlay::DrawControls(float scale, float label_width,
             Act(OverlayAction::Kind::MenuConfirmRight, on ? 1 : 0);
         }
     }
+    // msr-native (#35): the triggers are buttons like the others below; how far one is pulled before it counts. It shows
+    // at once and is saved when let go.
+    if (snapshot.trigger_option) {
+        int press = snapshot.trigger_press;
+        Label("Trigger press point", label_width);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::SliderInt("##triggerpress", &press, 10, 90, "%d%% of its travel")) {
+            std::scoped_lock lock{mutex};
+            controls.trigger_press = press;
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            Act(OverlayAction::Kind::TriggerPress, press);
+        }
+    }
 
     // The bindings scroll in their own region; the reference stays below them. msr-native names
     // the keys or buttons of the device in use (ButtonGlyphs::Keys) and aims with the mouse (video.c).
@@ -786,7 +800,7 @@ void Overlay::DrawControls(float scale, float label_width,
         Label(row.label.c_str(), label_width);
         if (snapshot.capturing == row.id) {
             const char* prompt = row.id >= 100 ? "Move a stick...   (Esc cancels)"
-                                               : "Press a button or key...   (Esc cancels)";
+                                               : "Press a button, trigger or key...   (Esc cancels)";
             // The same ID whatever the label, so focus stays on the row while it changes.
             ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
             if (ImGui::Button((std::string(prompt) + "###bind").c_str(), {-FLT_MIN, 0.f})) {
