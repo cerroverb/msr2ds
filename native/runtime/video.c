@@ -904,6 +904,14 @@ static void mouse_frame(Rect rt) {
     const int want_cross = play && over, want_shown = !(play && msr_input_pad_active() && now_s() - mouse.moved > 2.0);
     if (cross && want_cross != crossed) { SDL_SetCursor(want_cross ? cross : arrow); crossed = want_cross; }
     if (want_shown != shown) { SDL_ShowCursor(want_shown ? SDL_ENABLE : SDL_DISABLE); shown = want_shown; }
+#ifndef __ANDROID__
+    /* in play with the mouse (no pad in use), the pointer stays in the window (#33: in a window, a shot beside it took
+       the focus away); the settings menu, the game's title and file menus, a pad and leaving the window (Alt+Tab: SDL
+       lets go with the focus and holds it again on return) free it */
+    static int grabbed = -1;
+    const int want_grab = play && !msr_input_pad_active() && (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS) != 0;
+    if (want_grab != grabbed) { SDL_SetWindowGrab(win, want_grab ? SDL_TRUE : SDL_FALSE); grabbed = want_grab; }
+#endif
 }
 
 int video_frame(void) {

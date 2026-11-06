@@ -900,6 +900,8 @@ static VkImageView tex_get_(int unit, int *full) {
     }
     if (need) {   /* new bytes: a texture pack may replace them (looked up by their hash, msr/textures.cpp) */
         t->glyph_sheet = msr_glyph_sheet(g_mem + addr, w, h, fmt); t->glyph_ver = msr_glyph_version();
+        static int ptrace = -1; if (ptrace < 0) ptrace = getenv("PWR_TEXPACK_TRACE") != NULL;
+        if (ptrace && t->rep.img) fprintf(stderr, "texpack: %08x %ux%u fmt %d changed: its replacement dropped\n", addr, w, h, fmt);
         if (t->rep.img) img_retire(&t->rep);
         t->rep_extra = 0;
         t->find_pending = 0;

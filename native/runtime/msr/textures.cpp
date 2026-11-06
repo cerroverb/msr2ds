@@ -8,6 +8,7 @@
 // flip_png_files says (default on), and mipmaps are generated (pica_vk.c). Without libpng (MSR_HAVE_PNG) this is
 // compiled out.
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -155,6 +156,35 @@ fs::path FromUtf8(const char* s) { return fs::path(std::u8string(reinterpret_cas
 // ---- the packs ----
 std::vector<fs::path> packs;
 std::unordered_map<u64, fs::path> files;   // hash -> PNG, the first pack to name it
+std::unordered_map<u64, std::size_t> file_pack;   // hash -> its pack's place in the list (0: the first, which wins)
+
+// The prologue's nine pictures (512x256 RGB8, #20): the game writes 400 of their 512 columns and leaves the rest as
+// memory held, so their hash depends on what was there before. The emulator the packs were dumped with saw each
+// picture under two hashes (the HD Texture Pack and its Higher Res Intro add-on name both); here the rest is white and
+// the hash another one again. Each is looked up under the packs' two names as well (the pairs matched by picture).
+constexpr std::array<std::array<u64, 3>, 9> Aliases{{
+    {0x0FF65C8E661011ECull, 0x56FE01C8009B7DD6ull, 0xFF6F671C72BFFFBDull},
+    {0x1FD6F94901729614ull, 0x6D4B30277557A3CBull, 0x1B8721A987DB59D7ull},
+    {0x22696E785E259786ull, 0x0A535304AFA8FF72ull, 0x4AD910FA88999906ull},
+    {0x6E0391D509FEC4DEull, 0x47A85B5F586311D5ull, 0x5CBC7999B9277E5Bull},
+    {0x9AEE430EC9AF4DA7ull, 0x98FECB9CBB1B53ABull, 0xF719232EB8B36E7Eull},
+    {0xCAFAFD8ABE93EC4Bull, 0xD69D91D5805083CFull, 0x8CBB99E9708B35AEull},
+    {0xD04F0586B12CBAB5ull, 0xE964A30BE89A69E6ull, 0xFCDCC2C7F4228F05ull},
+    {0xD18E646E9775E0CCull, 0x159B71CD9086BEDCull, 0xF6FDF25679B2B316ull},
+    {0xD6A7A5871C01ED1Full, 0x899A8FC266947786ull, 0x0E0A2E641CA605A1ull},
+}};
+
+// The file for a texture's hash: its own name's, or an alias's, from the pack highest in the list (an add-on above
+// the main pack wins whichever of the names each uses); 0 when no pack names it. Called with `lock` held.
+u64 Resolve(u64 hash) {
+    u64 best = files.count(hash) ? hash : 0;
+    for (const auto& names : Aliases) {
+        if (names[0] != hash) continue;
+        for (std::size_t i = 1; i < names.size(); ++i)
+            if (files.count(names[i]) && (!best || file_pack[names[i]] < file_pack[best])) best = names[i];
+    }
+    return best;
+}
 bool use_new_hash = false, flip_png = true;
 std::atomic<bool> active{false};
 
@@ -234,6 +264,17 @@ void Request(u64 key) {
     if (image.state == State::Idle) { image.state = State::Queued; queue.push_back(key); wake.notify_one(); }
 }
 
+// PWR_TEXPACK_TRACE: each texture of 128 px or more the packs are asked about, by the file name that replaces it
+// (and the alias's, when one of those names it)
+void Trace(u32 w, u32 h, int fmt, u64 hash, u64 key) {
+    static const bool on = std::getenv("PWR_TEXPACK_TRACE") != nullptr;
+    if (!on || (w < 128 && h < 128)) return;
+    std::fprintf(stderr, "texpack: %s tex1_%ux%u_%016llX_%d.png", key ? "found  " : "no file", w, h,
+                 static_cast<unsigned long long>(hash), fmt);
+    if (key && key != hash) std::fprintf(stderr, " as %016llX", static_cast<unsigned long long>(key));
+    std::fputc('\n', stderr);
+}
+
 void Worker() {
 #ifdef __linux__
     // below the game's threads: a PNG decode is never in a hurry (the game's own texture shows meanwhile)
@@ -248,7 +289,8 @@ void Worker() {
             guard.unlock();
             const u64 hash = LegacyHash(job.level0.data(), job.w, job.h, job.fmt);
             guard.lock();
-            const u64 key = files.count(hash) ? hash : 0;
+            const u64 key = Resolve(hash);
+            Trace(job.w, job.h, job.fmt, hash, key);
             memo[job.seen] = {key, false};
             if (key) Request(key);
             continue;
@@ -322,7 +364,7 @@ extern "C" int msr_textures_add_pack(const char* dir) {
         }
         const auto mip = name.find("_mip");
         if (mip != std::string::npos && name.compare(mip, 6, "_mip0.") != 0) continue;   // only level 0
-        files.emplace(hash, it->path());
+        if (files.emplace(hash, it->path()).second) file_pack[hash] = packs.size();
     }
     if (packs.empty()) {
         use_new_hash = false;
@@ -379,7 +421,8 @@ extern "C" uint64_t msr_texture_find(const uint8_t* level0, uint32_t w, uint32_t
     const u64 hash = use_new_hash ? Common::CityHash64(reinterpret_cast<const char*>(level0), bytes)
                                   : LegacyHash(level0, w, h, fmt);
     std::lock_guard<std::mutex> guard(lock);
-    const u64 key = files.count(hash) ? hash : 0;
+    const u64 key = Resolve(hash);
+    Trace(w, h, fmt, hash, key);
     memo[seen] = {key, false};
     if (key) Request(key);
     return key;

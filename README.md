@@ -229,6 +229,11 @@ keys.
   leaves. The pause map's tools (scan, map pins, info) and copying or deleting
   files are touch-only in the game. The mouse also touches the bottom-screen
   panel when it shows.
+- **The mouse stays in the window** while you play with it, so a shot beside a
+  windowed game doesn't switch away. The settings menu (F1), the title and file
+  menus, a controller or Alt+Tab let it go.
+- **Screens the game shows over play** without the pause menu, like an elevator's
+  map, stand beside the view so its prompts stay readable.
 - **Gamepad layout** and **Keyboard layout** on the Controls tab put the
   defaults back.
 
@@ -343,6 +348,12 @@ holds only folders, like a pack's "Optional Addons", lists each add-on as its ow
 pack. New packs join the top of the list, smallest first, so add-ons override the
 pack they extend. Packs found in a `textures` folder beside the program are
 listed the same way, marked as included with the game.
+
+The prologue's nine pictures have different names in 2.0 than in the packs (the
+game leaves part of each picture's memory unwritten, and the emulator held other
+bytes there), so 2.0 also looks for them under the names the HD Texture Pack and
+its **Higher Res Intro** add-on use. Whichever name a pack uses, the pack higher
+in the list wins.
 
 ### Making a pack
 

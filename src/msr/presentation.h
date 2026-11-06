@@ -133,6 +133,10 @@ inline std::atomic<bool> force_panel{false};
 /// The bottom-screen panel is on screen, so touches should reach the game.
 inline std::atomic<bool> panel_visible{false};
 
+/// A menu over play that no Start press opened (an elevator's map, msr-native's compositor): the panel stands beside
+/// the view and the pause menu's control hints stay away.
+inline std::atomic<bool> menu_beside{false};
+
 /// The settings overlay is open: the game keeps running but receives no input.
 inline std::atomic<bool> block_game_input{false};
 

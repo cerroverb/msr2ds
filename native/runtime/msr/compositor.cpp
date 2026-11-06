@@ -86,6 +86,8 @@ struct State {
     bool beams_held = false;   // R held: the beam slots as they were (msr_compose)
     s64 beams_up_us = -1;      // R came up then (-1: still held)
     unsigned buttons = 0;
+    bool menu_asked = false;   // a Start press opened the menus over play: they show as usual until the HUD is back
+    bool menu_beside = false;  // the menu showing over play came without one (Consume): beside the view
 } st;
 
 std::vector<MsrQuad> quads;
@@ -226,13 +228,32 @@ void Consume(const BC::Image& image, s64 now) {
         st.page_frames = 1;
         st.page_since_us = now;
     }
-    if (st.candidate_frames >= 3 && now - st.candidate_since_us >= 80'000) {
+    bool held = st.candidate_frames >= 3 && now - st.candidate_since_us >= 80'000;
+    // A menu over play that no Start press asked for (#12, #32). Play's menus open from Start (the pause menu); without
+    // one, the bottom screen read as a menu was the HUD misread (picking things up flashed the whole map) or a screen of
+    // the game's own over play (an elevator's map, whose panel covered the top screen's prompt). Such a menu shows only
+    // once it has held 1.5 s, and then beside the view, as the gallery's panel (msr_compose), the view's prompts in sight.
+    const int menu = static_cast<int>(P::Bottom::Menu);
+    const bool menu_new = state == menu && P::bottom.load(std::memory_order_relaxed) != menu;
+    bool beside = false;
+    if (held && menu_new && st.in_play && !st.menu_asked) {
+        const long long start_us = P::start_pressed_us.load(std::memory_order_relaxed);   // -1: none yet
+        if (start_us >= 0 && now - start_us < 2'000'000) st.menu_asked = true;
+        else if (now - st.candidate_since_us < 1'500'000) held = false;
+        else beside = true;
+    }
+    if (held) {
         const bool page_held = st.page_frames >= 3 && now - st.page_since_us >= 80'000;
         static const bool trace = std::getenv("PWR_MSR_TRACE") != nullptr;   // PWR_MSR_TRACE: the published states
         if (trace && (P::bottom.load() != state || (page_held && P::page.load() != page)))
-            std::fprintf(stderr, "msr: bottom %d page %d\n", state, page_held ? page : P::page.load());
+            std::fprintf(stderr, "msr: bottom %d page %d%s\n", state, page_held ? page : P::page.load(),
+                         menu_new && beside ? " (no Start: beside the view)" : "");
         P::bottom.store(state, std::memory_order_relaxed);
         if (page_held) P::page.store(page, std::memory_order_relaxed);
+        if (menu_new) st.menu_beside = beside;
+        if (state != menu) st.menu_beside = false;
+        if (state == static_cast<int>(P::Bottom::Hud)) st.menu_asked = false;
+        P::menu_beside.store(st.menu_beside, std::memory_order_relaxed);
     }
 }
 
@@ -294,7 +315,14 @@ extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned button
     quads.clear();
     const s64 now_us = NowUs(now_s);
     // HID Start rising: the game sees the press (the emulator's HID sets this as the game reads it)
-    if ((buttons & 8) && !(st.buttons & 8)) P::start_pressed_us.store(now_us, std::memory_order_relaxed);
+    if ((buttons & 8) && !(st.buttons & 8)) {
+        P::start_pressed_us.store(now_us, std::memory_order_relaxed);
+        if (st.menu_beside) {   // Start over a menu beside the view: the pause menu it opens shows as usual
+            st.menu_beside = false;
+            st.menu_asked = true;
+            P::menu_beside.store(false, std::memory_order_relaxed);
+        }
+    }
     st.buttons = buttons;
     // R held (missiles, Power Bombs): the game draws them in the beam slots, and the HUD keeps the beams as they were
     // (2026-11-03, the user: "it should just stay with whatever beam you were using"; the slots are the touch screen's
@@ -379,8 +407,8 @@ extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned button
     st.prompt_alpha = Approach(st.prompt_alpha, show_prompt ? 1.f : 0.f, PromptFadePerSecond * seconds);
     P::panel_visible = st.panel_alpha > 0.5f || st.prompt_alpha > 0.5f;
 
-    // Gallery viewer: the view moves aside and the panel stands next to it.
-    const bool gallery = state == P::Bottom::Menu && page == P::Page::Gallery;
+    // Gallery viewer, and a menu over play without Start (Consume): the view moves aside and the panel stands next to it.
+    const bool gallery = state == P::Bottom::Menu && (page == P::Page::Gallery || st.menu_beside);
     st.gallery = Approach(st.gallery, gallery ? 1.f : 0.f, fade);
     const float ease = st.gallery * st.gallery * (3.f - 2.f * st.gallery);
     Rect view_top = layout_top, panel = layout_panel;
