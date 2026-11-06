@@ -151,6 +151,66 @@ float NoteHeight(const char* text) {
            ImGui::GetStyle().ItemSpacing.y;
 }
 
+/// A video preset's internal resolution, within what the menu offers.
+int PresetResolution(const VideoPreset& preset, const EmulatorSettings& e) {
+    return std::clamp(preset.resolution, 1, std::max(e.max_resolution, 1));
+}
+
+/// The video preset (VideoPresets) the Display tab's settings make, or -1: Custom.
+int VideoPresetOf(const PlayerSettings& p, const EmulatorSettings& e) {
+    for (std::size_t i = 0; i < VideoPresets.size(); ++i) {
+        const auto& preset = VideoPresets[i];
+        const bool rate = preset.frame_rate <= 30 ? p.frame_rate == preset.frame_rate
+                                                  : p.frame_rate >= preset.frame_rate;
+        // power-saving waits count only for the preset that turns them on (Minimum); the others leave them
+        if (rate && e.resolution == PresetResolution(preset, e) &&
+            (!e.aniso_option || e.aniso == preset.aniso) &&
+            (!e.performance_options ||
+             (e.fsr == preset.fsr && p.wide_culling != preset.only_3ds_view &&
+              (!preset.power_saving || e.power_saving)))) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void ApplyVideoPreset(const VideoPreset& preset, PlayerSettings& p, EmulatorSettings& e) {
+    e.resolution = PresetResolution(preset, e);
+    if (e.aniso_option) {
+        e.aniso = preset.aniso;
+    }
+    if (e.performance_options) {
+        e.fsr = preset.fsr;
+        p.wide_culling = !preset.only_3ds_view;
+        e.power_saving = e.power_saving || preset.power_saving;
+    }
+    if (preset.frame_rate <= 30 || p.frame_rate < preset.frame_rate) {
+        p.frame_rate = preset.frame_rate;
+    }
+}
+
+/// What a video preset sets, for the note under the Video preset row.
+std::string VideoPresetNote(const VideoPreset& preset, const EmulatorSettings& e) {
+    std::string note = std::string(ResolutionNames[PresetResolution(preset, e)]) + " internal resolution";
+    if (e.aniso_option) {
+        const auto aniso = std::find(AnisoChoices.begin(), AnisoChoices.end(), preset.aniso);
+        note += preset.aniso > 1 ? std::string(", ") + AnisoNames[aniso - AnisoChoices.begin()] +
+                                       " anisotropic filtering"
+                                 : ", no anisotropic filtering";
+    }
+    if (e.performance_options) {
+        note += preset.fsr ? ", FSR 1 upscaling" : ", linear upscaling";
+    }
+    note += preset.frame_rate <= 30 ? ", 30 FPS (the original)"
+                                    : ", " + std::to_string(preset.frame_rate) +
+                                          " FPS (a faster rate you chose stays)";
+    if (e.performance_options && preset.only_3ds_view) {
+        note += preset.power_saving ? "; only the 3DS's view drawn, power-saving waits (below)"
+                                    : "; only the 3DS's view drawn (below)";
+    }
+    return note + ".";
+}
+
 } // namespace
 
 #ifndef MSR_NATIVE
@@ -230,6 +290,7 @@ void PlayerSettings::Publish() const {
     P::widescreen = widescreen;
     P::ultrawide = ultrawide;
     P::zoom = camera_zoom;
+    P::wide_culling = wide_culling;
     P::hud_scale = hud_scale;
     P::hud_opacity = hud_opacity;
     P::show_minimap = show_minimap;
@@ -1085,11 +1146,54 @@ void Overlay::DrawMenu(float scale, bool appearing) {
                               "the Deck's refresh rate to 60 Hz (Quick Access menu, Performance).");
                 ImGui::Spacing();
             }
-            row("Fullscreen");
-            emulator_changed |= ImGui::Checkbox("##fullscreen", &e.fullscreen);
+            // Minimum, Medium, High, Ultra, or Custom: the player's own values, brought back once a preset replaced them
+            row("Video preset");
+            const int preset = VideoPresetOf(p, e);
+            if (ImGui::BeginCombo("##preset", preset >= 0 ? VideoPresets[preset].name : "Custom")) {
+                for (int i = 0; i < static_cast<int>(VideoPresets.size()); ++i) {
+                    if (ImGui::Selectable(VideoPresets[i].name, preset == i) && preset != i) {
+                        ApplyVideoPreset(VideoPresets[i], p, e);
+                        emulator_changed = player_changed = true;
+                    }
+                    if (preset == i) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::BeginDisabled(!p.custom_video);
+                if (ImGui::Selectable("Custom", preset < 0) && preset >= 0) {
+                    e.resolution = std::clamp(p.custom_resolution, 0, e.max_resolution);
+                    if (e.aniso_option) {
+                        e.aniso = AnisoChoice(p.custom_aniso);
+                    }
+                    if (e.performance_options) {
+                        e.fsr = p.custom_fsr;
+                        p.wide_culling = p.custom_wide_culling;
+                        e.power_saving = p.custom_power_saving;
+                    }
+                    p.frame_rate = p.custom_frame_rate;
+                    emulator_changed = player_changed = true;
+                }
+                ImGui::EndDisabled();
+                if (preset < 0) {
+                    ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
             if (!e.deck_preset) {
                 default_focus();
             }
+            {
+                const int shown = VideoPresetOf(p, e);
+                Note(shown >= 0 ? VideoPresetNote(VideoPresets[shown], e).c_str()
+                     : e.performance_options
+                         ? "Custom: the internal resolution, anisotropic filtering, upscaling, frame rate and the "
+                           "options for slower computers as you set them below. They are kept when you choose a "
+                           "preset: Custom brings them back."
+                         : "Custom: the internal resolution and frame rate as you set them below. They are kept when "
+                           "you choose a preset: Custom brings them back.");
+            }
+            row("Fullscreen");
+            emulator_changed |= ImGui::Checkbox("##fullscreen", &e.fullscreen);
             // Ultrawide widens the 16:9 view: on, it turns Widescreen on; Widescreen off turns it off
             row("Widescreen (16:9)");
             if (ImGui::Checkbox("##widescreen", &p.widescreen)) {
@@ -1152,6 +1256,25 @@ void Overlay::DrawMenu(float scale, bool appearing) {
                 e.resolution = resolution;
                 emulator_changed = true;
             }
+            if (e.aniso_option) {
+                row("Anisotropic filtering");
+                int aniso = static_cast<int>(
+                    std::find(AnisoChoices.begin(), AnisoChoices.end(), AnisoChoice(e.aniso)) - AnisoChoices.begin());
+                if (ImGui::Combo("##aniso", &aniso, AnisoNames.data(), static_cast<int>(AnisoNames.size()))) {
+                    e.aniso = AnisoChoices[aniso];
+                    emulator_changed = true;
+                }
+            }
+            if (e.performance_options) {
+                // FSR 1 sharpens the picture to the window's size in two passes there; linear is one plain stretch
+                row("Upscaling");
+                static constexpr std::array<const char*, 2> upscaling{"FSR 1 (sharper)", "Linear (lighter)"};
+                int filter = e.fsr ? 0 : 1;
+                if (ImGui::Combo("##upscaling", &filter, upscaling.data(), static_cast<int>(upscaling.size()))) {
+                    e.fsr = filter == 0;
+                    emulator_changed = true;
+                }
+            }
             row("Frame rate");
             const auto& choices = FrameRate::Choices;
             int rate = static_cast<int>(std::find(choices.begin(), choices.end(), p.frame_rate) -
@@ -1168,6 +1291,44 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             player_changed |= ImGui::Checkbox("##fps", &p.show_fps);
             row("Menu size");
             player_changed |= ImGui::SliderFloat("##menu", &p.menu_scale, .7f, 1.5f, "%.2f");
+            if (e.performance_options) {
+                ImGui::Spacing();
+                ImGui::SeparatorText("For slower computers");
+                row("Power-saving waits");
+                emulator_changed |= ImGui::Checkbox("##powersaving", &e.power_saving);
+                Note("While the game waits (for the next frame, for the graphics), it sleeps instead of checking in a "
+                     "loop: more of a slow processor for the game, and on a handheld or laptop more power for the "
+                     "graphics. On by default with 4 processor threads or fewer.");
+                // checked lightens the load, as the row above: the setting kept is wide_culling, its opposite
+                row("Draw only the 3DS's view");
+                bool only_3ds = !p.wide_culling;
+                if (ImGui::Checkbox("##only3ds", &only_3ds)) {
+                    p.wide_culling = !only_3ds;
+                    player_changed = true;
+                }
+                Note("As in 1.x: with widescreen, ultrawide or a zoom below 1, the game draws only what the 3DS's own "
+                     "screen would show, so enemies and items at the edges appear as they come within it. Fewer "
+                     "draws: about 12% at 16:9, 30% at zoom 0.70, 40% in ultrawide.");
+                row("Texture pack size");
+                static constexpr std::array<const char*, 3> sizes{"Full", "Half (a quarter of the memory)",
+                                                                  "Quarter (a sixteenth)"};
+                int size = e.texture_detail >= 4 ? 2 : e.texture_detail >= 2 ? 1 : 0;
+                if (ImGui::Combo("##packsize", &size, sizes.data(), static_cast<int>(sizes.size()))) {
+                    e.texture_detail = size == 2 ? 4 : size == 1 ? 2 : 1;
+                    emulator_changed = true;
+                }
+                if (!l.active && e.texture_detail != e.texture_detail_running) {
+                    ImGui::TextColored({.53f, .89f, .6f, 1.f}, "Restart the game to load the packs at this size.");
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Restart now##packsize")) {
+                        Act(OverlayAction::Kind::Restart);
+                        SetVisible(false);
+                    }
+                } else {
+                    Note("Texture pack images are shrunk as they load, never below the game's own size: less graphics "
+                         "memory and less to upload, for graphics with 2 GB or less. Applies when the game starts.");
+                }
+            }
             end_tab_item();
         }
         if (tab_item("HUD", 2)) {
@@ -1233,6 +1394,22 @@ void Overlay::DrawMenu(float scale, bool appearing) {
                                                          : "{Choose} choose   {Back} back   {Tabs} tabs   {Close} close");
     ImGui::TextDisabled("%s", help.c_str());
     ImGui::End();
+
+    // Video settings that make no preset are the player's own (set by hand, the Steam Deck button, an older version's
+    // settings.ini): kept, so the Video preset row's Custom brings them back after a preset replaced them
+    if (VideoPresetOf(p, e) < 0 &&
+        (!p.custom_video || p.custom_resolution != e.resolution || p.custom_aniso != e.aniso ||
+         p.custom_fsr != e.fsr || p.custom_frame_rate != p.frame_rate ||
+         p.custom_wide_culling != p.wide_culling || p.custom_power_saving != e.power_saving)) {
+        p.custom_video = true;
+        p.custom_resolution = e.resolution;
+        p.custom_aniso = e.aniso;
+        p.custom_fsr = e.fsr;
+        p.custom_frame_rate = p.frame_rate;
+        p.custom_wide_culling = p.wide_culling;
+        p.custom_power_saving = e.power_saving;
+        player_changed = true;
+    }
 
     {
         std::scoped_lock lock{mutex};

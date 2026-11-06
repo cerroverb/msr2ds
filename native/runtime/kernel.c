@@ -15,6 +15,14 @@
 #include <errno.h>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
+#if defined(__linux__)
+#include <sys/syscall.h>
+#elif defined(__APPLE__)
+#include <pthread/qos.h>
 #endif
 
 #define MAX_HANDLES 4096
@@ -103,7 +111,15 @@ uint64_t k_ticks(void) { return (uint64_t)((__uint128_t)now_ns() * TICKS_PER_SEC
    own condition variable (KC only for a caller that is not one) */
 static void give_token(KThread *self);
 void k_ev(int code, uint32_t a, uint32_t b);
-static int kwait_until(uint64_t deadline) {
+extern int g_k_frame_thread; extern volatile uint64_t g_k_frame_idle_ns;
+static int kwait_until_(uint64_t deadline);
+static int kwait_until(uint64_t deadline) {   /* the frame thread's time in it: main.c's load line */
+    if (!cur || cur->index != g_k_frame_thread) return kwait_until_(deadline);
+    const uint64_t w0 = now_ns(); const int r = kwait_until_(deadline);
+    g_k_frame_idle_ns += now_ns() - w0;
+    return r;
+}
+static int kwait_until_(uint64_t deadline) {
     if (cur) give_token(cur);   /* blocking: let another guest thread run */
     if (cur && cur->abandon) return 0;   /* a save state is loading */
     k_ev(6, 0, 0);
@@ -362,15 +378,29 @@ static Timer *timer_for(KObject *o) {
 /* A sleep to within microseconds. nanosleep on Windows wakes on the 1 ms system tick, often 1-2 ms late; the game's frame
    limiter sleeps until 16 ms (8, 6 ms) after a frame began, then waits for the VBlank at 16.7 ms (8.3, 6.9 ms): a late
    wake-up missed it and the frame took two (60 FPS ran at ~43). The bulk waits on a high-resolution timer, the last
-   millisecond yields in a loop. Also the host's VBlank tick (main.c). */
+   millisecond yields in a loop. Also the host's VBlank tick (main.c).
+   Power-saving waits (k_set_power_saving): the whole wait is on the timer, which wakes within a few tenths of a
+   millisecond; main.c gives the frame limit above 30 FPS a millisecond more to spare then, so the loop is not needed to
+   meet the VBlank.
+   On a processor with few threads the loop took them from the game's, and on a handheld or laptop the graphics' power. */
+/* The game's frame thread, for main.c's 2 s load line: the guest thread whose svcSleepThread returns to the frame limiter
+   (g_k_limiter_lr, main.c sets it), and its time blocked in a wait (kwait_until: the VBlank, the GPU, other threads) or
+   asleep, the rest of each frame being its own work. Only that thread adds to it. */
+uint32_t g_k_limiter_lr;
+int g_k_frame_thread = -1;
+volatile uint64_t g_k_frame_idle_ns;
+static volatile int power_saving;
+void k_set_power_saving(int on) { power_saving = on != 0; }
+int k_power_saving(void) { return power_saving; }
 void k_sleep_ns(int64_t ns) {
     if (ns <= 0) return;
     uint64_t end = now_ns() + (uint64_t)ns;
 #ifdef _WIN32
     static __thread HANDLE timer; static __thread int tried;
     if (!tried) { tried = 1; timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS); }
-    if (ns > 1500000) {
-        int64_t bulk = ns - 1000000;
+    const int64_t loop = power_saving && timer ? 0 : 1000000;   /* without the high-resolution timer (before Windows 10 1803) Sleep is too coarse */
+    if (ns > loop + 500000) {
+        int64_t bulk = ns - loop;
         LARGE_INTEGER due; due.QuadPart = -(bulk / 100);
         if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, INFINITE);
         else Sleep((DWORD)(bulk / 1000000));
@@ -380,6 +410,30 @@ void k_sleep_ns(int64_t ns) {
     struct timespec ts = { (time_t)(ns / 1000000000), (long)(ns % 1000000000) };
     while (nanosleep(&ts, &ts) && errno == EINTR) {}
     (void)end;
+#endif
+}
+
+int k_cpu_threads(void) {
+#ifdef _WIN32
+    DWORD n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    return n ? (int)n : 1;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+#endif
+}
+
+/* Below the game's threads (its guest threads, the GX worker, the VBlank loop, the DSP clock): work no frame waits for, such
+   as shader and pipeline compiles (draws use the generic ones meanwhile), texture pack decodes (the game's texture shows
+   meanwhile) and cache saves. On a processor with threads to spare this changes nothing; on one with few, the game's
+   threads run first. */
+void k_background_thread(void) {
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#elif defined(__APPLE__)
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#elif defined(__linux__)
+    setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 5);   /* a thread's own nice value on Linux */
 #endif
 }
 
@@ -468,9 +522,12 @@ static void svc_body(CPU *c, uint32_t num, uint32_t pc) {
         int64_t ns = (int64_t)(((uint64_t)c->r[1] << 32) | c->r[0]);
         static int sleep_trace = -1; if (sleep_trace < 0) sleep_trace = getenv("PWR_TRACE_SLEEP") != NULL;
         if (sleep_trace) fprintf(stderr, "sleep: [k%d] t=%.4f ns=%lld lr=%08x\n", t ? t->index : -1, k_ticks() / 268111856.0, (long long)ns, c->r[14]);
+        if (t && g_k_limiter_lr && c->r[14] == g_k_limiter_lr) g_k_frame_thread = t->index;   /* the load line's frame thread */
+        const uint64_t s0 = now_ns();
         pthread_mutex_lock(&K); give_token(t); pthread_mutex_unlock(&K);   /* sleep(0) = yield; sched_point re-takes it */
         if (ns <= 0) sched_yield();
         while (ns > 0 && !(t && t->abandon)) { int64_t piece = ns > 20000000 ? 20000000 : ns; k_sleep_ns(piece); ns -= piece; }   /* a load ends it */
+        if (t && t->index == g_k_frame_thread) g_k_frame_idle_ns += now_ns() - s0;
         return;
     }
     case 0x0B: { /* GetThreadPriority: r1 handle -> r1 */

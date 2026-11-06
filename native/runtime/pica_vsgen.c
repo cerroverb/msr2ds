@@ -484,6 +484,7 @@ static VkDevice jq_dev;
 static double vs_now_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (double)ts.tv_sec * 1e3 + ts.tv_nsec * 1e-6; }
 static void *vs_worker(void *arg) {
     (void)arg;
+    k_background_thread();   /* draws use the interpreter shader until a translation is ready */
     sc_compiler c = sc_compiler_initialize(); sc_options o = sc_compile_options_initialize();   /* this thread's own */
     if (!c || !o) return NULL;
     sc_set_target_env(o, 0 /* vulkan */, (1u << 22) | (3u << 12) /* 1.3 */);

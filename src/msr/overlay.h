@@ -14,6 +14,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 #ifndef MSR_NATIVE
 #include <QString>
@@ -29,6 +30,7 @@ struct PlayerSettings {
     bool widescreen = true;
     bool ultrawide = true;   ///< With widescreen: the view fills a window wider than 16:9, up to 32:9 (never on without it)
     float camera_zoom = 1.f; ///< The view in play: below 1 wider, above 1 closer
+    bool wide_culling = true; ///< msr-native: the game draws all of a wider view (Presentation::wide_culling)
     float hud_scale = .6f;
     float hud_opacity = 1.f;
     bool show_minimap = true;
@@ -58,6 +60,15 @@ struct PlayerSettings {
     bool infinite_missiles = false; ///< Super Missiles and Power Bombs too
     bool infinite_aeion = false;
     int language = 1; ///< The game's text: a 3DS system language, one of Languages (msr-native)
+    // The video settings the player last set by hand, which no preset makes (the Display tab's Custom): kept when a
+    // preset replaces them, so Custom brings them back
+    bool custom_video = false; ///< The values below are the player's (none yet: Custom is not offered)
+    int custom_resolution = 4;
+    int custom_aniso = 1;
+    bool custom_fsr = true;
+    int custom_frame_rate = 60;
+    bool custom_wide_culling = true;
+    bool custom_power_saving = false;
 
 #ifdef MSR_NATIVE
     // msr-native reads and writes settings.ini without Qt (native/runtime/msr/settings.cpp)
@@ -101,6 +112,45 @@ inline constexpr std::array<const char*, 11> ResolutionNames = {
     "Match window", "1x (240p)",  "2x (480p)",  "3x (720p)",      "4x (960p)", "5x (1200p)",
     "6x (1440p)",   "7x (1680p)", "8x (1920p)", "9x (2160p, 4K)", "10x (2400p)"};
 
+/// Anisotropic filtering choices (EmulatorSettings::aniso), as video.c takes them, and their names.
+inline constexpr std::array<int, 5> AnisoChoices{1, 2, 4, 8, 16};
+inline constexpr std::array<const char*, 5> AnisoNames{"Off", "2x", "4x", "8x", "16x"};
+
+/// The largest anisotropic filtering choice up to `value` (settings.ini may hold anything).
+constexpr int AnisoChoice(int value) {
+    int choice = AnisoChoices.front();
+    for (const int c : AnisoChoices) {
+        if (c <= value) choice = c;
+    }
+    return choice;
+}
+
+/// The Display tab's video presets: the internal resolution, anisotropic filtering, upscaling, frame rate and how much
+/// of a wider view the game draws, set together; Minimum also turns power-saving waits on. Other values are Custom,
+/// which the menu keeps (PlayerSettings::custom_video) while a preset is in use. Bloom only scales the game's glow, and
+/// V-Sync and HDR follow the display: presets leave them as they are.
+struct VideoPreset {
+    const char* name;
+    int resolution;     ///< Internal resolution factor (at most EmulatorSettings::max_resolution)
+    int aniso;          ///< One of AnisoChoices
+    bool fsr;           ///< Upscaling with FSR 1, else linear
+    int frame_rate;     ///< 30: the original rate; above: at least this, so a faster rate chosen for a faster display stays
+    bool only_3ds_view; ///< The game draws only what the 3DS's view shows (PlayerSettings::wide_culling off), as in 1.x
+    bool power_saving;  ///< Turns power-saving waits on; false leaves them as they are (they follow the processor)
+};
+inline constexpr std::array<VideoPreset, 4> VideoPresets{{
+    {"Minimum", 2, 1, false, 30, true, true},
+    {"Medium", 4, 1, true, 60, false, false}, // the launcher's defaults
+    {"High", 6, 8, true, 60, false, false},
+    {"Ultra", 9, 16, true, 60, false, false},
+}};
+
+/// Power-saving waits by default: on a processor with 4 threads or fewer, where the spinning waits take the game's.
+inline bool PowerSavingDefault() {
+    const unsigned threads = std::thread::hardware_concurrency();
+    return threads != 0 && threads <= 4;
+}
+
 /// Emulator options shown in the overlay. Read and applied on the Qt thread.
 struct EmulatorSettings {
     bool fullscreen = false;
@@ -112,6 +162,15 @@ struct EmulatorSettings {
     bool bloom_option = false; ///< The Bloom slider (msr-native)
     bool ultrawide_option = false; ///< The Ultrawide and HUD within 16:9 rows (msr-native)
     bool deck_preset = false;  ///< The Steam Deck preset button (msr-native on a Steam Deck)
+    int aniso = 1;             ///< Anisotropic filtering, one of AnisoChoices (1 = off)
+    bool aniso_option = false; ///< The Anisotropic filtering row, and the video presets set it (msr-native)
+    // msr-native, for slower computers (performance_options): the Upscaling row (the video presets set it too) and the
+    // Power-saving waits row
+    bool performance_options = false;
+    bool fsr = true;           ///< Upscaling with FSR 1, else linear (lighter)
+    bool power_saving = false; ///< Waits sleep instead of spinning (msr-native main.c main_set_power_saving)
+    int texture_detail = 1;    ///< Texture pack size: 1 full, 2 half, 4 quarter (msr-native textures.cpp), from the next start
+    int texture_detail_running = 1; ///< What the running game loads packs at (in the launcher: the same)
     int hdr_option = 0;        ///< The HDR rows: 0 none (the emulator build), 1 the display is not in HDR mode, 2 HDR possible
     float display_peak = 1000.f, display_paper = 200.f; ///< The display's peak brightness, Windows' SDR white (nits)
 };

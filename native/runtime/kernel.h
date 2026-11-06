@@ -80,6 +80,10 @@ void k_trace(const char *fmt, ...);
 void k_hang_report(void);                     /* every guest thread and what it waits on (stderr) */
 uint64_t k_ticks(void);                       /* ARM11 system ticks (268 MHz) since boot */
 void k_sleep_ns(int64_t ns);                   /* sleep to within microseconds (svcSleepThread, the VBlank tick) */
+void k_set_power_saving(int on);               /* k_sleep_ns waits on the timer alone, without its last-millisecond loop */
+int  k_power_saving(void);
+int  k_cpu_threads(void);                      /* the host's processor threads */
+void k_background_thread(void);                /* lower the calling thread's priority: work no frame waits for */
 extern int g_trace;
 
 /* services.c */

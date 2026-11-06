@@ -247,12 +247,54 @@ same `settings.ini`; LB and RB switch tabs.
   set the 3DS region to Europe, which the game needs for them); volume; **Unlock amiibo galleries**, **Unlock Fusion Mode** and **Hard Mode
   from the start** (all on by default) and **Fusion suit, any difficulty** (off);
   in the game, Resume, Quick save, Quick load, Restart and Quit.
-- **Display:** fullscreen; Widescreen (16:9) and Ultrawide (up to 32:9), both on
-  by default; camera zoom (0.70-1.50); bloom (0-100%, default 75%); HDR
-  (Windows, once Use HDR is on in Windows' display settings) with its highlights
-  and paper white; internal resolution (Match window, or 1x-10x: 9x is 2160p,
-  4K); frame rate (30, the original, 60, 90, 120 or 144; default 60); V-Sync;
-  Show FPS; menu size.
+- **Display:** a video preset (below); fullscreen; Widescreen (16:9) and
+  Ultrawide (up to 32:9), both on by default; camera zoom (0.70-1.50); bloom
+  (0-100%, default 75%); HDR (Windows, once Use HDR is on in Windows' display
+  settings) with its highlights and paper white; internal resolution (Match
+  window, or 1x-10x: 9x is 2160p, 4K); anisotropic filtering (off, 2x-16x);
+  upscaling (FSR 1, or Linear: lighter for older graphics on a large screen);
+  frame rate (30, the original, 60, 90, 120 or 144; default 60); V-Sync; Show
+  FPS; menu size; and, for slower computers, **Power-saving waits**, **Draw
+  only the 3DS's view** and **Texture pack size** (below).
+
+  **Video preset** sets the internal resolution, anisotropic filtering, upscaling
+  and frame rate together, and Minimum also checks both options for slower
+  computers:
+
+  | Preset | Internal resolution | Anisotropic filtering | Upscaling | Frame rate | For slower computers |
+  | --- | --- | --- | --- | --- | --- |
+  | Minimum | 2x (480p) | Off | Linear | 30 (the original) | Both on |
+  | Medium (the default) | 4x (960p) | Off | FSR 1 | 60 | The wider view drawn |
+  | High | 6x (1440p) | 8x | FSR 1 | 60 | The wider view drawn |
+  | Ultra | 9x (2160p, 4K) | 16x | FSR 1 | 60 | The wider view drawn |
+
+  Medium, High and Ultra keep a faster frame rate you chose (90-144, for a faster
+  display), and leave Power-saving waits as they are (it follows the processor).
+  Changing any of these yourself makes it **Custom**: choosing a preset afterwards
+  keeps your values, and choosing Custom brings them back. Bloom, V-Sync and HDR
+  stay as you set them. On a Steam Deck, the **Steam Deck: 60 FPS with texture
+  packs** button above the presets is still there.
+
+  **Power-saving waits:** while the game waits (for the next frame, for the
+  graphics), it sleeps instead of checking in a loop. That leaves more of a slow
+  processor to the game and, on a handheld or laptop, more power to the graphics.
+  It is on by default on a processor with 4 threads or fewer. Measured on a
+  desktop at the title screen, it used 20-38% less processor time with the same
+  frame rate.
+
+  **Draw only the 3DS's view** (off by default, on in Minimum): normally, with
+  widescreen, ultrawide or a camera zoom below 1, the game draws everything the
+  wider view shows. Checked, it works as in 1.x, whose zoom and 16:9 only scaled
+  the picture: the game draws only what the 3DS's own screen would show, so
+  enemies and items at the edges appear as they come within it. That means fewer
+  draws: in play, about 12% fewer at 16:9, 30% fewer at zoom 0.70 and 40% fewer
+  in ultrawide (32:9). It switches at once, in the launcher or in the game.
+
+  **Texture pack size** (Full, Half or Quarter): texture pack images are shrunk
+  as they load, never below the game's own size. Half takes a quarter of the
+  graphics memory and Quarter a sixteenth: a 4x pack's 1024x1024 texture (5.3 MB
+  with its mipmaps) becomes 512x512 (1.3 MB) or 256x256. For graphics with 2 GB
+  or less, or that share the computer's memory. Applies when the game starts.
 - **HUD:** size and opacity; the map, its size and opacity; DNA and Metroid
   counters; Aeion abilities; HUD within 16:9 (on an ultrawide screen); menu
   panel size; title menu background; menu help text.

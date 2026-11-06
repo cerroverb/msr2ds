@@ -173,6 +173,7 @@ static void quick_path(char *out, size_t n) {   /* <user>/states/native-quick.st
 typedef struct { SBuf body; char path[1100]; } SaveJob;
 static pthread_t save_thread; static int save_running;
 static void *save_job(void *p) {
+    k_background_thread();   /* the game plays on while the state is compressed and written */
     SaveJob *j = p;
     Header h = { { 'M', 'S', 'R', 'N', 'A', 'T', 'S', 'T' }, STATE_VERSION, 0, j->body.n, g_code_hash };
     uint8_t *data = j->body.p; size_t size = j->body.n; uint8_t *packed = NULL;

@@ -83,7 +83,7 @@ void video_shutdown(void);
 void video_show(int on);
 SDL_Window* video_window(void);
 int video_option(const char* name, const char* value);
-void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume);
+void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume, int aniso, int fsr, int power_saving);
 void msr_overlay_launcher(int on);
 void msr_overlay_reload(void);
 void msr_mods_init(const char* user, const char* settings, const char* exe);
@@ -1977,9 +1977,15 @@ bool StartGame() {
     const bool fullscreen = file.Bool("native", "fullscreen", false), vsync = file.Bool("native", "vsync", true);
     const int resolution = static_cast<int>(file.Number("native", "resolution", 4));
     const int volume = static_cast<int>(file.Number("native", "volume", 100));
+    const int aniso = MSR::AnisoChoice(static_cast<int>(file.Number("native", "aniso", 1)));   // video.c takes only these
+    const bool fsr = file.String("native", "filter", "fsr") != "linear";
+    const bool power_saving = file.Bool("native", "power_saving", MSR::PowerSavingDefault());
     std::vector<std::string> args{Utf8(ExePath()), "--play", "--layout=single", "--scale=3",
                                   "--resolution=" + std::to_string(std::clamp(resolution, 0, 10)),   // 0: match the window
-                                  "--filter=fsr", "--volume=" + std::to_string(std::clamp(volume, 0, 100))};
+                                  fsr ? "--filter=fsr" : "--filter=linear",
+                                  "--volume=" + std::to_string(std::clamp(volume, 0, 100)),
+                                  "--aniso=" + std::to_string(aniso),
+                                  power_saving ? "--power-saving=on" : "--power-saving=off"};
     if (fullscreen) args.push_back("--fullscreen=borderless");
     if (!vsync) args.push_back("--vsync=off");
 #ifdef __ANDROID__
@@ -2179,7 +2185,9 @@ int Launcher() {
     MsrIni::File file(settings);
     msr_overlay_launcher(1);
     msr_overlay_start(0, static_cast<int>(file.Number("native", "resolution", 4)), file.Bool("native", "vsync", true),
-                      static_cast<int>(file.Number("native", "volume", 100)));
+                      static_cast<int>(file.Number("native", "volume", 100)),
+                      static_cast<int>(file.Number("native", "aniso", 1)), file.String("native", "filter", "fsr") != "linear",
+                      file.Bool("native", "power_saving", MSR::PowerSavingDefault()));
     ReadGame();
     CheckCode();
     video_option("layout", "single");

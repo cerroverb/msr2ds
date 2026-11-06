@@ -198,14 +198,22 @@ extern "C" void msr_camera_frame(double now) {
         } else if (cam.scan.load() == 0 && now >= cam.next_scan && msr_world_in_play()) {
             cam.next_scan = now + 1.0;
             cam.scan.store(1);
-            std::thread([] { cam.found.store(FindCamera()); cam.scan.store(2); }).detach();   // ~25 ms: not on this thread
+            std::thread([] {   // ~25 ms: not on this thread
+                k_background_thread();
+                cam.found.store(FindCamera());
+                cam.scan.store(2);
+            }).detach();
         }
     }
 
-    // the gain wanted: the zoomed view's widest axis over the game's, in play
+    // the gain wanted: the zoomed view's widest axis over the game's, in play. With the menu's "Draw only the 3DS's view"
+    // (Presentation::wide_culling off; the Minimum preset sets it), 1: the game draws what the 3DS's view shows, as in the emulator-based 1.x, whose zoom
+    // and 16:9 only scaled the picture. The hooks stay, for the mouse's aim (msr_samus_view); PWR_NO_CAMERA_FOV=1 leaves
+    // them out, and the aim with them.
     const float ws = P::widescreen.load(std::memory_order_relaxed) ? P::ViewScale() : 1.f;   // 15/16 at 16:9, 15/32 at 32:9
     const float zoom = P::world_zoom.load(std::memory_order_relaxed);
-    const float want = at && msr_world_in_play() ? std::fmax(1.f, 1.f / (ws * zoom)) : 1.f;
+    const bool widen = P::wide_culling.load(std::memory_order_relaxed);
+    const float want = widen && at && msr_world_in_play() ? std::fmax(1.f, 1.f / (ws * zoom)) : 1.f;
     cam.eased += (want - cam.eased) * (1.f - std::exp(-8.f * seconds));
     if (std::fabs(want - cam.eased) < .0005f) cam.eased = want;
     cam.gain.store(cam.eased, std::memory_order_relaxed);

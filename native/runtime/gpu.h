@@ -50,11 +50,18 @@ void video_set_fps(int fps);
 void video_set_fullscreen(int on);
 void video_set_vsync(int on);
 void video_set_resolution(int factor);   /* 1..4, 0 = by the window's height */
+void video_set_aniso(int aniso);         /* anisotropic filtering: 1 (off), 2, 4, 8, 16 */
 int  video_fullscreen(void);
 int  video_resolution(void);
 int  video_vsync(void);
+int  video_aniso(void);
+int  video_filter_fsr(void);             /* the upscaling filter is FSR 1 (video_option "filter") */
 void dsp_set_volume(float volume);       /* dsp.c: 0..1 */
-void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume);   /* msr/overlay_host.cpp */   /* before video_init: above 60, frames are presented without waiting for the display (mailbox) */
+int  k_power_saving(void);               /* kernel.c: power-saving waits (sleep, don't spin) */
+int  k_cpu_threads(void);                /* kernel.c: the host's processor threads */
+void k_background_thread(void);          /* kernel.c: the calling thread below the game's (work no frame waits for) */
+void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume, int aniso, int fsr,
+                       int power_saving);   /* msr/overlay_host.cpp */   /* before video_init: above 60, frames are presented without waiting for the display (mailbox) */
 int  video_frame(void);                                        /* present current screens; 0 when the window closed */
 void video_shutdown(void);
 #endif

@@ -1114,6 +1114,7 @@ static pthread_mutex_t sv_lock = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_
 static int sv_busy, sv_pcache; static SeedPipe *sv_seed; static uint32_t sv_np;
 static void *saver(void *arg) {
     (void)arg;
+    k_background_thread();
     for (;;) {
         pthread_mutex_lock(&sv_lock);
         while (!sv_busy) pthread_cond_wait(&sv_cond, &sv_lock);
@@ -1310,7 +1311,8 @@ static int init(void) {
     gpu_vs = getenv("PWR_VK_CPU_VS") == NULL;
     VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(phys, &pp); ts_period = pp.limits.timestampPeriod;
     VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 };
-    for (int k = 0; k < NSETS; k++) if (!getenv("PWR_GX_STATS") || !pp.limits.timestampComputeAndGraphics || vkCreateQueryPool(dev, &qi, NULL, &sets[k].qp)) sets[k].qp = VK_NULL_HANDLE;
+    /* the GPU's time per batch, always (main.c's 2 s load line): two timestamps a batch, read once its fence is waited for */
+    for (int k = 0; k < NSETS; k++) if (!pp.limits.timestampComputeAndGraphics || vkCreateQueryPool(dev, &qi, NULL, &sets[k].qp)) sets[k].qp = VK_NULL_HANDLE;
     /* 1x1 white texture for disabled units */
     begin_batch();
     img_create(&white, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);

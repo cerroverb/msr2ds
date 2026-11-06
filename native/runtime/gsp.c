@@ -518,8 +518,9 @@ static void gx_exec(const uint32_t *w, uint8_t *snap, int irqs[2]) {
 }
 
 /* under G, after a command: its time, its interrupts (held back while TriggerCmdReqQueue waits), a VBlank held back */
+unsigned long long g_gx_busy_ns;   /* every GX command's time, on the worker or run inline (main.c's 2 s load line) */
 static void gx_done(const uint32_t *w, uint64_t t0, const int irqs[2]) {
-    { unsigned c = w[0] & 7; gxs_ns[c] += gxs_now() - t0; gxs_n[c]++; }
+    { unsigned c = w[0] & 7; const uint64_t d = gxs_now() - t0; gxs_ns[c] += d; gxs_n[c]++; g_gx_busy_ns += d; }
     if (irqs[0] >= 0) push_irq(irqs[0]);
     if (irqs[1] >= 0) push_irq(irqs[1]);
     /* a VBlank held back while the worker lagged arrives as soon as it has caught up, not a whole tick later: above
@@ -559,7 +560,7 @@ static void *gx_worker(void *arg) {
         gx_busy = 0; pthread_cond_broadcast(&gx_idle);
         gx_done(w, gxs_t0, irqs);
         gxl_end = gxs_now();
-        spin_until = gxl_end + spin_ns;
+        spin_until = k_power_saving() ? 0 : gxl_end + spin_ns;   /* power-saving waits: straight to sleep (kernel.c) */
     }
     return NULL;
 }

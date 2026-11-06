@@ -45,6 +45,11 @@ inline std::atomic<float> zoom{1.f};
 /// The scale in effect, set by the renderer each frame: the zoom in play, eased in and out, and
 /// 1 on the title screens (renderer_vulkan.cpp DrawMsrScreens).
 inline std::atomic<float> world_zoom{1.f};
+/// msr-native: the game draws everything a view wider than the 3DS's shows (widescreen, ultrawide,
+/// a zoom below 1), its camera's field of view widened for it (camera_fov.cpp). Off (the menu's
+/// "Draw only the 3DS's view"), as in the emulator-based 1.x: it draws what the 3DS's own view
+/// shows, and objects appear at the edges as they come within it; fewer draws.
+inline std::atomic<bool> wide_culling{true};
 
 /// HUD element size relative to the game's own pixels (1 = same size as on the 3DS).
 inline std::atomic<float> hud_scale{.6f};

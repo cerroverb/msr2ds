@@ -18,6 +18,7 @@ int msr_settings_frame_rate(void);
    console region it needs (1 USA, 2 Europe: the game shows German, Italian and Dutch only there) */
 int msr_settings_language(void);
 int msr_settings_region(void);
+int msr_settings_wide_culling(void);          /* the game draws all of a wider view (the menu's "Draw only the 3DS's view" off) */
 void msr_state_quick_save(void);             /* state.c: the settings' Quick save and Quick load (main thread) */
 void msr_state_quick_load(void);
 const char *msr_state_message(void);          /* state.c: "Saved", "Loaded"... once, for the screen */
@@ -145,6 +146,9 @@ void msr_textures_set_stager(void *(*make)(const uint8_t *rgba, uint32_t w, uint
 int  msr_texture_take(uint64_t key, int want_staged, void **staged, const uint8_t **rgba, uint32_t *w, uint32_t *h);
 void msr_texture_done(uint64_t key);          /* uploaded: the pixels may go */
 void msr_textures_stats(unsigned *textures, unsigned *loaded, unsigned *failed);    /* dispatch.cpp, at the frame limiter's trap: runs the queued calls; 0 when it was ours */
+
+/* kernel.c: the calling thread below the game's, for work no frame waits for (texture decodes, scans, cache saves) */
+void k_background_thread(void);
 
 #ifdef __cplusplus
 }

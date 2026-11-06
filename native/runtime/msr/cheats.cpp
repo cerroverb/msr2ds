@@ -409,6 +409,7 @@ extern "C" void msr_cheats_frame(double now) {
                 if ((enabled & C::LockedValues[i].flag) != 0 && refills.components[i] == 0) wanted |= 1u << i;
             heap_scan.state.store(1);
             std::thread([wanted] {
+                k_background_thread();
                 for (std::size_t i = 0; i < C::LockedValues.size(); ++i) {
                     if ((wanted & (1u << i)) == 0) continue;
                     const auto& value = C::LockedValues[i];
