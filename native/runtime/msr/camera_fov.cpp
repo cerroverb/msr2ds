@@ -6,15 +6,16 @@
 // game draws everything in it.
 //
 // The camera (Samus Returns USA): the one object with the vtable 0x6D1FD4; +0x4C is the horizontal field of view in
-// degrees (45 in play, 28 in a save station; it eases to +0x70, which the camera logic sets). Each frame its manager runs
-// the camera's update (0x33715C, called at 0x2EB644: logic, easing, and keeping the view inside the room's camera limits),
-// then copies the camera's position and field of view and hands them to the scene's render camera (0x173A70, called at
-// 0x2EB850, the field of view in s0), which keeps the field of view and what comes of it (the half-angle tangents, the
-// culling cone's sine and cosine: RenderFov) and builds the projection. That call's s0 is widened on entry (a call hook,
-// dispatch.cpp), so the scene is drawn and culled wider. The camera's limits are kept with the render camera's last
-// field of view: for the update, the render camera gets the game's own values back (and the next set-up widens them
-// again), so the camera stays where it is at zoom 1 (with the wider values it moved off that place near the room's
-// edges and when the camera changed areas: the user saw the focus drift).
+// degrees (45 in play, 28 in a save station; it eases to +0x70, which the camera logic sets). Each frame its manager
+// (0x2EB3B0) runs the camera in use's update through its vtable (0x33715C for this kind, called at 0x2EB644: logic,
+// easing, and keeping the view inside the room's camera limits; a Metroid's fight has a camera of another kind), copies
+// its position and field of view, lets its modifiers change them (a fight's framing of the arena), and hands them to the
+// scene's render camera (0x173A70, called at 0x2EB850, the field of view in s0), which keeps the field of view and what
+// comes of it (the half-angle tangents, the culling cone's sine and cosine: RenderFov) and builds the projection. That
+// call's s0 is widened on entry (a call hook, dispatch.cpp), so the scene is drawn and culled wider. The camera's limits
+// and framing are worked out with the render camera's last field of view: on the manager's entry the render camera gets
+// the game's own values back (the next set-up widens them again), so the camera stays where it is at zoom 1 (with the
+// wider values it moved off that place near the room's edges, and rose in a fight: the user saw the focus drift).
 // A field of view whose tangent is G times wider brings every projected point G times closer to the screen's centre,
 // so clip x and y times G give the same picture (msr_fov_gain, measured per draw from its projection).
 #include <array>
@@ -39,6 +40,7 @@ namespace P = MSR::Presentation;
 
 constexpr u32 Vtable = 0x6D1FD4;
 constexpr std::array<u32, 3> VtableWords{0x337450, 0x5B1770, 0x33629C};   // its words 1-3 (functions): this game, this version
+constexpr u32 ManagerFn = 0x2EB3B0;                             // the camera manager's frame (push {r4-sl, lr})
 constexpr u32 UpdateFn = 0x33715C, UpdateReturn = 0x2EB648;     // the camera's update, called by its manager
 constexpr u32 SetViewFn = 0x173A70, SetViewReturn = 0x2EB854;   // the render camera's set-up, called by the manager
 constexpr u32 SetViewCamera = 0xD8;                             // in the set-up's r0: the render camera
@@ -58,6 +60,7 @@ struct {
     std::atomic<int> scan{0};      // 0 idle, 1 running, 2 done
     std::atomic<u32> found{0};
     std::atomic<u32> camera{0};    // set by the main thread, read by the hooks (game thread)
+    std::atomic<u32> active{0};    // the camera its manager last updated (UpdateHook, game thread)
     double next_scan = 0;
     std::atomic<float> gain{1};    // wanted (eased), main thread -> hooks
     float eased = 1;
@@ -69,6 +72,9 @@ struct {
     // game thread (hooks): the render camera and the fields of view last handed to it, the game's and the widened one
     u32 render = 0;
     float render_own = 0, render_wide = 0;
+    // the view last set up (SetViewHook), as drawn: the eye and the game's own field of view, for the mouse's aim
+    std::atomic<float> view_x{0}, view_y{0}, view_z{0}, view_fov{0};
+    std::atomic<unsigned> view_frame{0};
 } cam;
 
 u32 FindCamera() {
@@ -107,23 +113,32 @@ void RenderFov(u32 rc, float f) {
     Wf(rc + 0x1E8, sn / cs);
 }
 
-// On entry to the camera's update from its manager: the render camera's fields as the game set them (where they are
-// still the widened ones the last set-up made), for the camera's limits.
-void UpdateHook(CPU* c) {
-    if (c->r[14] != UpdateReturn) return;
-    const u32 at = cam.camera.load(std::memory_order_relaxed), rc = cam.render;
-    if (!at || c->r[0] != at || !rc || cam.render_wide == cam.render_own || !Valid(rc + 0x1EC)) return;
+// On entry to the camera manager's frame, before any camera logic of the frame (a camera's own update, the modifiers
+// the manager runs on the view): the render camera's fields as the game set them, where they are still the widened
+// ones the last set-up made. The camera's limits and a fight's framing are worked out from them. With the wider values
+// the view kept away from a room's edges (the user saw the focus drift), and in a Metroid's fight, whose camera is
+// another kind (its update is not 0x33715C) framed by a modifier, the camera rose with the wider view: in ultrawide
+// Samus stood at the bottom edge, cut off (2026-11-05, the user's video). The next set-up widens them again.
+void ManagerHook(CPU*) {
+    const u32 rc = cam.render;
+    if (!rc || cam.render_wide == cam.render_own || !Valid(rc + 0x1EC)) return;
     if (std::fabs(Rf(rc + 0x50) - cam.render_wide) > 1e-3f) return;   // set since by someone else
     RenderFov(rc, cam.render_own);
 }
 
-// On entry to the render camera's set-up from the camera's manager: the field of view (s0), widened by the zoom's gain.
+// On entry to the camera's update from its manager: the camera of its kind in use (msr_camera_frame)
+void UpdateHook(CPU* c) {
+    if (c->r[14] == UpdateReturn && rd32(c->r[0]) == Vtable) cam.active.store(c->r[0], std::memory_order_relaxed);
+}
+
+// On entry to the render camera's set-up from the camera's manager: the field of view (s0) the manager hands it, from
+// whichever camera and modifiers made the view, widened by the zoom's gain; and the eye (r1: x, y, z), the view as
+// drawn, for the mouse's aim (msr_samus_view).
 void SetViewHook(CPU* c) {
     if (c->r[14] != SetViewReturn) return;
-    const u32 at = cam.camera.load(std::memory_order_relaxed);
     float own; std::memcpy(&own, &c->s[0], 4);
+    if (!Sane(own)) return;
     const float g = cam.gain.load(std::memory_order_relaxed);
-    if (!at || !Sane(own) || std::fabs(own - Rf(at + FovNow)) > .01f) return;   // the camera's own, copied
     cam.published_now.store(own, std::memory_order_relaxed);
     Note(g);
     const u32 rc = rd32(c->r[0] + SetViewCamera);
@@ -132,6 +147,13 @@ void SetViewHook(CPU* c) {
     cam.render_own = own;
     cam.render_wide = wide;
     if (wide != own) std::memcpy(&c->s[0], &wide, 4);
+    if (Valid(c->r[1] + 12)) {
+        cam.view_x.store(Rf(c->r[1]), std::memory_order_relaxed);
+        cam.view_y.store(Rf(c->r[1] + 4), std::memory_order_relaxed);
+        cam.view_z.store(Rf(c->r[1] + 8), std::memory_order_relaxed);
+        cam.view_fov.store(own, std::memory_order_relaxed);
+        cam.view_frame.store(g_gsp_top_swaps, std::memory_order_release);
+    }
 }
 
 } // namespace
@@ -143,10 +165,13 @@ extern "C" void msr_camera_frame(double now) {
         for (std::size_t i = 0; i < VtableWords.size(); ++i)
             if (rd32(Vtable + 4 + 4 * static_cast<u32>(i)) != VtableWords[i]) cam.supported = 0;
         if (cam.supported && getenv("PWR_NO_CAMERA_FOV")) cam.supported = 0;
-        // push {r4-r6, lr} at both; bl 0x173A70 before its return address
-        if (cam.supported && (rd32(SetViewFn) != 0xE92D4070u || rd32(SetViewReturn - 4) != 0xEBFA2086u || rd32(UpdateFn) != 0xE92D4070u))
+        // push {r4-r6, lr} at both; bl 0x173A70 before its return address; the manager's push {r4-sl, lr}
+        if (cam.supported && (rd32(SetViewFn) != 0xE92D4070u || rd32(SetViewReturn - 4) != 0xEBFA2086u || rd32(UpdateFn) != 0xE92D4070u ||
+                              rd32(ManagerFn) != 0xE92D47F0u))
             cam.supported = 0;
-        if (cam.supported && (!rt_add_call_hook(SetViewFn, SetViewHook) || !rt_add_call_hook(UpdateFn, UpdateHook))) cam.supported = 0;
+        if (cam.supported && (!rt_add_call_hook(SetViewFn, SetViewHook) || !rt_add_call_hook(UpdateFn, UpdateHook) ||
+                              !rt_add_call_hook(ManagerFn, ManagerHook)))
+            cam.supported = 0;
         if (!cam.supported) std::fprintf(stderr, "msr: camera: not this game's version (or off), the zoom scales the picture only\n");
     }
     if (!cam.supported) return;
@@ -156,6 +181,13 @@ extern "C" void msr_camera_frame(double now) {
     // the camera: found again when its object is gone (an area load, a save state)
     u32 at = cam.camera.load();
     if (at && (!Valid(at + Size - 4) || rd32(at) != Vtable || !Sane(Rf(at + FovTarget)))) cam.camera.store(at = 0);
+    // the camera the game updates, when it is another one of its kind than the one found (#31: the scan finds the first
+    // in memory, and a camera kept but no longer used put Samus elsewhere on the screen for the mouse's aim)
+    if (const u32 active = cam.active.load(std::memory_order_relaxed);
+        active && active != at && Valid(active + Size - 4) && rd32(active) == Vtable && Sane(Rf(active + FovTarget))) {
+        cam.camera.store(at = active);
+        std::fprintf(stderr, "msr: camera at %08x, the one the game updates (field of view %g)\n", at, Rf(at + FovTarget));
+    }
     if (!at) {
         if (cam.scan.load() == 2) {
             at = cam.found.exchange(0); cam.scan.store(0);
@@ -205,23 +237,39 @@ extern "C" float msr_fov_gain(float px) {
 }
 
 // video.c (mouse aiming): Samus on the top screen, in the game's own view (zoom 1, the 3DS's 5:3 frame): *h to the right
-// and *v up, -1..1 across it. The point is her entity's position (+0xFC, also its transform's translation at +0x70 and
-// +0x80), which the camera (looking straight down -z) shows at about her arm cannon's height. 0 outside play.
+// and *v up, -1..1 across it. The point is where her entity is drawn, its transform's translation (+0x70, +0x80; her
+// position at +0xFC, +0x100 is the same in play), which the camera (looking straight down -z) shows at about her arm
+// cannon's height. Her entity is found as the game finds it (0x27109C): the first of the player handles that is set
+// (#31: the next one was tried whenever the position and the translation differed, and the aim then followed another
+// entity or froze). 0 outside play; PWR_AIM_TRACE=1 logs why, each time the reason changes.
 extern "C" int msr_samus_view(float* h, float* v) {
-    const u32 at = cam.camera.load(std::memory_order_relaxed);
-    if (!at || !msr_world_in_play() || !Valid(at + Size - 4) || rd32(at) != Vtable) return 0;
+    static const bool trace = std::getenv("PWR_AIM_TRACE") != nullptr;
+    static const char* last = "";
+    const auto result = [](const char* why) {
+        if (trace && std::strcmp(why, last) != 0) { std::fprintf(stderr, "msr: aim: %s\n", why); last = why; }
+        return why[0] == 'o' ? 1 : 0;
+    };
+    if (!msr_world_in_play()) return result("not in play");
+    // the view as the manager last set it up (SetViewHook), whichever camera made it (a fight's is another kind, and
+    // the camera found then stood still elsewhere)
+    if (g_gsp_top_swaps - cam.view_frame.load(std::memory_order_acquire) > 30) return result("no view set up");
+    const float ex = cam.view_x.load(std::memory_order_relaxed), ey = cam.view_y.load(std::memory_order_relaxed);
+    const float ez = cam.view_z.load(std::memory_order_relaxed), fov = cam.view_fov.load(std::memory_order_relaxed);
     const u32 game = rd32(GamePointer);
+    u32 entity = 0;
     for (const u32 offset : PlayerHandles) {
-        if (!Valid(game + offset + 4)) return 0;
-        const u32 handle = rd32(game + offset), entity = Valid(handle + 12) ? rd32(handle + 8) : 0;
-        if (!Valid(entity + 0x108)) continue;
-        const float x = Rf(entity + 0xFC), y = Rf(entity + 0x100), z = Rf(entity + 0x104);
-        if (Rf(entity + 0x70) != x || Rf(entity + 0x80) != y) continue;
-        const float dz = Rf(at + 0x3C) - z, t = std::tan(Rf(at + FovNow) * Rad * .5f);
-        if (!(dz > 1.f) || !(t > 0.f)) return 0;
-        *h = (x - Rf(at + 0x34)) / (dz * t);
-        *v = (y - Rf(at + 0x38)) / (dz * t * (240.f / 400.f));
-        return std::isfinite(*h) && std::isfinite(*v) && std::fabs(*h) < 4.f && std::fabs(*v) < 4.f;
+        if (!Valid(game + offset + 4)) return result("no game object");
+        const u32 handle = rd32(game + offset);
+        if (!handle) continue;
+        entity = Valid(handle + 12) ? rd32(handle + 8) : 0;
+        break;
     }
-    return 0;
+    if (!Valid(entity + 0x108)) return result("no Samus");
+    const float x = Rf(entity + 0x70), y = Rf(entity + 0x80), z = Rf(entity + 0x104);
+    const float dz = ez - z, t = std::tan(fov * Rad * .5f);
+    if (!(dz > 1.f) || !(t > 0.f)) return result("camera not behind her");
+    *h = (x - ex) / (dz * t);
+    *v = (y - ey) / (dz * t * (240.f / 400.f));
+    if (!std::isfinite(*h) || !std::isfinite(*v) || std::fabs(*h) >= 4.f || std::fabs(*v) >= 4.f) return result("off the screen");
+    return result("ok");
 }

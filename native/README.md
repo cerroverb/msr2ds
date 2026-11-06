@@ -308,7 +308,7 @@ those ARM functions: r0-r3, lr).
 each texture sampled into each target once, with the targets it lies in (how render-to-texture flows);
 `PWR_TEXPACK_TRACE=1` lists each texture a pack replaces, each one of 128 px or more the packs are asked about (the file
 name that would replace it, found or not, and the alias it was found as) and each replacement dropped because the game
-rewrote its texture. `PWR_SEQ=<presented frame>,<count>[,<every>]` writes both
+rewrote its texture; `PWR_AIM_TRACE=1` logs why mouse aiming cannot place Samus, each time the reason changes. `PWR_SEQ=<presented frame>,<count>[,<every>]` writes both
 screens of those frames (or of every `<every>`th) as PPM files (seq_*): one-frame glitches such as the file select's
 flashes show up there.
 
