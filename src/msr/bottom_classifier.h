@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <string>
 #include <utility>
+#include <vector>
 #include "msr/presentation.h"
 
 namespace MSR::BottomClassifier {
@@ -275,25 +276,60 @@ inline constexpr std::array<int, 4> MapRect = {0, 58, 252, 213};
 /// on the map is as red. Its red is deep (green and blue under 0.3 of it but at the pack's
 /// edges); the red map pin's is lighter (a third) and is not counted (2026-11-03, the user: with
 /// a pin placed the minimap stayed on the pin, found while the marker faded). The map's orange
-/// lines (the elevator shaft above the first save station's room, 2 px wide) are as orange as the
-/// helmet once the map scrolls them into its lower half: a square of them, a line rather than a
-/// dot (under 5 px across), is left out (#40: one was taken for the marker each time it faded,
-/// and made the lit marker "something else as red", until the minimap stayed on the shaft).
+/// lines (the elevator shafts between rooms and off the area's edges, 2 px wide) are as orange as
+/// the helmet once the map scrolls them into its lower half. They are taken out before the search:
+/// a run of the marker's colours at most 3 px across and 9 px or more along (a map tile is 10 px)
+/// is a line, which the marker, 8 px across, never has. Left in, a shaft a tile long was a square
+/// of its own each time the marker faded, and made the lit marker "something else as red", until
+/// the minimap stayed on the shaft (#40, #44: "mostly after elevator rides"); a shaft beside a red
+/// missile door made the two a dot, and one beside Samus moved her middle onto it. A square of
+/// what is left must still be a dot (5 px across or more), not a missile door's 4 px.
 struct Marker {
     bool found = false;
     float x = 0.f, y = 0.f; ///< Its middle
 };
 inline Marker FindMapMarker(const Image& image) {
     const auto& [x0, y0, x1, y1] = MapRect;
+    constexpr int width = MapRect[2] - MapRect[0], height = MapRect[3] - MapRect[1];
     constexpr int cell = 4;
-    constexpr int columns = (MapRect[2] - MapRect[0] + cell - 1) / cell;
-    constexpr int rows = (MapRect[3] - MapRect[1] + cell - 1) / cell;
-    const auto marker = [&image](int x, int y) {
-        int r, g, b;
-        image.Rgb(x, y, r, g, b);
-        const bool red = r >= 0x60 && g * 10 <= r * 3 && b * 10 <= r * 3;
-        const bool visor = r >= 0xc0 && g * 20 >= r * 9 && g * 4 <= r * 3 && b * 10 <= r * 3;
-        return red || visor;
+    constexpr int columns = (width + cell - 1) / cell;
+    constexpr int rows = (height + cell - 1) / cell;
+    // The map's pixels in the marker's colours, then each one's run of them across and down
+    // (capped at 255), and the lines out.
+    std::vector<std::uint8_t> marked(width * height), across(width * height), down(width * height);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int r, g, b;
+            image.Rgb(x0 + x, y0 + y, r, g, b);
+            const bool red = r >= 0x60 && g * 10 <= r * 3 && b * 10 <= r * 3;
+            const bool visor = r >= 0xc0 && g * 20 >= r * 9 && g * 4 <= r * 3 && b * 10 <= r * 3;
+            marked[y * width + x] = red || visor;
+        }
+    }
+    const auto runs = [&marked](std::vector<std::uint8_t>& length, int lines, int along, int step,
+                                int next) {
+        for (int line = 0; line < lines; ++line) {
+            for (int i = 0; i < along;) {
+                if (!marked[line * next + i * step]) {
+                    ++i;
+                    continue;
+                }
+                int end = i;
+                while (end < along && marked[line * next + end * step]) ++end;
+                for (int j = i; j < end; ++j) {
+                    length[line * next + j * step] = static_cast<std::uint8_t>(std::min(end - i, 255));
+                }
+                i = end;
+            }
+        }
+    };
+    runs(across, height, width, 1, width);
+    runs(down, width, height, width, 1);
+    for (std::size_t i = 0; i < marked.size(); ++i) {
+        if ((across[i] <= 3 && down[i] >= 9) || (down[i] <= 3 && across[i] >= 9)) marked[i] = 0;
+    }
+    const auto marker = [&marked](int x, int y) {
+        return marked[(y - MapRect[1]) * width + x - MapRect[0]] != 0;
     };
     std::array<int, columns * rows> cells{};
     for (int y = y0; y < y1; ++y) {

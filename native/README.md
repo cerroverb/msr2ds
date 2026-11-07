@@ -27,7 +27,8 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
 - The single 16:9 screen (`--layout=single`, F9 cycles to it): `compositor.cpp` ports the emulator build's compositor
   (renderer_vulkan.cpp DrawMsrScreens): the bottom screen is classified each frame (`bottom_classifier.h`) and its HUD
   pieces (energy, beam slots, the minimap following Samus's marker: by its deep red, so a red map pin is not taken
-  for it, and taken far from its last place only once it holds there 0.75 s; the counters), menus (a panel, the title menus without
+  for it, with the map's thin orange lines, the elevator shafts, left out (#40, #44), and taken far from its last place
+  only once it holds there 0.75 s; the counters), menus (a panel, the title menus without
   their backdrop), prompts and the gallery layout are drawn over the view by `msr.vert`/`msr.frag`. `pica_vk.c`
   squeezes the top screen's world draws to 16:9 and applies the camera zoom in clip space, and leaves out the title
   menus' backdrop quads. The mouse touches the panel while it shows. While R is held (missiles, Power Bombs) the HUD
