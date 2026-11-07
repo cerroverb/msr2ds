@@ -45,6 +45,7 @@ void pica_vk_sync_all(void);
 void pica_vk_gx_reads(uint32_t start, uint32_t end);           /* gsp.c: a GX operation reads these guest bytes */
 void pica_vk_scanout_invalidate(uint32_t start, uint32_t end);   /* gsp.c: a GX operation wrote these guest bytes */
 int  video_init(int scale);
+void video_explain(const char *log);   /* video_init failed: why, in a message box; `log` holds the details */
 void video_set_fps(int fps);
 /* the settings overlay's display settings (msr/overlay_host.cpp): also given as --fullscreen, --resolution, --vsync */
 void video_set_fullscreen(int on);

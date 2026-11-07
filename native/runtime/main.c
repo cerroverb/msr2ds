@@ -514,7 +514,7 @@ int main(int argc, char **argv) {
     dsp_set_volume(g_mute ? 0.f : (float)volume / 100.f);
     msr_overlay_start(video_fullscreen(), video_resolution(), video_vsync(), g_mute ? 0 : volume, video_aniso(), video_filter_fsr(),
                       power_saving);
-    if (video_init(scale)) { fprintf(stderr, "native: video init failed\n"); return 1; }
+    if (video_init(scale)) { fprintf(stderr, "native: video init failed\n"); video_explain("user/msr-native.log"); return 1; }
     settings_line(fps);
     fprintf(stderr, "native: boot (input=%s, audio=%s)\n", g_input_none ? "none" : "default", g_mute ? "muted" : "on");
 

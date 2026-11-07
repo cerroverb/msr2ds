@@ -74,7 +74,10 @@ static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;   /* the queue is
 static int vk13;
 unsigned g_vid_acquire_fail, g_vid_present_fail, g_vid_presented; int g_vid_last_err;
 
-#define VK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { fprintf(stderr, "video: %s failed (%d)\n", #x, r_); return -1; } } while (0)
+/* why video_init failed, for the message the player sees (video_explain) */
+static char init_error[256];
+#define VK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { fprintf(stderr, "video: %s failed (%d)\n", #x, r_); \
+    snprintf(init_error, sizeof init_error, "%s failed (%d)", #x, (int)r_); return -1; } } while (0)
 
 /* ---------------- options ---------------- */
 enum { L_STACKED, L_SIDE, L_LARGE, L_TOP, L_BOTTOM, L_SINGLE, L_AUTO, L_COUNT };
@@ -490,6 +493,27 @@ static int recreate_surface(void) {
     return create_swapchain();
 }
 
+/* video_init failed: why, in a message box, as the program has no window (#24: on a computer without a Vulkan driver
+   the launcher ended without a word). `log`: the file with the details. */
+void video_explain(const char *log) {
+    char text[1536];
+    snprintf(text, sizeof text,
+             "msr-native could not open its window: it needs a graphics driver\n"
+             "with Vulkan, and this computer has none that can show one.\n\n"
+#ifdef _WIN32
+             "Update the graphics driver from AMD, NVIDIA or Intel. Some older\n"
+             "graphics have no Vulkan driver for Windows at all (Intel's before its\n"
+             "6th-generation processors, for example), and msr-native cannot run on them.\n\n"
+#else
+             "Install your system's Vulkan driver (Mesa's for AMD and Intel\n"
+             "graphics, or NVIDIA's own).\n\n"
+#endif
+             "Reason: %s\nDetails: %s",
+             init_error[0] ? init_error : "unknown", log && *log ? log : "the log");
+    if (win) SDL_HideWindow(win);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "msr-native", text, NULL);
+}
+
 int video_init(int scale) {
     /* every pad's face buttons by position (A = bottom), as input.c, glyphs.cpp and the settings take them: SDL 2 names a
        Nintendo pad's by label unless told (its A, on the right, came as SDL's A, the bottom button) */
@@ -511,7 +535,11 @@ int video_init(int scale) {
     const Uint32 win_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
 #endif
     win = SDL_CreateWindow("Metroid: Samus Returns", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, chh[opt_layout] * scale, win_flags);
-    if (!win) { fprintf(stderr, "video: SDL_CreateWindow: %s\n", SDL_GetError()); return -1; }
+    if (!win) {   /* no Vulkan library at all (vulkan-1.dll comes with the graphics driver) */
+        fprintf(stderr, "video: SDL_CreateWindow: %s\n", SDL_GetError());
+        snprintf(init_error, sizeof init_error, "%s", SDL_GetError());
+        return -1;
+    }
     SDL_SetWindowMinimumSize(win, BOT_W, SCR_H);
     if (opt_fs) apply_fullscreen();
     unsigned ne = 0; SDL_Vulkan_GetInstanceExtensions(win, &ne, NULL);
@@ -529,11 +557,24 @@ int video_init(int scale) {
         if (has_colorspace_ext) exts[ne++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
         if (has_portability_enum) exts[ne++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
     }
-    VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "msr-native", .apiVersion = VK_API_VERSION_1_3 };
+    /* Vulkan 1.3 where the loader is 1.1 or newer; a Vulkan 1.0 loader (no vkEnumerateInstanceVersion) refuses any
+       version but 1.0, and the program then renders on the CPU (#24: a computer whose Vulkan library is 1.0). The 1.1
+       function it calls comes from the instance, not vulkan-1.dll, which a 1.0 loader's lacks. */
+    uint32_t inst_version = VK_API_VERSION_1_0;
+    {
+        PFN_vkEnumerateInstanceVersion eiv = (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(NULL, "vkEnumerateInstanceVersion");
+        if (!eiv || eiv(&inst_version) != VK_SUCCESS) inst_version = VK_API_VERSION_1_0;
+    }
+    VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "msr-native",
+                             .apiVersion = inst_version >= VK_API_VERSION_1_1 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_0 };
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = ne, .ppEnabledExtensionNames = exts,
         .flags = has_portability_enum ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0 };
     VK(vkCreateInstance(&ici, NULL, &inst));
-    if (!SDL_Vulkan_CreateSurface(win, inst, &surf)) { fprintf(stderr, "video: surface: %s\n", SDL_GetError()); return -1; }
+    if (!SDL_Vulkan_CreateSurface(win, inst, &surf)) {
+        fprintf(stderr, "video: surface: %s\n", SDL_GetError());
+        snprintf(init_error, sizeof init_error, "surface: %s", SDL_GetError());
+        return -1;
+    }
     uint32_t np = 8; VkPhysicalDevice pds[8]; VK(vkEnumeratePhysicalDevices(inst, &np, pds));
     for (uint32_t i = 0; i < np && !phys; i++) {
         uint32_t nq = 16; VkQueueFamilyProperties qp[16]; vkGetPhysicalDeviceQueueFamilyProperties(pds[i], &nq, qp);
@@ -542,7 +583,11 @@ int video_init(int scale) {
             if ((qp[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) && pres) { phys = pds[i]; qfam = q; break; }
         }
     }
-    if (!phys) { fprintf(stderr, "video: no Vulkan device can present to the window\n"); return -1; }
+    if (!phys) {
+        fprintf(stderr, "video: no Vulkan device can present to the window\n");
+        snprintf(init_error, sizeof init_error, "no Vulkan device can show the window (%u found)", np);
+        return -1;
+    }
     VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(phys, &pp);
     {   /* its kind and memory, for the logs players send (integrated graphics share the computer's memory) */
         VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(phys, &mp);
@@ -569,7 +614,9 @@ int video_init(int scale) {
     for (uint32_t i = 0; i < nde; i++) if (!strcmp(dep[i].extensionName, "VK_KHR_portability_subset")) has_portability_subset = 1;
     for (uint32_t i = 0; i < nde; i++) if (!strcmp(dep[i].extensionName, VK_EXT_HDR_METADATA_EXTENSION_NAME)) has_hdr_metadata = 1;
     free(dep);
-    if (pp.apiVersion >= VK_API_VERSION_1_3) vkGetPhysicalDeviceFeatures2(phys, &f2);
+    PFN_vkGetPhysicalDeviceFeatures2 features2 = inst_version >= VK_API_VERSION_1_1
+        ? (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceFeatures2") : NULL;
+    if (pp.apiVersion >= VK_API_VERSION_1_3 && features2) features2(phys, &f2);
     /* push descriptors where the device has them, else descriptor sets in their place (vk_push.c) */
     vk13 = pp.apiVersion >= VK_API_VERSION_1_3 && f13.dynamicRendering && f13.shaderDemoteToHelperInvocation;
     VkPhysicalDeviceVulkan13Features en13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = VK_TRUE, .shaderDemoteToHelperInvocation = VK_TRUE };

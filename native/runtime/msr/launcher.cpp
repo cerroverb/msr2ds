@@ -78,6 +78,7 @@
 
 extern "C" {
 int video_init(int scale);
+void video_explain(const char* log);
 int video_frame(void);
 void video_shutdown(void);
 void video_show(int on);
@@ -2192,7 +2193,8 @@ int Launcher() {
     CheckCode();
     video_option("layout", "single");
     if (video_init(3)) {
-        std::fprintf(stderr, "launcher: no window (Vulkan 1.3 is needed)\n");
+        std::fprintf(stderr, "launcher: no window (a Vulkan device is needed)\n");
+        video_explain(Utf8(S.user / "launcher.log").c_str());
         return 1;
     }
     Publish();
