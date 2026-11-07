@@ -3,7 +3,7 @@
   python tools/package/windows.py [build folder]      (default: build; MSYS2 UCRT64 in C:/msys64)
 
 The zip holds msr-native.exe, msr-native-direct.exe (the game without the launcher), the MSYS2 libraries it needs
-(SDL2, libpng, zlib, the GCC runtime), recomp/ (the recompiler that builds the native code from the player's dump:
+(SDL2, libpng, zlib, the GCC runtime, shaderc: the vertex shader compiler), recomp/ (the recompiler that builds the native code from the player's dump:
 tools/msr/recomp/bundle_files.txt, same layout), README.txt and the licences. No game code or data: the player's dump, the code made from it, saves and settings all
 go in the user folder the program makes beside itself.
 """
@@ -42,6 +42,13 @@ def main():
         sys.exit(f'unexpected libraries: {dlls}')
     for dll in dlls:
         shutil.copy2(MSYS / 'ucrt64/bin' / dll, out / dll)
+    # shaderc, which runtime/pica_vsgen.c loads by name (not a link-time library, so ldd does not list it) to compile the
+    # game's vertex shaders; without it they run on the GPU's interpreter. MSYS2's needs only Windows' own libraries.
+    shaderc = MSYS / 'ucrt64/bin/libshaderc_shared.dll'
+    if not shaderc.is_file():
+        sys.exit(f'{shaderc}: missing (pacman -S mingw-w64-ucrt-x86_64-shaderc)')
+    shutil.copy2(shaderc, out / shaderc.name)
+    subprocess.run([str(MSYS / 'ucrt64/bin/strip.exe'), '-s', str(out / shaderc.name)], check=True, env=env)
 
     # msr-native-direct.exe (runtime/win/direct.c, static and stripped already): in the zip from the start, so a
     # shortcut, Steam or a frontend can point at it before the first build (until then it opens the launcher). The
@@ -70,6 +77,7 @@ def main():
     shutil.copy2(ROOT / 'native/runtime/shaders/fsr/LICENSE-AMD-FidelityFX.txt', out / 'LICENSE-AMD-FidelityFX.txt')
     if 'libzstd.dll' in dlls:   # zstd (compressed game files), BSD: MSYS2 keeps its licence beside the package's files
         shutil.copy2(MSYS / 'ucrt64/share/licenses/zstd/LICENSE', out / 'LICENSE-zstd.txt')
+    shutil.copy2(MSYS / 'ucrt64/share/licenses/shaderc/LICENSE', out / 'LICENSE-shaderc.txt')   # Apache 2.0
 
     archive = ROOT / 'dist' / f'{name}.zip'
     if archive.exists():

@@ -87,8 +87,11 @@ Licences
 --------
 msr-native is free software under the GNU GPL version 3 or later (LICENSE-GPL-3.0.txt). The
 parts from the emulator-based Samus Returns port are GPL 2.0 or later (LICENSE-GPL-2.0.txt).
-zstd, which reads compressed game files, is BSD (LICENSE-zstd.txt).
+zstd, which reads compressed game files, is BSD (LICENSE-zstd.txt). shaderc, which compiles
+the game's vertex shaders for the graphics card, is Apache 2.0 (in the Windows zip:
+LICENSE-shaderc.txt).
 The macOS app also holds MoltenVK and shaderc (Apache 2.0), SDL 2 (zlib) and libpng (libpng
-licence), each with its licence beside this file.
+licence), each with its licence beside this file. The Android app holds shaderc (Apache 2.0)
+too, built from the Android NDK's copy, with SDL 2, libpng and zstd.
 Dear ImGui and AMD FidelityFX FSR 1 are MIT. Metroid: Samus Returns belongs to Nintendo; this
 program contains none of it.
