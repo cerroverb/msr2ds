@@ -230,8 +230,10 @@ keys.
 - **Touch navigation** puts a cursor on the touch screen's buttons: the D-pad or
   stick moves it, the choose button taps (hold to drag) and the back button
   leaves. The pause map's tools (scan, map pins, info) and copying or deleting
-  files are touch-only in the game. The mouse also touches the bottom-screen
-  panel when it shows.
+  files are touch-only in the game. On the map pins tool, Up from its buttons
+  frees the cursor over the map, to pick up a pin already there: drop it on the
+  bin to remove it, and move down to the buttons to go back to them. The mouse
+  also touches the bottom-screen panel when it shows.
 - **The mouse stays in the window** while you play with it, so a shot beside a
   windowed game doesn't switch away. The settings menu (F1), the title and file
   menus, a controller or Alt+Tab let it go.
