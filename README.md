@@ -111,12 +111,13 @@ controller's Select / View / Back button opens the same menu. The internal
 resolution starts at 4x (960p): raise it on the Display tab (9x is 4K) if your
 GPU has room, or lower it if it struggles.
 
-**Without the launcher:** once the native code is built, the launcher puts
-`msr-native-direct.exe` beside `msr-native.exe` (Linux: `msr-native-direct.sh`
-beside the AppImage; macOS: `msr-native-direct.app` beside `msr-native.app`). It
-starts the game straight away with your settings: use it for a desktop
-shortcut, Steam or a frontend. When the game can't start yet (no game file, or
-the native code needs building), it opens the launcher instead.
+**Without the launcher:** `msr-native-direct.exe`, beside `msr-native.exe` in
+the Windows zip, starts the game straight away with your settings: use it for a
+desktop shortcut, Steam or a frontend. When the game can't start yet (no game
+file, or the native code needs building), it opens the launcher instead. On
+Linux and macOS the launcher makes it once the native code is built:
+`msr-native-direct.sh` beside the AppImage, `msr-native-direct.app` beside
+`msr-native.app`.
 
 **Updates:** when a newer release is out, the Game tab says so when the launcher
 starts. **Update now** downloads it and puts it in place of this one (the same
