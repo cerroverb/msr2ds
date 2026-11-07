@@ -27,11 +27,11 @@ First start
 The same menu opens in the game with F1 or the controller's Select / View / Back button.
 The launcher comes back when the game closes.
 
-Once the native code is built, the launcher also makes msr-native-direct.exe beside
-msr-native.exe (Linux: msr-native-direct.sh beside the AppImage; macOS: msr-native-direct.app
-beside msr-native.app). It starts the game straight
-away, without the launcher: use it for a desktop shortcut, Steam or a frontend. When the game
-cannot start yet (no game file, or the native code needs building), it opens the launcher.
+msr-native-direct.exe, beside msr-native.exe, starts the game straight away, without the
+launcher: use it for a desktop shortcut, Steam or a frontend. When the game cannot start yet
+(no game file, or the native code needs building), it opens the launcher. On Linux and macOS,
+the launcher makes it once the native code is built: msr-native-direct.sh beside the AppImage,
+msr-native-direct.app beside msr-native.app.
 
 Android
 -------

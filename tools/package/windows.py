@@ -2,9 +2,9 @@
 
   python tools/package/windows.py [build folder]      (default: build; MSYS2 UCRT64 in C:/msys64)
 
-The zip holds msr-native.exe, the MSYS2 libraries it needs (SDL2, libpng, zlib, the GCC runtime), recomp/ (the
-recompiler that builds the native code from the player's dump: tools/msr/recomp/bundle_files.txt, same layout),
-README.txt and the licences. No game code or data: the player's dump, the code made from it, saves and settings all
+The zip holds msr-native.exe, msr-native-direct.exe (the game without the launcher), the MSYS2 libraries it needs
+(SDL2, libpng, zlib, the GCC runtime), recomp/ (the recompiler that builds the native code from the player's dump:
+tools/msr/recomp/bundle_files.txt, same layout), README.txt and the licences. No game code or data: the player's dump, the code made from it, saves and settings all
 go in the user folder the program makes beside itself.
 """
 import os
@@ -42,6 +42,17 @@ def main():
         sys.exit(f'unexpected libraries: {dlls}')
     for dll in dlls:
         shutil.copy2(MSYS / 'ucrt64/bin' / dll, out / dll)
+
+    # msr-native-direct.exe (runtime/win/direct.c, static and stripped already): in the zip from the start, so a
+    # shortcut, Steam or a frontend can point at it before the first build (until then it opens the launcher). The
+    # launcher writes the copy inside msr-native.exe (resource 200) when the file differs: the same bytes, or it would
+    # replace this one on every first start
+    direct = build / 'direct' / 'msr-native-direct.exe'
+    if not direct.is_file():
+        sys.exit(f'{direct}: missing (it is built with msr-native.exe)')
+    if direct.read_bytes() not in exe.read_bytes():
+        sys.exit(f'{direct}: not the one inside {exe.name} (rebuild: cmake --build {build.name})')
+    shutil.copy2(direct, out / direct.name)
 
     # the recompiler, as the launcher looks for it: recomp/tools/msr/recomp/build_module.py
     bundle = ROOT / 'tools/msr/recomp/bundle_files.txt'
