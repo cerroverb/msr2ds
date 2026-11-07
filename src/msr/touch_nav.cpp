@@ -105,6 +105,15 @@ float CenterY(const Target& t) {
     return (t.y0 + t.y1) * .5f;
 }
 
+/// The top of a screen's buttons: the map pins tool's toolbar, below the map the cursor roams.
+float Top(const std::vector<Target>& targets) {
+    int top = 240;
+    for (const Target& t : targets) {
+        top = std::min(top, t.y0);
+    }
+    return static_cast<float>(top);
+}
+
 /// Index of the button focused when a screen appears.
 int DefaultFocus(const std::vector<Target>* targets) {
     if (targets == &PauseMapTargets) {
@@ -154,7 +163,7 @@ const std::vector<Target>* TouchNavigator::CurrentTargets() const {
 }
 
 bool TouchNavigator::Snapping() const {
-    return targets != nullptr && !holding;
+    return targets != nullptr && !holding && !roaming;
 }
 
 void TouchNavigator::SetActive(bool value) {
@@ -162,6 +171,7 @@ void TouchNavigator::SetActive(bool value) {
         Release();
     }
     active = value;
+    roaming = false;
     Presentation::touch_mode = value;
     Presentation::force_panel = value;
     if (value) {
@@ -183,6 +193,7 @@ void TouchNavigator::Update() {
     if (const auto* current = CurrentTargets(); current != targets && !holding) {
         targets = current;
         focus = DefaultFocus(targets);
+        roaming = false;
     }
     Publish();
 }
@@ -195,6 +206,7 @@ void TouchNavigator::Step(int dx, int dy) {
         const float step = holding ? 6.f : 8.f;
         cursor_x = std::clamp(cursor_x + dx * step, 0.f, 319.f);
         cursor_y = std::clamp(cursor_y + dy * step, 0.f, 239.f);
+        BackToButtons();
         Publish();
         return;
     }
@@ -221,6 +233,12 @@ void TouchNavigator::Step(int dx, int dy) {
     }
     if (best >= 0) {
         focus = best;
+    } else if (dy < 0 && targets == &MapPinsTargets) {
+        // The map pins tool: up from its buttons, a free cursor over the map, to pick up a pin
+        // already placed there (#43: with a finger or the mouse, the only way before).
+        roaming = true;
+        cursor_x = fx;
+        cursor_y = Top(*targets) - 12.f;
     }
     Publish();
 }
@@ -232,14 +250,37 @@ void TouchNavigator::Glide(float x, float y, float seconds) {
     constexpr float Speed = 220.f; // native pixels per second at full tilt
     cursor_x = std::clamp(cursor_x + x * Speed * seconds, 0.f, 319.f);
     cursor_y = std::clamp(cursor_y - y * Speed * seconds, 0.f, 239.f);
+    BackToButtons();
     Publish();
+}
+
+void TouchNavigator::FocusNearest() {
+    float best = std::numeric_limits<float>::max();
+    for (int i = 0; i < static_cast<int>(targets->size()); ++i) {
+        const Target& t = (*targets)[i];
+        const float d = std::hypot(CenterX(t) - cursor_x, CenterY(t) - cursor_y);
+        if (d < best) {
+            best = d;
+            focus = i;
+        }
+    }
+}
+
+// The free cursor over the map, without a pin, moved down to the buttons (or a pin dropped on
+// them, the bin): the buttons snap again, the nearest focused.
+void TouchNavigator::BackToButtons() {
+    if (!roaming || holding || !targets || cursor_y < Top(*targets)) {
+        return;
+    }
+    roaming = false;
+    FocusNearest();
 }
 
 void TouchNavigator::Press() {
     if (!active || holding) {
         return;
     }
-    if (targets) {
+    if (Snapping()) {
         // The drag starts from the focused button.
         const Target& t = (*targets)[focus];
         cursor_x = CenterX(t);
@@ -259,18 +300,12 @@ void TouchNavigator::Release() {
     // Keep the touch a little longer, so a quick press still lasts a few game frames.
     Presentation::touch_tap_until =
         SteadyNanoseconds(std::chrono::steady_clock::now() + std::chrono::milliseconds(80));
-    if (targets) {
+    if (targets && !roaming) {
         // Back to snapping: focus the button nearest to where the finger lifted.
-        float best = std::numeric_limits<float>::max();
-        for (int i = 0; i < static_cast<int>(targets->size()); ++i) {
-            const Target& t = (*targets)[i];
-            const float d = std::hypot(CenterX(t) - cursor_x, CenterY(t) - cursor_y);
-            if (d < best) {
-                best = d;
-                focus = i;
-            }
-        }
+        FocusNearest();
     }
+    // Over the map, the free cursor stays for the next pin; dropped on the buttons, they snap.
+    BackToButtons();
     Publish();
 }
 

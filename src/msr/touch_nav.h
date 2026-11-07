@@ -11,7 +11,9 @@ namespace MSR {
 /// Touch navigation (L3 or Tab): shows the touch screen and moves a highlight between its
 /// buttons with the D-pad or left stick; A acts as a finger. A press taps; holding A and moving
 /// drags (map pins, for instance). Known screens (the gameplay HUD and the pause menu's pages)
-/// snap between their measured buttons; any other screen gets a free cursor. Qt thread; the
+/// snap between their measured buttons; any other screen gets a free cursor. On the map pins
+/// tool, Up from its buttons frees the cursor over the map, so a pin already there can be picked
+/// up (and dropped on the bin); back down at the buttons, they snap again. Qt thread; the
 /// highlight and the touch are published through msr/presentation.h.
 class TouchNavigator {
 public:
@@ -38,10 +40,13 @@ public:
 
 private:
     const std::vector<Target>* CurrentTargets() const;
+    void FocusNearest();
+    void BackToButtons();
     void Publish();
 
     bool active = false;
     bool holding = false;
+    bool roaming = false; ///< The map pins tool's free cursor over the map (#43)
     int focus = 0;
     float cursor_x = 160.f;
     float cursor_y = 120.f;

@@ -86,6 +86,7 @@ constexpr ControlHint TouchHints[] = {
 };
 constexpr ControlHint MapPinsTouchHints[] = {
     {"{Move}", "Move"},
+    {"Up", "The pins on the map (down: the buttons again)"},
     {"Hold {Tap} on a pin", "Drag it to the map, or to the bin to remove it"},
     {"{Leave}", "Leave touch mode"},
 };
