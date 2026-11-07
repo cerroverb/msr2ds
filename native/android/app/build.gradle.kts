@@ -1,6 +1,7 @@
 // msr-native's Android app (README.md, Releases):
 //   native/android> gradlew assembleRelease -Pmsr.sdl2=<SDL2 source> -Pmsr.zstd=<zstd source> -Pmsr.png=<libpng source>
-// The program (native/CMakeLists.txt) is libmain.so, run by SDL's activity (MsrActivity), with libSDL2.so. Nothing of
+// The program (native/CMakeLists.txt) is libmain.so, run by SDL's activity (MsrActivity), with libSDL2.so and
+// libshaderc_shared.so (the vertex shader compiler, from the NDK's own shaderc: buildShaderc below). Nothing of
 // the game is in it: the native code is built on a PC from the player's dump (Build for Android in msr-native's
 // launcher there) and copied into the app's user folder with the game file.
 plugins {
@@ -91,6 +92,32 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 }
+
+// shaderc as the NDK has it (../shaderc/Android.mk): libshaderc_shared.so beside libmain.so, which runtime/pica_vsgen.c
+// loads to compile the game's vertex shaders. Without it they ran on the GPU's interpreter, a few frames a second on a
+// phone (#37). Built into build/shaderc (a minute or two the first time), again when the NDK or the makefiles change.
+val shadercOut = layout.buildDirectory.dir("shaderc").get().asFile
+val buildShaderc = tasks.register<Exec>("buildShaderc") {
+    val ndk = androidComponents.sdkComponents.ndkDirectory
+    val makefiles = file("../shaderc")
+    inputs.dir(makefiles)
+    inputs.property("ndk", android.ndkVersion)
+    outputs.dir(File(shadercOut, "libs"))
+    doFirst {
+        val windows = System.getProperty("os.name").startsWith("Windows")
+        commandLine(
+            ndk.get().file(if (windows) "ndk-build.cmd" else "ndk-build").asFile.absolutePath,
+            "NDK_PROJECT_PATH=null",
+            "APP_BUILD_SCRIPT=" + File(makefiles, "Android.mk").absolutePath,
+            "NDK_APPLICATION_MK=" + File(makefiles, "Application.mk").absolutePath,
+            "NDK_OUT=" + File(shadercOut, "obj").absolutePath,
+            "NDK_LIBS_OUT=" + File(shadercOut, "libs").absolutePath,
+            "-j$jobs",
+        )
+    }
+}
+android.sourceSets.named("main") { jniLibs.srcDir(File(shadercOut, "libs")) }
+tasks.named("preBuild") { dependsOn(buildShaderc) }
 
 // msr-native-<version>-android-arm64.apk, as the release names it
 android.applicationVariants.configureEach {
