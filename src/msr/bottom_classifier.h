@@ -271,10 +271,14 @@ inline constexpr std::array<int, 4> MapRect = {0, 58, 252, 213};
 /// scrolling near an area's edges, where the marker moves instead, a map tile (10 px) at a time.
 /// The red and orange pixels are counted in 4 px cells, and the marker is the 12 px square
 /// holding most: 36-38 when fully lit (about 29 with the HD texture pack at 9x, as the read-back
-/// samples the larger picture), under 20 while it fades. Not found when it is faint or something
-/// else on the map is as red. Its red is deep (green and blue under 0.3 of it but at the pack's
+/// samples the larger picture), under 20 while it fades. Not found when it is faint or another dot
+/// on the map is as red. Its red is deep (green and blue under 0.3 of it but at the pack's
 /// edges); the red map pin's is lighter (a third) and is not counted (2026-11-03, the user: with
-/// a pin placed the minimap stayed on the pin, found while the marker faded).
+/// a pin placed the minimap stayed on the pin, found while the marker faded). The map's orange
+/// lines (the elevator shaft above the first save station's room, 2 px wide) are as orange as the
+/// helmet once the map scrolls them into its lower half: a square of them, a line rather than a
+/// dot (under 5 px across), is left out (#40: one was taken for the marker each time it faded,
+/// and made the lit marker "something else as red", until the minimap stayed on the shaft).
 struct Marker {
     bool found = false;
     float x = 0.f, y = 0.f; ///< Its middle
@@ -292,48 +296,62 @@ inline Marker FindMapMarker(const Image& image) {
         return red || visor;
     };
     std::array<int, columns * rows> cells{};
-    int total = 0;
     for (int y = y0; y < y1; ++y) {
         for (int x = x0; x < x1; ++x) {
             if (marker(x, y)) {
                 ++cells[(y - y0) / cell * columns + (x - x0) / cell];
-                ++total;
             }
         }
     }
-    int best = 0, best_column = 0, best_row = 0;
-    for (int row = 0; row + 3 <= rows; ++row) {
-        for (int column = 0; column + 3 <= columns; ++column) {
-            int count = 0;
-            for (int j = 0; j < 3; ++j) {
-                for (int i = 0; i < 3; ++i) {
-                    count += cells[(row + j) * columns + column + i];
+    // The squares holding most, best first: a dot is the marker, a line is left out; each one's
+    // cells out of the next search. A second dot as red: neither is sure.
+    Marker found{};
+    for (int tries = 0; tries < 8; ++tries) {
+        int best = 0, best_column = 0, best_row = 0;
+        for (int row = 0; row + 3 <= rows; ++row) {
+            for (int column = 0; column + 3 <= columns; ++column) {
+                int count = 0;
+                for (int j = 0; j < 3; ++j) {
+                    for (int i = 0; i < 3; ++i) {
+                        count += cells[(row + j) * columns + column + i];
+                    }
+                }
+                if (count > best) {
+                    best = count;
+                    best_column = column;
+                    best_row = row;
                 }
             }
-            if (count > best) {
-                best = count;
-                best_column = column;
-                best_row = row;
+        }
+        if (best < 20) {
+            break;
+        }
+        // The box around its pixels in that square: its middle, and whether it is a dot.
+        const int sx0 = x0 + best_column * cell, sy0 = y0 + best_row * cell;
+        const int sx1 = std::min(x1, sx0 + 3 * cell), sy1 = std::min(y1, sy0 + 3 * cell);
+        Box box{sx1, sy1, sx0, sy0};
+        for (int y = sy0; y < sy1; ++y) {
+            for (int x = sx0; x < sx1; ++x) {
+                if (marker(x, y)) {
+                    box = {std::min(box.x0, x), std::min(box.y0, y), std::max(box.x1, x + 1),
+                           std::max(box.y1, y + 1)};
+                }
+            }
+        }
+        if (box.x1 - box.x0 >= 5 && box.y1 - box.y0 >= 5) {
+            if (found.found) {
+                return {};
+            }
+            found = {true, static_cast<float>(box.x0 + box.x1) / 2.f,
+                     static_cast<float>(box.y0 + box.y1) / 2.f};
+        }
+        for (int j = 0; j < 3; ++j) {
+            for (int i = 0; i < 3; ++i) {
+                cells[(best_row + j) * columns + best_column + i] = 0;
             }
         }
     }
-    if (best < 20 || total - best > 24) {
-        return {};
-    }
-    // Its middle: the box around its pixels in that square.
-    const int sx0 = x0 + best_column * cell, sy0 = y0 + best_row * cell;
-    const int sx1 = std::min(x1, sx0 + 3 * cell), sy1 = std::min(y1, sy0 + 3 * cell);
-    Box box{sx1, sy1, sx0, sy0};
-    for (int y = sy0; y < sy1; ++y) {
-        for (int x = sx0; x < sx1; ++x) {
-            if (marker(x, y)) {
-                box = {std::min(box.x0, x), std::min(box.y0, y), std::max(box.x1, x + 1),
-                       std::max(box.y1, y + 1)};
-            }
-        }
-    }
-    return {true, static_cast<float>(box.x0 + box.x1) / 2.f,
-            static_cast<float>(box.y0 + box.y1) / 2.f};
+    return found;
 }
 
 /// The map's backdrop in a strip along one of its edges: the mean colour of the pixels no
