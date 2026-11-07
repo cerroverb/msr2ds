@@ -65,6 +65,7 @@ struct State {
     s64 pausing_until_us = 0, resuming_until_us = 0;
     bool paused = false;
     s64 prompt_since_us = 0, prompt_seen_us = 0;
+    bool prompt_over_menu = false;   // the prompt showing came straight from a menu: one of its dialogs (msr_compose)
     bool in_play = false;
     s64 hud_seen_us = -1'000'000'000;   // the HUD last showed (the pad's menus' layout, glyphs.cpp): not yet
     bool menu_icons = true;   // the icons in the menus' layout: the game starts in its menus
@@ -368,8 +369,12 @@ extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned button
     const bool pausing = st.pausing_until_us != 0;
     const bool resuming = now_us < st.resuming_until_us;
 
-    if (state != P::Bottom::Prompt) st.prompt_since_us = now_us;
-    else st.prompt_seen_us = now_us;
+    if (state != P::Bottom::Prompt) {
+        st.prompt_since_us = now_us;
+        st.prompt_over_menu = state == P::Bottom::Menu;
+    } else {
+        st.prompt_seen_us = now_us;
+    }
     // The pad's menus' layout (glyphs.cpp): its buttons choose and go back unless the HUD shows, from a menu at once or
     // anything else held 300 ms (2026-11-03, the user: "in game it also needs to change too": the game's dialogs over
     // play, "Save your progress?", show the emblem below). Its icons follow from a menu, or a prompt held 300 ms (the
@@ -382,9 +387,12 @@ extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned button
     }
     msr_buttons_state(state != P::Bottom::Hud && (state == P::Bottom::Menu || now_us - st.hud_seen_us >= 300'000), st.menu_icons);
     const auto page = static_cast<P::Page>(P::page.load(std::memory_order_relaxed));
+    // Play ends at the title menus or a prompt (the title's, the prologue's), but not at the pause menu's own dialogs,
+    // prompts straight over it (the map pins tool's first use): play went on behind them (2026-11-07, #43: the title
+    // menus' backdrop was then left out of the pins tool, msr_skip_bottom_draw).
     if (state == P::Bottom::Hud) {
         st.in_play = true;
-    } else if ((state == P::Bottom::Prompt && now_us - st.prompt_since_us >= 300'000) ||
+    } else if ((state == P::Bottom::Prompt && now_us - st.prompt_since_us >= 300'000 && !st.prompt_over_menu) ||
                (state == P::Bottom::Menu &&
                 (page == P::Page::FileList || page == P::Page::FileOpen || page == P::Page::Gallery))) {
         st.in_play = false;
@@ -650,7 +658,9 @@ extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned button
 // vk_rasterizer.cpp SkipMsrBackdrop: the title menus open the bottom screen's frame with two full-screen quads (the
 // blue scanlined fill, then the emblem) from a 1024x512 I8 atlas; left out, the menus stand on black, which the
 // compositor turns into transparency. Called for each draw into the bottom screen's 240x320 target; a display
-// transfer starts the next frame (msr_bottom_frame).
+// transfer starts the next frame (msr_bottom_frame). Out of play only: once a pin is placed, the pause menu's map pins
+// tool opens its frames the same way, and left out there its map stood on black, read as a title menu's (half the
+// screen dark): the panel turned see-through and touch navigation lost the tool's buttons (2026-11-07, #43).
 namespace {
 int bottom_draw = -1;
 bool backdrop = false;
@@ -661,7 +671,7 @@ extern "C" void msr_bottom_frame(void) { bottom_draw = -1; }
 extern "C" int msr_skip_bottom_draw(int quad_backdrop) {
     if (++bottom_draw > 1) return 0;
     if (bottom_draw == 0) {
-        backdrop = quad_backdrop != 0;
+        backdrop = quad_backdrop != 0 && !msr_world_in_play();
         P::backdrop_removed.store(backdrop, std::memory_order_relaxed);
     }
     return backdrop && quad_backdrop;
