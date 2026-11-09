@@ -1,14 +1,25 @@
 #version 450
 // Presentation filters for the 3DS screens: nearest, linear, sharp bilinear (crisp pixels without shimmering at
 // non-integer scales), FXAA (then bilinear), and the overlay (alpha). FSR is two other shaders (fsr_easu/fsr_rcas.frag).
+// Also OpenGL's (present.vert).
+#ifndef VARYING
+#define VARYING(n) layout(location = n)
+#endif
+#ifdef VULKAN
 layout(push_constant) uniform P {
+#else
+layout(std140) uniform P {
+#endif
     vec4 dst;
     vec4 src;      // texture width, height, output pixels per texel x, y
     ivec4 mode;
     vec4 extra;
 } p;
-layout(set = 0, binding = 0) uniform sampler2D tex;   // linear sampler, clamp to edge
-layout(location = 0) in vec2 uv;
+#ifdef VULKAN
+layout(set = 0, binding = 0)
+#endif
+uniform sampler2D tex;   // linear sampler, clamp to edge
+VARYING(0) in vec2 uv;
 layout(location = 0) out vec4 o;
 
 // FXAA: luma edges from the four diagonal neighbours give a blur direction; two taps along it (inner) or four (outer),

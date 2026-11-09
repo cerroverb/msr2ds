@@ -15,6 +15,9 @@
 #endif
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
+#ifdef MSR_OPENGL
+#include <backends/imgui_impl_opengl3.h>
+#endif
 #include "common/logging/log.h"
 #include "msr/button_glyphs.h"
 #include "msr/cheats.h"
@@ -509,19 +512,57 @@ void Overlay::Init(const OverlayHook::VulkanContext& vulkan) {
     previous_time = Now();
 }
 
+void Overlay::InitOpenGL() {
+#ifdef MSR_OPENGL
+    ImGui::SetCurrentContext(context);
+    if (!ImGui_ImplOpenGL3_Init("#version 330 core")) {
+        LOG_ERROR(Frontend, "Settings overlay: OpenGL initialization failed");
+        return;
+    }
+    opengl = true;
+    backend_ready = true;
+    previous_time = Now();
+#endif
+}
+
 void Overlay::Shutdown() {
     if (!backend_ready) {
         return;
     }
     ImGui::SetCurrentContext(context);
+#ifdef MSR_OPENGL
+    if (opengl) {
+        ImGui_ImplOpenGL3_Shutdown();
+        opengl = backend_ready = false;
+        return;
+    }
+#endif
     ImGui_ImplVulkan_Shutdown();
     backend_ready = false;
 }
 
 void Overlay::Draw(VkCommandBuffer command, std::uint32_t width, std::uint32_t height) {
-    if (!backend_ready) {
+    if (!backend_ready || opengl) {
         return;
     }
+    BuildFrame(width, height, ImGui_ImplVulkan_NewFrame);
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), command);
+}
+
+void Overlay::DrawOpenGL(std::uint32_t width, std::uint32_t height) {
+#ifdef MSR_OPENGL
+    if (!backend_ready || !opengl) {
+        return;
+    }
+    BuildFrame(width, height, ImGui_ImplOpenGL3_NewFrame);
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#else
+    (void)width;
+    (void)height;
+#endif
+}
+
+void Overlay::BuildFrame(std::uint32_t width, std::uint32_t height, void (*new_frame)()) {
     ImGui::SetCurrentContext(context);
     auto& io = ImGui::GetIO();
     io.DisplaySize = {static_cast<float>(width), static_cast<float>(height)};
@@ -577,7 +618,7 @@ void Overlay::Draw(VkCommandBuffer command, std::uint32_t width, std::uint32_t h
     ImGui::GetStyle().ScaleAllSizes(scale);
     io.FontGlobalScale = 24.f * scale / font_size;
 
-    ImGui_ImplVulkan_NewFrame();
+    new_frame();
     ImGui::NewFrame();
     const bool launching = launcher_active.load();   // the launcher: no game behind the menu
     if (!launching) {
@@ -597,7 +638,6 @@ void Overlay::Draw(VkCommandBuffer command, std::uint32_t width, std::uint32_t h
     }
     was_visible = show;
     ImGui::Render();
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), command);
 }
 
 void Overlay::DrawHint(float scale, float width, float height) {
@@ -1353,6 +1393,27 @@ void Overlay::DrawMenu(float scale, bool appearing) {
                 } else {
                     Note("Texture pack images are shrunk as they load, never below the game's own size: less graphics "
                          "memory and less to upload, for graphics with 2 GB or less. Applies when the game starts.");
+                }
+                if (e.renderer_option) {
+                    row("Graphics API");
+                    static constexpr std::array<const char*, 3> apis{"Automatic", "Vulkan", "OpenGL"};
+                    if (ImGui::Combo("##renderer", &e.renderer, apis.data(), static_cast<int>(apis.size()))) {
+                        emulator_changed = true;
+                    }
+                    if (!l.active && e.renderer != e.renderer_running) {
+                        ImGui::TextColored({.53f, .89f, .6f, 1.f}, "Restart the game to use it.");
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Restart now##renderer")) {
+                            Act(OverlayAction::Kind::Restart);
+                            SetVisible(false);
+                        }
+                    } else {
+                        Note(e.renderer_active == 2
+                                 ? "In use: OpenGL, for graphics without Vulkan 1.3 (no HDR with it). Automatic uses "
+                                   "Vulkan where it can."
+                                 : "Automatic uses Vulkan where the graphics have Vulkan 1.3, else OpenGL 3.3 (no HDR "
+                                   "with it).");
+                    }
                 }
             }
             end_tab_item();

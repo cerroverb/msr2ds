@@ -645,7 +645,8 @@ void gsp_handle(KThread *t, uint32_t *cmd, KObject *s) {
                     if ((rd32(c) & 0xff) == 1 && rd32(c + 8) > big) big = rd32(c + 8);
                 }
             }
-            static int inl = -1; if (inl < 0) inl = getenv("PWR_GX_NO_INLINE") == NULL;
+            /* (not with OpenGL: its renderer's context is the GX worker's alone, pica_gl.c) */
+            static int inl = -1; if (inl < 0) inl = getenv("PWR_GX_NO_INLINE") == NULL && !video_gl();
             int here = inl && sync_max && nq && big <= sync_max && !gx_busy;
             if (!here) { gx_pending = 1; pthread_cond_signal(&gx_wake); }
             else gxl_trig = 0;

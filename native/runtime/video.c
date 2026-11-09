@@ -17,7 +17,11 @@
  * Filters: nearest, linear, sharp bilinear, FXAA (present.frag), FSR 1 = AMD FidelityFX EASU upscale into a per-screen image
  * of the output size, then RCAS sharpening into the window (fsr_easu/fsr_rcas.frag, shaders/fsr/, MIT). F1 or Select opens
  * the settings overlay: the emulator-based build's menu (src/msr/overlay.cpp through msr/overlay_host.cpp), drawn last in
- * the presentation pass; 3D resolution and anisotropic filtering are passed to pica_vk.c. */
+ * the presentation pass; 3D resolution and anisotropic filtering are passed to pica_vk.c.
+ *
+ * OpenGL (MSR_OPENGL, video_gl.c) presents instead with --renderer=opengl, and with --renderer=auto (the default) where
+ * Vulkan has no 1.3 device for the window: everything above but the drawing, which video_gl.c does with the same
+ * shaders. The 3D then runs on the CPU (pica_sw.c). */
 #include "gpu.h"
 #include "input.h"
 #include "msr/msr.h"
@@ -27,6 +31,9 @@
 #include <vulkan/vulkan.h>
 #include "msr/overlay_host.h"
 #include "vk_push.h"
+#ifdef MSR_OPENGL
+#include "video_gl.h"
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,10 +79,11 @@ static VkFence fence;
 static uint8_t top_px[TOP_W * SCR_H * 4], bot_px[BOT_W * SCR_H * 4];
 static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;   /* the queue is shared with the PICA renderer */
 static int vk13;
+static int use_gl;   /* presenting with OpenGL (video_gl.c), not Vulkan */
 unsigned g_vid_acquire_fail, g_vid_present_fail, g_vid_presented; int g_vid_last_err;
 
-/* why video_init failed, for the message the player sees (video_explain) */
-static char init_error[256];
+/* why video_init failed, for the message the player sees (video_explain): Vulkan's reason, OpenGL's */
+static char init_error[256], gl_error[256];
 #define VK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { fprintf(stderr, "video: %s failed (%d)\n", #x, r_); \
     snprintf(init_error, sizeof init_error, "%s failed (%d)", #x, (int)r_); return -1; } } while (0)
 
@@ -86,6 +94,9 @@ enum { F_NEAREST, F_LINEAR, F_SHARP, F_FSR, F_FXAA, F_COUNT };
 static const char *filter_names[F_COUNT] = { "nearest", "linear", "sharp", "fsr", "fxaa" };
 static const char *aspect_names[3] = { "keep", "integer", "stretch" };
 static const char *fs_names[3] = { "off", "borderless", "exclusive" };
+enum { R_AUTO, R_VULKAN, R_OPENGL };
+static const char *renderer_names[3] = { "auto", "vulkan", "opengl" };
+static int opt_renderer = R_AUTO;   /* the graphics API (video_init): auto = Vulkan with 1.3, else OpenGL, else Vulkan without 1.3 */
 static int opt_layout = L_STACKED, opt_filter = F_NEAREST, opt_aspect = 0, opt_fs = 0, opt_auto_gameplay = L_LARGE;
 static int opt_res = 1, opt_aniso = 1, opt_fps = 0, opt_vsync = 1, opt_res_match = 0; static float opt_sharp = 0.25f;
 static int opt_select_layout = 2;   /* the gamepad's Back/Select button: 0 3DS Select, 1 the next screen layout, 2 these settings (F1),
@@ -103,6 +114,7 @@ int video_option(const char *name, const char *value) {
     else if (!strcmp(name, "aspect") && (i = pick(value, aspect_names, 3)) >= 0) opt_aspect = i;
     else if (!strcmp(name, "fullscreen") && (i = pick(value, fs_names, 3)) >= 0) { opt_fs = i; if (i) fs_last = i; }
     else if (!strcmp(name, "auto_gameplay") && (i = pick(value, layout_names, L_AUTO)) >= 0) opt_auto_gameplay = i;
+    else if (!strcmp(name, "renderer") && (i = pick(value, renderer_names, 3)) >= 0) opt_renderer = i;
     else if (!strcmp(name, "window_aspect")) {
         float a = 0, b = 1; if ((sscanf(value, "%f:%f", &a, &b) < 1) || b <= 0 || a / b < 1.f || a / b > 4.f) return -1;
         opt_window_aspect = a / b;
@@ -127,6 +139,14 @@ static void apply_fullscreen(void) {
     return;   /* always the whole screen there (video_init) */
 #endif
     SDL_SetWindowFullscreen(win, opt_fs == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP : opt_fs == 2 ? SDL_WINDOW_FULLSCREEN : 0);
+}
+
+/* the window's size in pixels (larger than its size in window coordinates on a Retina display) */
+static void drawable_size(int *w, int *h) {
+#ifdef MSR_OPENGL
+    if (use_gl) { SDL_GL_GetDrawableSize(win, w, h); return; }
+#endif
+    SDL_Vulkan_GetDrawableSize(win, w, h);
 }
 
 /* ---------------- layouts ---------------- */
@@ -354,9 +374,11 @@ static VkPresentModeKHR present_mode(void) {
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 /* the frame rate (also while playing: the overlay's Frame rate) */
+static void gl_interval(void);
 void video_set_fps(int fps) {
     int before = swap ? (int)present_mode() : -1;
     target_fps = fps;
+    gl_interval();
     if (swap && before != (int)present_mode()) recreate_swapchain();
 }
 
@@ -499,33 +521,35 @@ void video_explain(const char *log) {
     char text[1536];
     snprintf(text, sizeof text,
              "msr-native could not open its window: it needs a graphics driver\n"
+#ifdef MSR_OPENGL
+             "with Vulkan or OpenGL 3.3, and this computer has none that can show one.\n\n"
+#else
              "with Vulkan, and this computer has none that can show one.\n\n"
+#endif
 #ifdef _WIN32
-             "Update the graphics driver from AMD, NVIDIA or Intel. Some older\n"
-             "graphics have no Vulkan driver for Windows at all (Intel's before its\n"
-             "6th-generation processors, for example), and msr-native cannot run on them.\n\n"
+             "Update the graphics driver from AMD, NVIDIA or Intel. Graphics older\n"
+             "than OpenGL 3.3 (Intel's before its 3rd-generation processors, for\n"
+             "example) cannot run msr-native.\n\n"
+#elif defined(MSR_OPENGL)
+             "Install your system's Vulkan or OpenGL driver (Mesa's for AMD and\n"
+             "Intel graphics, or NVIDIA's own).\n\n"
 #else
              "Install your system's Vulkan driver (Mesa's for AMD and Intel\n"
              "graphics, or NVIDIA's own).\n\n"
 #endif
-             "Reason: %s\nDetails: %s",
-             init_error[0] ? init_error : "unknown", log && *log ? log : "the log");
+             "Reason: %s%s%s\nDetails: %s",
+             init_error[0] ? init_error : "unknown", gl_error[0] ? "; OpenGL: " : "", gl_error, log && *log ? log : "the log");
     if (win) SDL_HideWindow(win);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "msr-native", text, NULL);
 }
 
-int video_init(int scale) {
-    /* every pad's face buttons by position (A = bottom), as input.c, glyphs.cpp and the settings take them: SDL 2 names a
-       Nintendo pad's by label unless told (its A, on the right, came as SDL's A, the bottom button) */
-    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
-#ifdef __APPLE__
-    /* MoltenVK: its errors only in the log (not its device report, nor a warning for each pipeline that Metal always
-       restarts primitives); MVK_CONFIG_LOG_LEVEL set by the player wins */
-    setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
-#endif
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | (g_input_none ? 0 : SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK))) { fprintf(stderr, "video: SDL_Init: %s\n", SDL_GetError()); return -1; }
-    static const int cw[L_COUNT] = { TOP_W, TOP_W + BOT_W, TOP_W + BOT_W / 2, TOP_W, BOT_W, 0, TOP_W }, chh[L_COUNT] = { 2 * SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, 2 * SCR_H };
-    int win_w = opt_layout == L_SINGLE ? (int)lroundf(SCR_H * scale * opt_window_aspect) : cw[opt_layout] * scale;   /* single: 16:9 (1280x720 at 3) */
+/* Vulkan: the window, the instance, the device and the presenter. probe (--renderer=auto): a device without Vulkan 1.3
+   returns 1 before the device is made, for OpenGL to try. 0 ok, -1 failed; vk_close then closes what was opened.
+   PWR_NO_VULKAN=1 acts as if there were no Vulkan, =13 as if its device had no 1.3 (the Vulkan loader ignores its own
+   VK_DRIVER_FILES in an elevated process, so this tests the fallback there too). */
+static int vk_open(int win_w, int win_h, int probe) {
+    const char *no_vk = getenv("PWR_NO_VULKAN");
+    if (no_vk && !strcmp(no_vk, "1")) { snprintf(init_error, sizeof init_error, "PWR_NO_VULKAN=1"); return -1; }
 #ifdef __ANDROID__
     const Uint32 win_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN;   /* the whole screen, without the system bars */
 #elif defined(__APPLE__)
@@ -534,7 +558,7 @@ int video_init(int scale) {
 #else
     const Uint32 win_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
 #endif
-    win = SDL_CreateWindow("Metroid: Samus Returns", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, chh[opt_layout] * scale, win_flags);
+    win = SDL_CreateWindow("Metroid: Samus Returns", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, win_h, win_flags);
     if (!win) {   /* no Vulkan library at all (vulkan-1.dll comes with the graphics driver) */
         fprintf(stderr, "video: SDL_CreateWindow: %s\n", SDL_GetError());
         snprintf(init_error, sizeof init_error, "%s", SDL_GetError());
@@ -618,7 +642,13 @@ int video_init(int scale) {
         ? (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceFeatures2") : NULL;
     if (pp.apiVersion >= VK_API_VERSION_1_3 && features2) features2(phys, &f2);
     /* push descriptors where the device has them, else descriptor sets in their place (vk_push.c) */
-    vk13 = pp.apiVersion >= VK_API_VERSION_1_3 && f13.dynamicRendering && f13.shaderDemoteToHelperInvocation;
+    vk13 = pp.apiVersion >= VK_API_VERSION_1_3 && f13.dynamicRendering && f13.shaderDemoteToHelperInvocation && !(no_vk && !strcmp(no_vk, "13"));
+    if (probe && !vk13) {   /* OpenGL first (video_init) */
+        fprintf(stderr, "video: Vulkan %u.%u without 1.3's dynamic rendering (%d) and demote to helper (%d): trying OpenGL\n",
+                VK_API_VERSION_MAJOR(pp.apiVersion), VK_API_VERSION_MINOR(pp.apiVersion), (int)f13.dynamicRendering, (int)f13.shaderDemoteToHelperInvocation);
+        snprintf(init_error, sizeof init_error, "Vulkan %u.%u, without 1.3", VK_API_VERSION_MAJOR(pp.apiVersion), VK_API_VERSION_MINOR(pp.apiVersion));
+        return 1;
+    }
     VkPhysicalDeviceVulkan13Features en13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = VK_TRUE, .shaderDemoteToHelperInvocation = VK_TRUE };
     VkPhysicalDeviceFeatures2 en2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &en13 };
     en2.features.samplerAnisotropy = f2.features.samplerAnisotropy;   /* pica_vk.c: anisotropic filtering option */
@@ -659,7 +689,90 @@ int video_init(int scale) {
         msr_overlay_vk_init(inst, phys, dev, qfam, queue, target_fmt, sc_count);
         pthread_mutex_unlock(&queue_lock);
     }
+    fprintf(stderr, "video: presenting with Vulkan\n");
     return 0;
+}
+/* what vk_open opened, so that OpenGL can have the window. Past the device (rare: a failure making the swapchain or the
+   presenter), the device and the instance are left as they are, unused. */
+static void vk_close(void) {
+    if (dev) { vkDeviceWaitIdle(dev); if (swap) vkDestroySwapchainKHR(dev, swap, NULL); }
+    if (surf) vkDestroySurfaceKHR(inst, surf, NULL);
+    if (inst && !dev) vkDestroyInstance(inst, NULL);
+    if (win) SDL_DestroyWindow(win);
+    win = NULL; swap = VK_NULL_HANDLE; surf = VK_NULL_HANDLE; inst = VK_NULL_HANDLE; dev = VK_NULL_HANDLE; phys = VK_NULL_HANDLE;
+    gpu_ok = vk13 = 0;
+}
+
+/* OpenGL (video_gl.c): the game's frames are shown without waiting for the display. main.c already paces them (VBlank
+   2 ms before each of the display's vblanks), and a swap that waited held up the PICA renderer's context on the GX worker:
+   on NVIDIA each write-back waited for the next vblank (7 FPS on the title screen; 27 without the wait, nothing else
+   changed). A composited desktop (Windows' DWM) does not tear; exclusive fullscreen can. The launcher, which draws no 3D,
+   waits with V-Sync as Vulkan's FIFO does. */
+static void gl_interval(void) {
+#ifdef MSR_OPENGL
+    if (use_gl) vgl_swap_interval(opt_vsync && target_fps <= 60 && msr_overlay_launcher_mode() ? 1 : 0);
+#endif
+}
+#ifdef MSR_OPENGL
+static int gl_open(int win_w, int win_h) {
+    SDL_GL_ResetAttributes();
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    if (getenv("PWR_GL_DEBUG")) SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 0);
+    win = SDL_CreateWindow("Metroid: Samus Returns", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, win_h, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    if (!win) { snprintf(gl_error, sizeof gl_error, "%s", SDL_GetError()); fprintf(stderr, "video: OpenGL window: %s\n", gl_error); return -1; }
+    SDL_SetWindowMinimumSize(win, BOT_W, SCR_H);
+    if (opt_fs) apply_fullscreen();
+    if (vgl_init(win, gl_error, sizeof gl_error)) { fprintf(stderr, "video: OpenGL: %s\n", gl_error); return -1; }
+    use_gl = 1;
+    gl_interval();
+    msr_overlay_hdr(0, disp_peak, disp_paper);   /* no HDR output with OpenGL */
+    if (opt_res_match) { int w, h; drawable_size(&w, &h); match_resolution(w, h); }   /* --resolution=0 */
+    fprintf(stderr, "video: presenting with OpenGL\n");
+    return 0;
+}
+static void gl_close(void) {
+    vgl_shutdown();
+    if (win) SDL_DestroyWindow(win);
+    win = NULL; use_gl = 0;
+}
+#endif
+
+int video_init(int scale) {
+    /* every pad's face buttons by position (A = bottom), as input.c, glyphs.cpp and the settings take them: SDL 2 names a
+       Nintendo pad's by label unless told (its A, on the right, came as SDL's A, the bottom button) */
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
+#ifdef __APPLE__
+    /* MoltenVK: its errors only in the log (not its device report, nor a warning for each pipeline that Metal always
+       restarts primitives); MVK_CONFIG_LOG_LEVEL set by the player wins */
+    setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
+#endif
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | (g_input_none ? 0 : SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK))) { fprintf(stderr, "video: SDL_Init: %s\n", SDL_GetError()); return -1; }
+    static const int cw[L_COUNT] = { TOP_W, TOP_W + BOT_W, TOP_W + BOT_W / 2, TOP_W, BOT_W, 0, TOP_W }, chh[L_COUNT] = { 2 * SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, 2 * SCR_H };
+    const int win_w = opt_layout == L_SINGLE ? (int)lroundf(SCR_H * scale * opt_window_aspect) : cw[opt_layout] * scale;   /* single: 16:9 (1280x720 at 3) */
+    const int win_h = chh[opt_layout] * scale;
+    /* auto: Vulkan where it has 1.3, else OpenGL, else Vulkan without 1.3 (its presenter scales on the CPU) */
+    int vk = -1;
+#ifdef MSR_OPENGL
+    if (opt_renderer != R_OPENGL) {
+        if (!(vk = vk_open(win_w, win_h, opt_renderer == R_AUTO))) return 0;
+        vk_close();
+        if (opt_renderer == R_VULKAN) return -1;
+    }
+    if (!gl_open(win_w, win_h)) return 0;
+    gl_close();
+    if (vk == 1) { if (!vk_open(win_w, win_h, 0)) return 0; vk_close(); }
+    return -1;
+#else
+    if (opt_renderer == R_OPENGL) fprintf(stderr, "video: no OpenGL in this build: Vulkan\n");
+    if (!(vk = vk_open(win_w, win_h, 0))) return 0;
+    vk_close();
+    return -1;
+#endif
 }
 
 /* LCD framebuffers are rotated: each line holds 240 pixels running bottom-to-top of one screen column */
@@ -716,9 +829,10 @@ static void fill(uint8_t *px, int pw, int x0, int y0, int w, int h, uint32_t rgb
 
 void video_set_fullscreen(int on) { opt_fs = on ? fs_last : 0; apply_fullscreen(); }
 /* the launcher (msr/launcher.cpp): its window hides while the game runs; the file dialog's owner */
+int video_gl(void) { return use_gl; }
 void video_show(int on) { if (!win) return; if (on) { SDL_ShowWindow(win); SDL_RaiseWindow(win); } else SDL_HideWindow(win); }
 SDL_Window *video_window(void) { return win; }
-void video_set_vsync(int on) { opt_vsync = on != 0; if (swap) recreate_swapchain(); }
+void video_set_vsync(int on) { opt_vsync = on != 0; gl_interval(); if (swap) recreate_swapchain(); }
 /* the 3D resolution: 1..10, or 0 to follow the window: the 240-line multiple nearest the top screen's height as shown
    (FSR takes the rest). By the window's whole height, rounded up, a 1280x800 Steam Deck got 4x: 1600x960 drawn for a
    view of 720 lines (16:9) or 768 (the 3DS's 5:3); 3x now. */
@@ -730,7 +844,7 @@ static void match_resolution(int drawable_w, int drawable_h) {
 }
 void video_set_resolution(int factor) {
     opt_res_match = factor <= 0;
-    if (opt_res_match) { int w, h; SDL_Vulkan_GetDrawableSize(win, &w, &h); match_resolution(w, h); return; }
+    if (opt_res_match) { int w, h; drawable_size(&w, &h); match_resolution(w, h); return; }
     opt_res = factor > 10 ? 10 : factor; pica_vk_quality(opt_res, opt_aniso);
 }
 int video_resolution(void) { return opt_res_match ? 0 : opt_res; }
@@ -980,11 +1094,40 @@ static void mouse_frame(Rect rt) {
 #endif
 }
 
+#ifdef MSR_OPENGL
+/* OpenGL: the frame laid out as the Vulkan path below does it, drawn and presented by video_gl.c */
+static int gl_frame(int dw, int dh, const ScreenSource *top, const ScreenSource *bottom) {
+    if (dw < 1 || dh < 1 || (SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED)) return 1;
+    Rect rt, rb; layout_rects(dw, dh, &rt, &rb);
+    int single = effective_layout() == L_SINGLE; MsrFrame mf = { { 0 }, { 0 }, NULL, 0 };
+    msr_set_single(single);
+    msr_compose(bot_px, now_s(), input_buttons(), (float)dw, (float)dh, &mf);   /* classifies in every layout (the triggers' taps need it) */
+    if (single) { rt = (Rect){ mf.top[0], mf.top[1], mf.top[2], mf.top[3], 1 }; rb.on = 0; }
+    else mf.count = 0;
+    msr_overlay_panel(single ? mf.panel : NULL);   /* the control hints go beside the menus' panel */
+    int ks = dh / 480; ks = ks < 1 ? 1 : ks > UI_KMAX ? UI_KMAX : ks;   /* the layout label's scale: by window height */
+    VglFrame f = { dw, dh, top_px, bot_px, { rt.x, rt.y, rt.w, rt.h, rt.on }, { rb.x, rb.y, rb.w, rb.h, rb.on }, opt_filter, opt_sharp, &mf,
+                   NULL, TOAST_W * ks, TOAST_H * ks, 0 };
+    static int toast_w;   /* the label's pixels are made again when it changes or the scale does */
+    if (toast_text && (toast_dirty || toast_w != f.toast_w)) {
+        fill(toast_px, f.toast_w, 0, 0, f.toast_w, f.toast_h, 0x101820, 210);
+        text(toast_px, f.toast_w, f.toast_h, (f.toast_w - 8 * ks * (int)strlen(toast_text)) / 2, 3 * ks, toast_text, 0xffffff, ks);
+        f.toast = toast_px; toast_dirty = 0; toast_w = f.toast_w;
+    }
+    f.toast_show = toast_w && !msr_overlay_visible() && now_s() < toast_until;
+    f.scan_top = top->valid && (top->format & 7) == 1 ? top->addr : 0;
+    f.scan_bottom = bottom->valid && (bottom->format & 7) == 1 ? bottom->addr : 0;
+    vgl_frame(&f);
+    g_vid_presented++;
+    return 1;
+}
+#endif
+
 int video_frame(void) {
     SDL_Event e; int bottom_click = 0;
     int ww, wh; SDL_GetWindowSize(win, &ww, &wh);
     Rect rt, rb; layout_rects(ww, wh, &rt, &rb);   /* window coordinates for touch; the drawing below uses drawable pixels */
-    int dw0, dh0; SDL_Vulkan_GetDrawableSize(win, &dw0, &dh0);
+    int dw0, dh0; drawable_size(&dw0, &dh0);
     float msx = ww > 0 ? (float)dw0 / (float)ww : 1.f, msy = wh > 0 ? (float)dh0 / (float)wh : 1.f;   /* the overlay's mouse: drawable pixels */
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) return 0;
@@ -1143,8 +1286,19 @@ int video_frame(void) {
 
     ScreenSource top, bottom;
     gsp_screens(&top, &bottom); decode_screen(&top, TOP_W, top_px);
-    /* the bottom screen: from its scan-out copy's read-back when there is one (pica_vk.c: its guest copy is not made then) */
-    if (!(gpu_ok && vk13 && bottom.valid && (bottom.format & 7) == 1 && pica_vk_bottom_pixels(bottom.addr, bot_px))) decode_screen(&bottom, BOT_W, bot_px);
+    /* the bottom screen: from its scan-out copy's read-back when there is one (pica_vk.c, pica_gl.c: its guest copy is not
+       made then) */
+    {
+        int read_back = 0;
+        if (bottom.valid && (bottom.format & 7) == 1) {
+#ifdef MSR_OPENGL
+            if (use_gl) { extern int pica_gl_bottom_pixels(uint32_t addr, uint8_t *out); read_back = pica_gl_bottom_pixels(bottom.addr, bot_px); }
+            else
+#endif
+            read_back = gpu_ok && vk13 && pica_vk_bottom_pixels(bottom.addr, bot_px);
+        }
+        if (!read_back) decode_screen(&bottom, BOT_W, bot_px);
+    }
     {   /* PWR_SEQ=<first presented frame>,<count>[,<every>]: both screens as decoded, one PPM pair per presented frame
            (or every <every>th of them) */
         static long first = -2, count, every = 1; static long n;
@@ -1168,14 +1322,17 @@ int video_frame(void) {
     }
 
     /* window resized or swapchain lost: rebuild before drawing */
-    static int last_dw = -1, last_dh = -1; int dw, dh; SDL_Vulkan_GetDrawableSize(win, &dw, &dh);
-    if (last_dw >= 0 && (dw != last_dw || dh != last_dh)) { if (recreate_swapchain()) return 0; if (opt_res_match) match_resolution(dw, dh); }
+    static int last_dw = -1, last_dh = -1; int dw, dh; drawable_size(&dw, &dh);
+    if (last_dw >= 0 && (dw != last_dw || dh != last_dh)) { if (!use_gl && recreate_swapchain()) return 0; if (opt_res_match) match_resolution(dw, dh); }
     last_dw = dw; last_dh = dh;
     msr_overlay_frame();   /* the settings overlay's actions: before an image is acquired, as V-Sync rebuilds the swapchain */
     {   /* save states: "Saved", "Loaded"... where the layout label goes */
         const char *m = msr_state_message();
         if (m) { static char shown[64]; snprintf(shown, sizeof shown, "%s", m); toast_text = shown; toast_until = now_s() + 2.0; toast_dirty = 1; }
     }
+#ifdef MSR_OPENGL
+    if (use_gl) return gl_frame(dw, dh, &top, &bottom);
+#endif
     {   /* HDR: the display's state when the settings open (Windows' "Use HDR" may have changed), the player's setting */
         static int was_visible; int vis = msr_overlay_visible();
         if (vis && !was_visible) hdr_detect();
@@ -1313,5 +1470,8 @@ void video_queue_unlock(void) { pthread_mutex_unlock(&queue_lock); }
 
 void video_shutdown(void) {
     if (dev) { pthread_mutex_lock(&queue_lock); vkDeviceWaitIdle(dev); pthread_mutex_unlock(&queue_lock); if (gpu_ok) msr_overlay_shutdown(); }
+#ifdef MSR_OPENGL
+    if (use_gl) vgl_shutdown();
+#endif
     SDL_Quit();
 }
