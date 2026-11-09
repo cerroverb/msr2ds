@@ -1989,6 +1989,10 @@ bool StartGame() {
                                   power_saving ? "--power-saving=on" : "--power-saving=off"};
     if (fullscreen) args.push_back("--fullscreen=borderless");
     if (!vsync) args.push_back("--vsync=off");
+    {   // the graphics API: auto (Vulkan with 1.3, else OpenGL), vulkan or opengl (video.c)
+        const std::string renderer = file.String("native", "renderer", "auto");
+        if (renderer == "vulkan" || renderer == "opengl") args.push_back("--renderer=" + renderer);
+    }
 #ifdef __ANDROID__
     {   // the app again, as the game (main.c logs to user/msr-native.log there); this process ends
         std::fprintf(stderr, "launcher: starting the game\n");
@@ -2192,8 +2196,9 @@ int Launcher() {
     ReadGame();
     CheckCode();
     video_option("layout", "single");
+    video_option("renderer", file.String("native", "renderer", "auto").c_str());   // the launcher's window too
     if (video_init(3)) {
-        std::fprintf(stderr, "launcher: no window (a Vulkan device is needed)\n");
+        std::fprintf(stderr, "launcher: no window (Vulkan or OpenGL 3.3 is needed)\n");
         video_explain(Utf8(S.user / "launcher.log").c_str());
         return 1;
     }

@@ -9,7 +9,9 @@
  * Compiles run on background threads (2026-11-02: one took 250-360 ms with the optimizer, 11-22 ms without, and the
  * game froze for it the first time an effect such as a shot appeared): the GLSL is generated on the GX thread (it reads
  * the registers), the draw uses the interpreter until the module is ready. Unoptimized SPIR-V (level 0): the driver
- * optimizes it anyway. PWR_VSGEN_SYNC=1 compiles on the spot as before, PWR_VSGEN_OPT=<0-2> sets the level. */
+ * optimizes it anyway. PWR_VSGEN_SYNC=1 compiles on the spot as before, PWR_VSGEN_OPT=<0-2> sets the level.
+ * The OpenGL renderer (pica_gl.c) takes the same translation as GLSL 3.30 text (pica_vsgen_glsl) and compiles it itself:
+ * the raw attribute bytes are a texture buffer there, read from word d.perm.w on. */
 #include "pica_int.h"
 #include <vulkan/vulkan.h>
 #ifdef _WIN32
@@ -170,27 +172,35 @@ static void emit_arith(uint32_t ins) {
 
 static int is_flow(uint32_t op) { return op >= 0x20 && op < 0x2e; }
 
-/* the GLSL before main(): uniforms, the attribute fetch, PICA arithmetic */
+/* the GLSL before main(): uniforms, the attribute fetch, PICA arithmetic. gl_clip_z: for OpenGL (pica_vsgen_glsl), the
+   body of its CLIP_Z(z, w) (pica.vert) */
+static const char *gl_clip_z;
 static void emit_header(void) {
-    emit("#version 450\n"
-         "layout(set = 0, binding = 5, std140) uniform VsDraw { vec4 c[96]; uvec4 ib; uvec4 iu; uvec4 perm; uvec4 omap[2]; uvec4 fa[12]; vec4 fdef[12]; vec4 xf; } d;\n"
-         "layout(set = 0, binding = 7, std430) readonly buffer Raw { uint raw[]; };\n"
-         /* attribute a: d.fa[a] = (byte offset of vertex 0, stride, type | count << 4 | 0x100 when read from raw); else
+    if (gl_clip_z)
+        emit("#version 330 core\n#define CLIP_Z(z, w) %s\n#define gl_VertexIndex gl_VertexID\n"
+             "layout(std140) uniform VsDraw { vec4 c[96]; uvec4 ib; uvec4 iu; uvec4 perm; uvec4 omap[2]; uvec4 fa[12]; vec4 fdef[12]; vec4 xf; } d;\n"
+             "uniform usamplerBuffer raw_buf;\n#define RAW(i) texelFetch(raw_buf, int(i) + int(d.perm.w)).r\n", gl_clip_z);
+    else
+        emit("#version 450\n"
+             "layout(set = 0, binding = 5, std140) uniform VsDraw { vec4 c[96]; uvec4 ib; uvec4 iu; uvec4 perm; uvec4 omap[2]; uvec4 fa[12]; vec4 fdef[12]; vec4 xf; } d;\n"
+             "layout(set = 0, binding = 7, std430) readonly buffer Raw { uint raw[]; };\n#define RAW(i) raw[i]\n");
+    emit(/* attribute a: d.fa[a] = (byte offset of vertex 0, stride, type | count << 4 | 0x100 when read from raw); else
             the default d.fdef[a]. Types as the PICA loaders: 0 s8, 1 u8, 2 s16, 3 f32 (pica_vk.c fills these) */
-         "uint rb(uint a) { return (raw[a >> 2] >> ((a & 3u) * 8u)) & 0xffu; }\n"
+         "uint rb(uint a) { return (RAW(a >> 2) >> ((a & 3u) * 8u)) & 0xffu; }\n"
          "vec4 fetch(uint a) {\n"
          "  uvec4 f = d.fa[a]; if ((f.z & 0x100u) == 0u) return d.fdef[a];\n"
          "  uint p = f.x + uint(gl_VertexIndex) * f.y, t = f.z & 3u, n = (f.z >> 4) & 7u; vec4 v = vec4(0, 0, 0, 1);\n"
          "  for (uint k = 0u; k < n; k++) {\n"
-         "    if (t == 3u) v[k] = uintBitsToFloat(raw[(p >> 2) + k]);\n"
-         "    else if (t == 2u) { uint q = p + 2u * k; v[k] = float(int(((raw[q >> 2] >> ((q & 2u) * 8u)) & 0xffffu) << 16) >> 16); }\n"
+         "    if (t == 3u) v[k] = uintBitsToFloat(RAW((p >> 2) + k));\n"
+         "    else if (t == 2u) { uint q = p + 2u * k; v[k] = float(int(((RAW(q >> 2) >> ((q & 2u) * 8u)) & 0xffffu) << 16) >> 16); }\n"
          "    else { uint b = rb(p + k); v[k] = t == 0u ? float(int(b << 24) >> 24) : float(b); }\n"
          "  }\n"
          "  return v;\n"
-         "}\n"
-         "layout(location = 0) out vec4 v_col; layout(location = 1) out vec4 v_uv01; layout(location = 2) out vec3 v_uv2tw;\n"
-         "layout(location = 3) out vec4 v_quat; layout(location = 4) out vec3 v_view;\n"
-         "float pmul(float a, float b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }\n"
+         "}\n");
+    if (gl_clip_z) emit("out vec4 v_col; out vec4 v_uv01; out vec3 v_uv2tw; out vec4 v_quat; out vec3 v_view;\n");
+    else emit("layout(location = 0) out vec4 v_col; layout(location = 1) out vec4 v_uv01; layout(location = 2) out vec3 v_uv2tw;\n"
+              "layout(location = 3) out vec4 v_quat; layout(location = 4) out vec3 v_view;\n");
+    emit("float pmul(float a, float b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }\n"
          "vec4 pmul4(vec4 a, vec4 b) { return vec4(pmul(a.x, b.x), pmul(a.y, b.y), pmul(a.z, b.z), pmul(a.w, b.w)); }\n"
          "float dp3(vec4 a, vec4 b) { return pmul(a.x, b.x) + pmul(a.y, b.y) + pmul(a.z, b.z); }\n"
          "float dp4(vec4 a, vec4 b) { return dp3(a, b) + pmul(a.w, b.w); }\n"
@@ -213,7 +223,8 @@ static void emit_outputs(void) {
         for (int c = 0; c < 4; c++) { uint32_t se = (m >> (8 * c)) & 0x1f; if (se < 24) snprintf(sem[se], sizeof sem[se], "o%u.%c", i, comp[c]); }
         o++;
     }
-    emit("  gl_Position = vec4((%s) * d.xf.x, (%s) * d.xf.y, -(%s), %s);\n", sem[0], sem[1], sem[2], sem[3]);   /* xf: pica_vk.c */
+    if (gl_clip_z) emit("  gl_Position = vec4((%s) * d.xf.x, (%s) * d.xf.y, CLIP_Z(-(%s), %s), %s);\n", sem[0], sem[1], sem[2], sem[3], sem[3]);
+    else emit("  gl_Position = vec4((%s) * d.xf.x, (%s) * d.xf.y, -(%s), %s);\n", sem[0], sem[1], sem[2], sem[3]);   /* xf: pica_vk.c */
     emit("  v_col = min(abs(vec4(%s, %s, %s, %s)), vec4(1.0));\n", sem[8], sem[9], sem[10], sem[11]);
     emit("  v_uv01 = vec4(%s, %s, %s, %s);\n  v_uv2tw = vec3(%s, %s, %s);\n", sem[12], sem[13], sem[14], sem[15], sem[22], sem[23], sem[16]);
     emit("  v_quat = vec4(%s, %s, %s, %s);\n  v_view = vec3(%s, %s, %s);\n}\n", sem[4], sem[5], sem[6], sem[7], sem[18], sem[19], sem[20]);
@@ -540,10 +551,8 @@ static void vs_enqueue(VkDevice dev, uint64_t key, const char *glsl, size_t len)
 static uint32_t prog_hash_version = UINT32_MAX; static uint64_t prog_hash;
 static uint64_t mix(uint64_t h, uint64_t v) { h ^= v; h *= 0x100000001B3ull; h ^= h >> 31; return h; }
 
-/* specialized module for the current registers, VK_NULL_HANDLE when unavailable or still compiling (the caller uses
-   the interpreter) */
-VkShaderModule pica_vsgen_module(VkDevice dev) {
-    if (!shaderc_load()) return VK_NULL_HANDLE;
+/* the translation's key for the current registers: the program, swizzles, entry point, permutation and output map */
+uint64_t pica_vsgen_key(void) {
     if (prog_hash_version != pica_vs_version) {
         uint64_t h = 0xcbf29ce484222325ull;
         for (int i = 0; i < 4096 + 128; i++) h = mix(h, pica_vs_prog[i]);
@@ -551,6 +560,27 @@ VkShaderModule pica_vsgen_module(VkDevice dev) {
     }
     uint64_t key = mix(mix(mix(mix(mix(prog_hash, R(0x2BA) & 0xffff), R(0x2BB)), R(0x2BC)), R(0x2BD)), (uint32_t)(pica_num_attrs() - 1) | (R(0x04F) & 7) << 8);
     for (int i = 0; i < 7; i++) key = mix(key, R(0x050 + i));
+    return key;
+}
+
+/* OpenGL (pica_gl.c): the current registers' translation as GLSL 3.30, with CLIP_Z(z, w) defined as clip_z; 0 ok (the
+   text stays valid until the next call), -1 when it cannot be generated (the interpreter then). GX thread. */
+int pica_vsgen_glsl(const char *clip_z, const char **text, size_t *len) {
+    gl_clip_z = clip_z;
+    const int failed = generate();
+    gl_clip_z = NULL;
+    static int trace = -1; if (trace < 0) trace = getenv("PWR_VSGEN_TRACE") != NULL;
+    if (trace) fprintf(stderr, "vsgen: %016llx %s (OpenGL)\n", (unsigned long long)pica_vsgen_key(), failed ? "not generated" : gen_form);
+    if (failed) return -1;
+    *text = out; *len = olen;
+    return 0;
+}
+
+/* specialized module for the current registers, VK_NULL_HANDLE when unavailable or still compiling (the caller uses
+   the interpreter) */
+VkShaderModule pica_vsgen_module(VkDevice dev) {
+    if (!shaderc_load()) return VK_NULL_HANDLE;
+    const uint64_t key = pica_vsgen_key();
     static uint64_t last_key; static VkShaderModule last_mod; static int last_ok;   /* consecutive draws mostly share one */
     if (last_ok && key == last_key) return last_mod;
     pthread_mutex_lock(&cache_lock);

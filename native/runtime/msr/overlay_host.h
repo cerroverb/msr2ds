@@ -11,6 +11,10 @@ void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume, in
 /* Once the presenter exists (video.c holds its queue lock): Vulkan and the colour format it draws into */
 void msr_overlay_vk_init(VkInstance instance, VkPhysicalDevice physical, VkDevice device, uint32_t family, VkQueue queue,
                          VkFormat format, uint32_t images);
+/* Or OpenGL's presenter (video_gl.c), its context current: the same menu through Dear ImGui's OpenGL 3 backend, drawn
+   on the window's framebuffer (bound) */
+void msr_overlay_gl_init(void);
+void msr_overlay_gl_draw(uint32_t width, uint32_t height);
 void msr_overlay_shutdown(void);
 /* Each presented frame: msr_overlay_frame before drawing (actions, frame count), msr_overlay_panel with the bottom
    screen's panel (x, y, w, h) or NULL, then msr_overlay_draw inside the presentation's dynamic rendering */

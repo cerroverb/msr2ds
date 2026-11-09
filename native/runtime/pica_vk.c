@@ -38,6 +38,15 @@
 
 #define R(i) pica_regs[i]
 VkShaderModule pica_vsgen_module(VkDevice dev);   /* pica_vsgen.c */
+/* Presenting with OpenGL (video_gl.c), the PICA renderer is pica_gl.c's: the public functions below forward to it */
+#ifdef MSR_OPENGL
+#include "pica_gl.h"
+#define GL_FWD(value) do { if (pica_gl_on()) return value; } while (0)
+#define GL_FWD_VOID(call) do { if (pica_gl_on()) { call; return; } } while (0)
+#else
+#define GL_FWD(value) ((void)0)
+#define GL_FWD_VOID(call) ((void)0)
+#endif
 
 int video_vk(VkPhysicalDevice *p, VkDevice *d, VkQueue *q, uint32_t *family);
 void video_queue_lock(void);
@@ -284,6 +293,7 @@ static void decode_px(const Surf *s, const uint8_t *p, uint8_t *o) {
 
 /* GX MemoryFill over exactly a known target: the next batch clears the image on the GPU instead of uploading */
 void pica_vk_filled(uint32_t start, uint32_t end) {
+    GL_FWD_VOID(pica_gl_filled(start, end));
     if (state != 1) return;
     if (vtrace) fprintf(stderr, "vk: fill %08x-%08x\n", start, end);
     for (int i = 0; i < nsurf; i++) {
@@ -455,15 +465,17 @@ static int aliases_touch(uint32_t start, uint32_t end);
 static void aliases_writeback(uint32_t start, uint32_t end, int can_flush);
 /* gsp.c: a GX command (or the CPU, at the VBlank tick) is about to read or write these guest bytes *//* gsp.c: a GX command (or the CPU, at the VBlank tick) is about to read or write these guest bytes */
 void pica_vk_sync_range(uint32_t start, uint32_t end) {
+    GL_FWD_VOID(pica_gl_sync_range(start, end));
     if (state != 1) return;
     wb_why = 1;
     if (aliases_touch(start, end)) aliases_writeback(start, end, 1);
     wb_complete_range(start, end, NULL);
     wb_why = 0;
 }
-void pica_vk_sync_all(void) { if (state != 1) return; aliases_writeback(0, 0xFFFFFFFFu, 1); if (pending_any()) wb_complete_range(0, 0xFFFFFFFFu, NULL); }
+void pica_vk_sync_all(void) { GL_FWD_VOID(pica_gl_sync_all()); if (state != 1) return; aliases_writeback(0, 0xFFFFFFFFu, 1); if (pending_any()) wb_complete_range(0, 0xFFFFFFFFu, NULL); }
 /* the VBlank tick: the downloads whose batches have finished land; nothing waits for the GPU */
 void pica_vk_sync_ready(void) {
+    GL_FWD_VOID(pica_gl_sync_ready());
     if (state != 1) return;
     for (int i = 0; i < nsurf; i++) {
         Surf *s = &surfs[i];
@@ -472,6 +484,7 @@ void pica_vk_sync_ready(void) {
 }
 void pica_vk_alias_discard(uint32_t start, uint32_t end);
 void pica_vk_discard_range(uint32_t start, uint32_t end) {   /* a fill over the whole target: its download is not needed */
+    GL_FWD_VOID(pica_gl_discard_range(start, end));
     if (state != 1) return;
     pica_vk_alias_discard(start, end);
     for (int i = 0; i < nsurf; i++) { Surf *s = &surfs[i]; if (s->wb_pending && s->addr >= start && s->addr + surf_size(s) <= end) s->wb_pending = 0; }
@@ -629,6 +642,7 @@ static void aliases_writeback(uint32_t start, uint32_t end, int can_flush) {
 }
 /* gsp.c: a GX operation overwrites these bytes: the GPU-only textures wholly inside need never get their bytes */
 void pica_vk_alias_discard(uint32_t start, uint32_t end) {
+    GL_FWD_VOID(pica_gl_alias_discard(start, end));
     if (state != 1) return;
     for (int i = 0; i < MAX_ALIAS; i++) { CopyAlias *a = &aliases[i]; if (a->deferred && a->addr >= start && a->addr + a->span <= end) a->deferred = 0; }
 }
@@ -636,6 +650,7 @@ static void aliases_drop(void) { for (int i = 0; i < MAX_ALIAS; i++) { if (alias
 
 int pica_vk_texture_copy(uint32_t in, uint32_t out, uint32_t size, uint32_t in_line, uint32_t out_line) {
     static int off = -1; if (off < 0) off = getenv("PWR_VK_NO_GPUCOPY") != NULL;   /* A/B: the CPU copies as before */
+    GL_FWD(pica_gl_texture_copy(in, out, size, in_line, out_line));
     if (state != 1 || off) return 0;
     for (int i = 0; i < MAX_ALIAS; i++) if (aliases[i].valid && aliases[i].addr < out + size && out < aliases[i].addr + aliases[i].span) aliases[i].valid = 0;
     Surf *s = NULL;
@@ -680,6 +695,7 @@ int pica_vk_texture_copy(uint32_t in, uint32_t out, uint32_t size, uint32_t in_l
    1 when done here. */
 int pica_vk_transfer_gpu(uint32_t in, uint32_t out, uint32_t in_dim, uint32_t out_dim, uint32_t flags) {
     static int off = -1; if (off < 0) off = getenv("PWR_VK_NO_GPUCOPY") != NULL;   /* A/B: the CPU copies as before */
+    GL_FWD(pica_gl_transfer_gpu(in, out, in_dim, out_dim, flags));
     if (state != 1 || off) return 0;
     uint32_t iw = in_dim & 0xffff, ih = in_dim >> 16, ow = (out_dim & 0xffff) / 2, oh = (out_dim >> 16) / 2;
     /* scale 2x2, both sides tiled (bit 5 with bit 1 clear), RGBA8 to RGBA8, no flip */
@@ -917,7 +933,12 @@ static VkImageView tex_get_(int unit, int *full) {
 
 /* ---------------- samplers / pipelines ---------------- */
 static VkSampler samplers[1 << 16];
-void pica_vk_quality(int resolution, int aniso) { q_res = resolution < 1 ? 1 : resolution > 10 ? 10 : resolution; q_aniso = aniso < 1 ? 1 : aniso; }
+void pica_vk_quality(int resolution, int aniso) {
+    q_res = resolution < 1 ? 1 : resolution > 10 ? 10 : resolution; q_aniso = aniso < 1 ? 1 : aniso;
+#ifdef MSR_OPENGL
+    pica_gl_quality(resolution, aniso);
+#endif
+}
 static VkSampler sampler_for(int unit) {
     static const int parr[3] = { 0x083, 0x093, 0x09B };
     uint32_t par = R(parr[unit]);
@@ -970,7 +991,7 @@ static int pipe_hash[2 * MAX_PIPES];   /* open addressing: index + 1 into pipes,
 static VkPipelineCache pcache; static atomic_int pcache_dirty; static double pcache_saved;   /* pwr_pipelines.bin in the working directory */
 static int pq[MAX_PIPES], pq_head, pq_tail; static pthread_mutex_t pq_lock = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t pq_cond = PTHREAD_COND_INITIALIZER;
 static atomic_int pipes_pending;
-int pica_vk_npipes(void) { return npipes; }
+int pica_vk_npipes(void) { GL_FWD(pica_gl_programs()); return npipes; }
 static uint32_t pkey_hash(const PKey *k) { const uint8_t *b = (const uint8_t *)k; uint32_t h = 2166136261u; for (size_t i = 0; i < sizeof *k; i++) h = (h ^ b[i]) * 16777619u; return h; }
 static VkBlendFactor bf(uint32_t f) {
     static const VkBlendFactor t[15] = { VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR,
@@ -1050,7 +1071,12 @@ static void *pipe_worker(void *arg) {
    generator's is dropped and written again. pica_vk_preload(0) (--preload-shaders=off, the launcher's "Preload shaders") or
    PWR_NO_PRELOAD=1 leaves this out, and the file is left as it is. */
 static int preload_on = 1; static atomic_int seed_dirty;
-void pica_vk_preload(int on) { preload_on = on; }
+void pica_vk_preload(int on) {
+    preload_on = on;
+#ifdef MSR_OPENGL
+    pica_gl_preload(on);   /* (its program cache too) */
+#endif
+}
 void pica_vk_seed_dirty(void) { atomic_store(&seed_dirty, 1); }
 int pica_vsgen_lookup(VkShaderModule mod, uint64_t *key);
 int pica_vsgen_count(void);
@@ -1142,6 +1168,7 @@ static int saves_start(int seed, int pc) {
 }
 /* at exit: the last saves land before the process ends */
 void pica_vk_saves_wait(void) {
+    GL_FWD_VOID(pica_gl_saves_wait());
     pthread_mutex_lock(&sv_lock);
     while (sv_busy) pthread_cond_wait(&sv_cond, &sv_lock);
     pthread_mutex_unlock(&sv_lock);
@@ -1327,15 +1354,23 @@ static int init(void) {
     return 0;
 }
 
-int pica_vk_gpu_vs(void) { return gpu_vs; }
+int pica_vk_gpu_vs(void) { GL_FWD(pica_gl_gpu_vs()); return gpu_vs; }
 
 int pica_vk_enabled(void) {
     if (state < 0) {
         const char *e = getenv("PWR_RENDERER");
         vtrace = getenv("PWR_VK_TRACE") != NULL;
+#ifdef MSR_OPENGL
+        if (video_gl()) {   /* presenting with OpenGL: its renderer (pica_gl.c), else the software one */
+            state = 0;
+            if (!(e && !strcmp(e, "sw")) && pica_gl_init()) fprintf(stderr, "pica_gl: unavailable, using the software renderer\n");
+            return pica_gl_on();
+        }
+#endif
         state = (e && !strcmp(e, "sw")) ? 0 : init() ? 0 : 1;
         if (!state && !(e && !strcmp(e, "sw"))) fprintf(stderr, "pica_vk: unavailable, using the software renderer\n");
     }
+    GL_FWD(1);
     return state;
 }
 
@@ -1463,7 +1498,7 @@ static void kick(void) {
 }
 
 static void pica_vk_flush_(void);
-void pica_vk_flush(void) { uint64_t t0 = prof_ns(); pica_vk_flush_(); g_prof_flush_ns += prof_ns() - t0; }
+void pica_vk_flush(void) { GL_FWD_VOID(pica_gl_flush()); uint64_t t0 = prof_ns(); pica_vk_flush_(); g_prof_flush_ns += prof_ns() - t0; }
 static void pica_vk_flush_(void) {
     if (!recording) return;
     kick_draws = 0;
@@ -1572,6 +1607,7 @@ static void rescale(void) {
 /* a save state was loaded: every render target and copy is made again from guest memory at its next use (textures are
    checked against guest memory anyway) */
 void pica_vk_state_reset(void) {
+    GL_FWD_VOID(pica_gl_state_reset());
     if (state != 1) return;
     sets_idle();   /* (gsp_quiesce wrote everything back before the state was saved; a loaded state's targets come from guest memory) */
     for (int i = 0; i < nsurf; i++) { surfs[i].wb_pending = 0; img_retire(&surfs[i].im); if (surfs[i].down.img) img_retire(&surfs[i].down); }
@@ -1610,6 +1646,7 @@ static void scanouts_drop(void) {   /* rescale; video.c may have submitted a use
     pthread_mutex_unlock(&scan_lock);
 }
 void pica_vk_gx_reads(uint32_t start, uint32_t end) {   /* a GX operation reads guest bytes in [start, end) */
+    GL_FWD_VOID(pica_gl_gx_reads(start, end));
     if (state != 1) return;
     for (int i = 0; i < nsurf; i++) {
         Surf *s = &surfs[i];
@@ -1619,6 +1656,7 @@ void pica_vk_gx_reads(uint32_t start, uint32_t end) {   /* a GX operation reads 
     }
 }
 void pica_vk_scanout_invalidate(uint32_t start, uint32_t end) {   /* a GX operation wrote guest bytes in [start, end) */
+    GL_FWD_VOID(pica_gl_scanout_invalidate(start, end));
     pthread_mutex_lock(&scan_lock);
     for (int i = 0; i < MAX_SCAN; i++) if (scans[i].valid && start < scans[i].end && scans[i].addr < end) scans[i].valid = 0;
     pthread_mutex_unlock(&scan_lock);
@@ -1626,6 +1664,7 @@ void pica_vk_scanout_invalidate(uint32_t start, uint32_t end) {   /* a GX operat
 /* the outputs of scaled (downscaling) DisplayTransfers: Samus Returns' bloom and light-shaft chains (bloom_scale) */
 static uint32_t bloom_out[8]; static int nbloom_out;
 int pica_vk_display_transfer(uint32_t in, uint32_t out, uint32_t in_dim, uint32_t out_dim, uint32_t flags) {
+    GL_FWD(pica_gl_display_transfer(in, out, in_dim, out_dim, flags));
     msr_bottom_frame();
     if ((flags >> 24) & 3) { int k = 0; for (; k < nbloom_out && bloom_out[k] != out; k++) {} if (k == nbloom_out && nbloom_out < 8) bloom_out[nbloom_out++] = out; }   /* a frame was finished: the next bottom-screen draw starts one */
     uint32_t iw = in_dim & 0xffff, ih = in_dim >> 16, ow = out_dim & 0xffff, oh = out_dim >> 16;
@@ -1878,6 +1917,7 @@ static void pica_vk_draw_(const Vtx *vcache, const uint32_t *vlist_index, const 
                   const uint32_t *slots, uint32_t n, int topo);
 void pica_vk_draw(const Vtx *vcache, const uint32_t *vlist_index, const uint32_t *vlist_slot, uint32_t nvlist,
                   const uint32_t *slots, uint32_t n, int topo) {
+    GL_FWD_VOID(pica_gl_draw(vcache, vlist_index, vlist_slot, nvlist, slots, n, topo));
     uint64_t t0 = prof_ns(); pica_vk_draw_(vcache, vlist_index, vlist_slot, nvlist, slots, n, topo); g_prof_draw_ns += prof_ns() - t0;
 }
 static void pica_vk_draw_(const Vtx *vcache, const uint32_t *vlist_index, const uint32_t *vlist_slot, uint32_t nvlist,

@@ -220,6 +220,72 @@ DisplayTransfer copies the target's image into the image video.c shows, skipping
 internal resolution, 1x included. `PWR_VK_NO_GPUCOPY=1` goes back to the CPU copies (A/B), `PWR_VK_SYNC=1` waits for
 every batch.
 
+**OpenGL** (2026-11-08, msr2ds issue 34; Windows, and Linux untried: CMake's `MSR_OPENGL`): for graphics without Vulkan
+(Intel's before the 6th generation on Windows, issue 24) or without its 1.3. `--renderer=auto|vulkan|opengl` (the
+Display tab's Graphics API, `settings.ini` `[native]` `renderer`, which the launcher passes on and uses for its own
+window): auto takes Vulkan where its device has 1.3, else OpenGL, else Vulkan without 1.3 (its CPU presenter).
+- The presenter (`video_gl.c`, `gl_load.c`): an OpenGL 3.3 core context (the newest core profile the driver has) on the
+  same window, laid out and drawn as video.c's Vulkan path, with the same shaders: `present`, `msr`, `fsr_easu` and
+  `fsr_rcas` keep their Vulkan-only lines under `#ifdef VULKAN` (glslc defines it; their SPIR-V is unchanged, byte for
+  byte), and CMake embeds their text (`cmake/glsl2inc.cmake`, which puts FidelityFX's headers in place of the includes).
+  FSR needs OpenGL 4.0, else sharp bilinear. The settings menu is Dear ImGui's OpenGL 3 backend (`overlay.cpp`
+  InitOpenGL, DrawOpenGL). No HDR. The game's frames are presented without waiting for the display, as main.c paces
+  them to its vblanks: a swap that waited held up the renderer's context (on NVIDIA every write-back waited for the next
+  vblank: 7 FPS on the title screen instead of 27); the launcher waits (V-Sync).
+- The PICA renderer (`pica_gl.c`): pica_vk.c's design on OpenGL 3.3, its public functions forwarding there. Its own
+  context, sharing the presenter's, current on the GX worker (gsp.c runs no GX commands on the game's threads with
+  OpenGL). `pica.vert`, `pica_vs.vert` and `pica.frag` are the Vulkan renderer's (as above; the LUTs, the vertex shader
+  program and the attributes are texture buffers, storage buffers being OpenGL 4.3; the depth range is Vulkan's through
+  glClipControl, else `CLIP_Z`). Draws run as they come.
+  - Programs: a vertex shader (pica_vsgen.c's translation of the game's, which it also writes as GLSL 3.30,
+    `pica_vsgen_glsl`: the raw vertex bytes through `RAW()`, a texture buffer from word `d.perm.w` on; or pica.vert for
+    CPU-shaded vertices) with pica.frag specialised for the draw (pica_vk.c's 30 specialisation constants, written as
+    GLSL constants; `PWR_VK_NOSPEC=1` keeps to the generic one, which reads them from the uniforms). They are compiled
+    and linked on a thread of their own with a third shared context, a fence saying when one is ready; until then a draw
+    takes its translation with the generic fragment shader, else the interpreter's or pica.vert's program (made at the
+    start). On NVIDIA a link takes 300-900 ms (the driver compiles there), so an effect seen for the first time shows
+    the generic program for a moment. (The generator's source changed, so Vulkan players' saved translations,
+    `pwr_shaders.bin`, are built again once, in the background.)
+  - `pwr_gl_programs.bin` (beside `pwr_shaders.bin`): the translations and every program made, with its binary where
+    the driver gives one (glGetProgramBinary: OpenGL 4.1 or ARB_get_program_binary), saved by the compile thread when
+    idle (at most every 5 s) and at exit. At the start (the launcher's Preload shaders; not with `PWR_NO_PRELOAD=1`)
+    every program in it is made again from its binary before it is wanted: 4 ms each on NVIDIA, 74-82 programs in
+    well under a second on the second run, against 300-900 ms each the first time. Stamped with the generators' and
+    shaders' sources and the driver (vendor, renderer, version): after an update of either they are made from their
+    shaders again. 11 MB after a few minutes of play on NVIDIA.
+  - A draw's data (its uniforms, attributes or CPU-shaded vertices, indices) goes into one buffer: mapped for good with
+    OpenGL 4.4 (ARB_buffer_storage), a ring of four 16 MB parts with a fence each, else mapped per draw without the
+    driver's synchronisation and replaced when full (`PWR_GL_NO_PERSISTENT=1` takes that way). Textures, samplers,
+    vertex arrays and framebuffers (kept per texture pair, for copies and read-backs too) are bound only when they
+    change.
+  - Each command list's GPU time is a timer query, for main.c's load line ("GPU drawing"). OpenGL's elapsed time
+    counts the gaps where the GPU waited for the driver, so it reads higher than Vulkan's timestamps.
+  - The GX copies on the GPU (the aliases: the scene's TextureCopy, the bloom chain's halvings) and the scan-out of each
+    screen at the internal resolution, which the presenter shows after a fence (and the renderer's next copy waits for
+    the presenter's fence after its use, all under `scan_lock`); the bottom screen is also read back at 1x for the
+    compositor.
+  - Write-backs without waiting: each colour target drawn in a list, and each alias, is read back at 1x into a pixel
+    buffer of its own with a fence after it, and lands in guest memory only when something reads its bytes. Landing is a
+    fence wait and a buffer map, so the main thread does it too, in the presenter's context, where the VBlank and the
+    save states ask (the GX worker idle then); a loaded state drops every read-back pending.
+  On an RTX 5090 in play at 3x, the machine otherwise idle (2026-11-08): 59-60 of 60 FPS, GX commands 4.1-4.5 ms a
+  frame (Vulkan's 4.1, OpenGL's 5 before the programs were specialised and the draw data put in one buffer), at 1x 57-60;
+  quick save and load work; the pictures match Vulkan's. With another program keeping the GPU busy OpenGL falls behind
+  where Vulkan stays at 60: 40-50 FPS with it at 60%, 18-20 at 85%. There each read-back's glReadPixels into its pixel
+  buffer waits (0.2 ms a call idle, 1-2 ms shared), whatever the read format (BGRA too), the timer queries or the way
+  the draw data goes up; the version before, built again for comparison under the same load, made 30 FPS where this
+  one made 45-50. The first version (CPU vertex shading, waiting write-backs, CPU copies) made 23 FPS, the screens at 1x.
+  Every translation of a session (62 structured, and 32 in the dispatcher form with `PWR_VSGEN_FLAT=1`), the
+  specialised fragment shader and every other shader check as GLSL 3.30 core with glslangValidator. `PWR_GL_CPU_VS=1`
+  shades on the CPU, `PWR_VK_NO_GPUCOPY=1` copies on the CPU (25 and 54 FPS with the version before). Not yet: a Linux
+  build, older hardware.
+  Comparing screenshots with Vulkan's: with HDR on (the test profile's `hdr=true`) a capture of Vulkan's HDR10 window
+  looks washed out and glowing; OpenGL has no HDR, so compare with `hdr=false`.
+- `PWR_NO_VULKAN=1` acts as if there were no Vulkan, `=13` as if its device had no 1.3 (the loader ignores
+  `VK_DRIVER_FILES` in an elevated process); `PWR_GL_DEBUG=1` a debug context with the driver's messages in the log (it
+  slows the game); `PWR_GL_PROF=1` where the renderer's time goes, every 2 s; `PWR_GL_DUMPVS=1` each translation to
+  `vs_<key>.vert`; `PWR_VSGEN_TRACE=1` each program as it is made or loaded, with its time.
+
 **Known issues:**
 - 30 FPS paced by the display (2026-11-06): the game's 33 ms limit runs a little short of two 60 Hz VBlanks, so with a
   VBlank on every tick it ran at 30.3 FPS and caught up with a 50 ms frame every 50 frames (1.65 s), a stutter. While it

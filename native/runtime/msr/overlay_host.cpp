@@ -229,6 +229,15 @@ void StopModsScan() {
     if (sc.thread.joinable()) sc.thread.join();
 }
 
+/// The graphics API in settings.ini ([native] renderer, as --renderer takes it): 0 auto, 1 vulkan, 2 opengl
+int Renderer(const MsrIni::File& file) {
+    const std::string r = file.String("native", "renderer", "auto");
+    return r == "vulkan" ? 1 : r == "opengl" ? 2 : 0;
+}
+const char* RendererName(int renderer) {
+    return renderer == 1 ? "vulkan" : renderer == 2 ? "opengl" : "auto";
+}
+
 /// What the overlay changed, applied, and kept for the launcher where it differs from what the launcher gave. In the
 /// launcher they are only kept (they are the game's: its window stays as it is) and written whatever they are.
 void ApplyEmulator(const MSR::EmulatorSettings& e) {
@@ -243,6 +252,7 @@ void ApplyEmulator(const MSR::EmulatorSettings& e) {
         file.SetString("native", "filter", e.fsr ? "fsr" : "linear");
         file.SetBool("native", "power_saving", e.power_saving);
         file.SetNumber("native", "texture_detail", e.texture_detail);
+        if (e.renderer_option) file.SetString("native", "renderer", RendererName(e.renderer));
         if (!file.Save()) std::fprintf(stderr, "msr: could not save the display settings\n");
         return;
     }
@@ -263,6 +273,7 @@ void ApplyEmulator(const MSR::EmulatorSettings& e) {
     if (emulator.fsr != launched.fsr) file.SetString("native", "filter", emulator.fsr ? "fsr" : "linear");
     if (emulator.power_saving != launched.power_saving) file.SetBool("native", "power_saving", emulator.power_saving);
     if (emulator.texture_detail != launched.texture_detail) file.SetNumber("native", "texture_detail", emulator.texture_detail);
+    if (emulator.renderer != launched.renderer) file.SetString("native", "renderer", RendererName(emulator.renderer));
     if (!file.Save()) std::fprintf(stderr, "msr: could not save the display settings\n");
 }
 
@@ -355,6 +366,7 @@ extern "C" void msr_overlay_reload(void) {
     emulator.fsr = file.String("native", "filter", emulator.fsr ? "fsr" : "linear") != "linear";
     emulator.power_saving = file.Bool("native", "power_saving", emulator.power_saving);
     emulator.texture_detail = emulator.texture_detail_running = TextureDetail(file);
+    emulator.renderer = emulator.renderer_running = Renderer(file);
     O().SetEmulatorSettings(emulator);
     LoadControls();
     RefreshControls();
@@ -395,6 +407,11 @@ extern "C" void msr_overlay_start(int fullscreen, int resolution, int vsync, int
     launched.performance_options = true;
     // read from settings.ini by textures.cpp as the packs start, in the game; the launcher's is the same file
     launched.texture_detail = launched.texture_detail_running = TextureDetail(MsrIni::File(msr_settings_file()));
+    // the launcher gives the game --renderer as settings.ini has it, and takes it for its own window
+    launched.renderer = launched.renderer_running = Renderer(MsrIni::File(msr_settings_file()));
+#ifdef MSR_OPENGL
+    launched.renderer_option = true;
+#endif
     launched.max_resolution = 10;
     launched.quick_saves = true;
     launched.bloom_option = true;
@@ -423,11 +440,25 @@ extern "C" void msr_overlay_vk_init(VkInstance instance, VkPhysicalDevice physic
     c.queue_mutex = &upload_lock;
     c.color_format = format;
     O().Init(c);
+    launched.renderer_active = emulator.renderer_active = 1;
+    O().SetEmulatorSettings(emulator);
 }
 
 extern "C" void msr_overlay_draw(VkCommandBuffer command, uint32_t width, uint32_t height) {
     O().Draw(command, width, height);
 }
+
+#ifdef MSR_OPENGL
+extern "C" void msr_overlay_gl_init(void) {
+    O().InitOpenGL();
+    launched.renderer_active = emulator.renderer_active = 2;
+    O().SetEmulatorSettings(emulator);
+}
+
+extern "C" void msr_overlay_gl_draw(uint32_t width, uint32_t height) {
+    O().DrawOpenGL(width, height);
+}
+#endif
 
 extern "C" void msr_overlay_shutdown(void) {
     StopModsScan();

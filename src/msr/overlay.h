@@ -172,6 +172,12 @@ struct EmulatorSettings {
     bool power_saving = false; ///< Waits sleep instead of spinning (msr-native main.c main_set_power_saving)
     int texture_detail = 1;    ///< Texture pack size: 1 full, 2 half, 4 quarter (msr-native textures.cpp), from the next start
     int texture_detail_running = 1; ///< What the running game loads packs at (in the launcher: the same)
+    // msr-native with OpenGL (MSR_OPENGL): the Graphics API row. 0 automatic (Vulkan with 1.3, else OpenGL), 1 Vulkan,
+    // 2 OpenGL, from the next start; settings.ini [native] renderer
+    bool renderer_option = false;
+    int renderer = 0;
+    int renderer_running = 0; ///< The choice the running game started with (in the launcher: the same)
+    int renderer_active = 0;  ///< What presents now: 1 Vulkan, 2 OpenGL (0 not known yet)
     int hdr_option = 0;        ///< The HDR rows: 0 none (the emulator build), 1 the display is not in HDR mode, 2 HDR possible
     float display_peak = 1000.f, display_paper = 200.f; ///< The display's peak brightness, Windows' SDR white (nits)
 };
@@ -336,6 +342,10 @@ public:
     void Init(const OverlayHook::VulkanContext& context) override;
     void Draw(VkCommandBuffer command, std::uint32_t width, std::uint32_t height) override;
     void Shutdown() override;
+    /// msr-native's OpenGL presenter (MSR_OPENGL): the same menu through Dear ImGui's OpenGL 3 backend, with the
+    /// context current; DrawOpenGL draws on the bound framebuffer.
+    void InitOpenGL();
+    void DrawOpenGL(std::uint32_t width, std::uint32_t height);
     /// msr-native: the menu shows the Mods or Textures tab, so their folders are scanned again for what the player
     /// added or removed meanwhile. Renderer thread.
     bool ModsTabShown() const;
@@ -373,6 +383,8 @@ private:
     void DrawMenu(float scale, bool appearing);
     void DrawHint(float scale, float width, float height);
     void DrawFps(float scale, float width);
+    /// One frame of the menu up to ImGui::Render, after the backend's `new_frame`; the backend then draws it.
+    void BuildFrame(std::uint32_t width, std::uint32_t height, void (*new_frame)());
     void PlayerChanged(bool layout);
     void EmulatorChanged();
 
@@ -392,6 +404,7 @@ private:
     // Renderer thread only
     ImGuiContext* context{};
     bool backend_ready = false;
+    bool opengl = false; ///< The backend is OpenGL's (InitOpenGL), not Vulkan's
     float font_size = 32.f;
     double previous_time = 0.0;
     int tab = 0;

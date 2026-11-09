@@ -1,32 +1,54 @@
 #version 450
+#ifdef VULKAN
 #extension GL_EXT_control_flow_attributes : require
+#define UNROLL [[unroll]]
+#endif
 // PICA200 fragment pipeline: texture units 0-2, fragment lighting, 6 TEV stages + combiner buffer, alpha test, fog,
 // depth from the PICA depth map. Blending, depth test and colour mask are fixed-function state.
 // Mirrors pica_sw.c (the reference); u.r holds PICA registers 0x040-0x1DF of this draw.
-layout(location = 0) in vec4 v_col;
-layout(location = 1) in vec4 v_uv01;
-layout(location = 2) in vec3 v_uv2tw;
-layout(location = 3) in vec4 v_quat;
-layout(location = 4) in vec3 v_view;
+// Also OpenGL's (pica_gl.c, GLSL 3.30): its first lines define VARYING and UNROLL empty and the SC_ constants below, the
+// uniforms are a uniform buffer and the LUTs a texture buffer there.
+#ifndef VARYING
+#define VARYING(n) layout(location = n)
+#endif
+VARYING(0) in vec4 v_col;
+VARYING(1) in vec4 v_uv01;
+VARYING(2) in vec3 v_uv2tw;
+VARYING(3) in vec4 v_quat;
+VARYING(4) in vec3 v_view;
 layout(location = 0) out vec4 o_col;
 
+#ifdef VULKAN
 layout(set = 0, binding = 0, std140) uniform Draw {
+#else
+layout(std140) uniform Draw {
+#endif
     uvec4 r[104];      // registers 0x040..0x1DF
     vec4 lpos[8];      // light position (decoded f16)
     vec4 lspot[8];     // spot direction (decoded s1.11)
     vec4 latt[8];      // x = distance attenuation bias, y = scale (decoded f20)
     vec4 misc;         // x = depth scale, y = depth offset
 } u;
+#ifdef VULKAN
 layout(set = 0, binding = 1, std430) readonly buffer Lut { uint lut[]; };   // 24 x 256 lighting LUT entries, then 128 fog LUT entries
+#define LUT(i) lut[i]
 layout(set = 0, binding = 2) uniform sampler2D tex0;
 layout(set = 0, binding = 3) uniform sampler2D tex1;
 layout(set = 0, binding = 4) uniform sampler2D tex2;
+#else
+uniform usamplerBuffer lut;   // the same entries, as R32UI texels
+#define LUT(i) texelFetch(lut, int(i)).r
+uniform sampler2D tex0;
+uniform sampler2D tex1;
+uniform sampler2D tex2;
+#endif
 
 uint R(uint i) { i -= 0x40u; return u.r[i >> 2][i & 3u]; }
 
 // Specialisation constants (pica_vk.c puts them in the pipeline key): the register words that decide control flow, masked to
 // the bits used, so each pipeline is compiled with its TEV / combiner-buffer / alpha-test / texture / lighting / fog / depth
 // configuration folded in instead of branching on uniform reads per fragment. SC_ON = 0 (PWR_VK_NOSPEC=1) reads the registers.
+#ifdef VULKAN
 layout(constant_id = 0) const uint SC_ON = 0u;
 layout(constant_id = 1) const uint SC_SRC0 = 0u;  layout(constant_id = 2) const uint SC_SRC1 = 0u;  layout(constant_id = 3) const uint SC_SRC2 = 0u;
 layout(constant_id = 4) const uint SC_SRC3 = 0u;  layout(constant_id = 5) const uint SC_SRC4 = 0u;  layout(constant_id = 6) const uint SC_SRC5 = 0u;
@@ -41,6 +63,7 @@ layout(constant_id = 26) const uint SC_ALPHA = 0u;    // 0x104: alpha test enabl
 layout(constant_id = 27) const uint SC_TEXEN = 0u;    // 0x080: texture units, unit 2 coordinates
 layout(constant_id = 28) const uint SC_LIGHT = 0u;    // fragment lighting on
 layout(constant_id = 29) const uint SC_ZBUF = 0u;     // 0x06D bit 0
+#endif
 // per-stage selectors (constant arrays of specialisation constants are not allowed); the TEV loop is unrolled, so i is a constant
 uint sc6(uint i, uint a, uint b, uint c, uint d, uint e, uint f) { return i == 0u ? a : i == 1u ? b : i == 2u ? c : i == 3u ? d : i == 4u ? e : f; }
 vec4 rgba8(uint v) { return vec4(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u), float(v >> 24)) / 255.0; }
@@ -55,7 +78,7 @@ vec4 sample_unit(int unit, vec2 uv) {
 
 // ---- lighting ----
 float lut_lookup(uint l, uint idx, float d) {
-    uint e = lut[l * 256u + (idx & 255u)];
+    uint e = LUT(l * 256u + (idx & 255u));
     int diff = int((e >> 12) & 0xfffu); if (diff >= 0x800) diff -= 0x1000;
     return float(e & 0xfffu) / 4095.0 + float(diff) / 2047.0 * d;
 }
@@ -200,7 +223,7 @@ void main() {
     // the combiner buffer lags a stage (as Citra models the hardware): stage 0 reads 0, stage 1 the buffer colour
     vec4 prev = v_col, buf = vec4(0.0), next_buf = rgba8(R(0x0FDu));
     uint bufcfg = SC_ON != 0u ? SC_BUFCFG : R(0x0E0u);
-    [[unroll]] for (uint i = 0u; i < 6u; i++) {
+    UNROLL for (uint i = 0u; i < 6u; i++) {
         uint b = tev_base[i];
         uint srcs = SC_ON != 0u ? sc6(i, SC_SRC0, SC_SRC1, SC_SRC2, SC_SRC3, SC_SRC4, SC_SRC5) : R(b);
         uint ops = SC_ON != 0u ? sc6(i, SC_OPS0, SC_OPS1, SC_OPS2, SC_OPS3, SC_OPS4, SC_OPS5) : R(b + 1u);
@@ -208,7 +231,7 @@ void main() {
         uint scl = SC_ON != 0u ? sc6(i, SC_SCL0, SC_SCL1, SC_SCL2, SC_SCL3, SC_SCL4, SC_SCL5) : R(b + 4u);
         vec4 konst = rgba8(R(b + 3u));
         vec3 in_rgb[3]; float in_a[3];
-        [[unroll]] for (uint k = 0u; k < 3u; k++) {
+        UNROLL for (uint k = 0u; k < 3u; k++) {
             in_rgb[k] = oprgb((ops >> (4u * k)) & 15u, tev_src((srcs >> (4u * k)) & 15u, tex, prev, buf, konst, lp, ls));
             in_a[k] = opa((ops >> (12u + 4u * k)) & 7u, tev_src((srcs >> (16u + 4u * k)) & 15u, tex, prev, buf, konst, lp, ls));
         }
@@ -237,7 +260,7 @@ void main() {
         // fog: factor from the fog LUT (lut[6144 + i]: bits 13-23 value, 0-12 signed difference, both /2047) at the hardware's
         // depth * 128 (0x0E0 bit 16: 1 - depth)
         float fi = ((bufcfg >> 16) & 1u) != 0u ? (1.0 - fd) * 128.0 : fd * 128.0, i = clamp(floor(fi), 0.0, 127.0);
-        uint e = lut[6144u + uint(i)];
+        uint e = LUT(6144u + uint(i));
         int diff = int(e & 0x1fffu); if (diff >= 0x1000) diff -= 0x2000;
         float f = clamp(float((e >> 13) & 0x7ffu) / 2047.0 + float(diff) / 2047.0 * (fi - i), 0.0, 1.0);
         prev.rgb = f * prev.rgb + (1.0 - f) * rgba8(R(0x0E1u)).rgb;

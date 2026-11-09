@@ -1,8 +1,16 @@
 #version 450
+#ifdef VULKAN
 #extension GL_GOOGLE_include_directive : require
+#endif
 // FSR 1 RCAS (AMD FidelityFX, MIT, shaders/fsr/): contrast-adaptive sharpening of the EASU output, drawn into the window.
+// Also OpenGL's (fsr_easu.frag).
+#ifdef VULKAN
 layout(push_constant) uniform P { vec4 dst; vec4 src; ivec4 mode; vec4 extra; } p;   // extra.x = sharpness (stops, 0 = most), extra.zw = output origin
-layout(set = 0, binding = 0) uniform sampler2D tex;
+layout(set = 0, binding = 0)
+#else
+layout(std140) uniform P { vec4 dst; vec4 src; ivec4 mode; vec4 extra; } p;
+#endif
+uniform sampler2D tex;
 layout(location = 0) out vec4 o;
 #define A_GPU 1
 #define A_GLSL 1

@@ -3,7 +3,16 @@
 // this shader runs the guest shader bytecode for one vertex and applies the output map, then hands the same
 // varyings as pica.vert to pica.frag. Semantics mirror vs_run() in pica_sw.c; flow control uses an explicit stack
 // (as the hardware does) instead of recursion.
+// Also OpenGL's (pica_gl.c, GLSL 3.30): its first lines define VARYING empty and CLIP_Z (pica.vert), and the program and
+// the attributes are texture buffers there.
+#ifndef VARYING
+#define VARYING(n) layout(location = n)
+#endif
+#ifdef VULKAN
 layout(set = 0, binding = 5, std140) uniform VsDraw {
+#else
+layout(std140) uniform VsDraw {
+#endif
     vec4 c[96];          // float uniforms
     uvec4 ib;            // x = bool uniforms (0x2B0), y = entry point, z = output mask (0x2BD), w = output count (0x04F)
     uvec4 iu;            // integer uniforms 0x2B1-0x2B4
@@ -13,14 +22,25 @@ layout(set = 0, binding = 5, std140) uniform VsDraw {
     vec4 fdef_[12];
     vec4 xf;             // clip-space scale of x and y (pica_vk.c: Samus Returns' widescreen and zoom)
 } d;
+#ifdef VULKAN
 layout(set = 0, binding = 6, std430) readonly buffer Prog { uint prog[4096]; uint swz[128]; };
 layout(set = 0, binding = 7, std430) readonly buffer Attrs { vec4 attrs[]; };
+#define PROG(i) prog[i]
+#define SWZ(i) swz[i]
+#define ATTR(i) attrs[i]
+#else
+uniform usamplerBuffer prog_buf;   // pica_vs_prog: the program, then the swizzles
+uniform samplerBuffer attr_buf;    // the draw's attributes, from vec4 d.perm.w on
+#define PROG(i) texelFetch(prog_buf, int(i)).r
+#define SWZ(i) texelFetch(prog_buf, 4096 + int(i)).r
+#define ATTR(i) texelFetch(attr_buf, int(i))
+#endif
 
-layout(location = 0) out vec4 v_col;
-layout(location = 1) out vec4 v_uv01;
-layout(location = 2) out vec3 v_uv2tw;
-layout(location = 3) out vec4 v_quat;
-layout(location = 4) out vec3 v_view;
+VARYING(0) out vec4 v_col;
+VARYING(1) out vec4 v_uv01;
+VARYING(2) out vec3 v_uv2tw;
+VARYING(3) out vec4 v_quat;
+VARYING(4) out vec3 v_view;
 
 vec4 vin[16], vout[16], tmp[16];
 int a0x, a0y, aL;
@@ -95,10 +115,10 @@ void run() {
             }
         }
         if (pc >= 4096u) return;
-        uint ins = prog[pc], op = ins >> 26;
+        uint ins = PROG(pc), op = ins >> 26;
         if (op < 0x20u || op >= 0x2eu) {
             if (op >= 0x30u) {   // MAD / MADI
-                uint dsc = swz[ins & 0x1fu], dst = (ins >> 24) & 0x1fu, rel = (ins >> 22) & 3u;
+                uint dsc = SWZ(ins & 0x1fu), dst = (ins >> 24) & 0x1fu, rel = (ins >> 22) & 3u;
                 bool madi = op < 0x38u;
                 uint s1 = (ins >> 17) & 0x1fu, s2, s3;
                 if (madi) { s2 = (ins >> 12) & 0x1fu; s3 = (ins >> 5) & 0x7fu; } else { s2 = (ins >> 10) & 0x7fu; s3 = (ins >> 5) & 0x1fu; }
@@ -108,7 +128,7 @@ void run() {
                 dst_write(dst, dsc & 0xfu, pmul4(a, b) + c);
                 pc++; continue;
             }
-            uint dsc = swz[ins & 0x7fu], dst = (ins >> 21) & 0x1fu, rel = (ins >> 19) & 3u;
+            uint dsc = SWZ(ins & 0x7fu), dst = (ins >> 21) & 0x1fu, rel = (ins >> 19) & 3u;
             bool inv = op >= 0x18u && op <= 0x1bu;
             uint s1 = inv ? (ins >> 14) & 0x1fu : (ins >> 12) & 0x7fu, s2 = inv ? (ins >> 7) & 0x7fu : (ins >> 7) & 0x1fu;
             vec4 a = src_reg(s1, (dsc >> 5) & 0xffu, ((dsc >> 4) & 1u) != 0u, inv ? 0u : rel);
@@ -180,7 +200,7 @@ void main() {
     for (int i = 0; i < 16; i++) { vin[i] = vec4(0, 0, 0, 1); vout[i] = vec4(0); tmp[i] = vec4(0); }
     for (uint a = 0u; a < nattr && a < 12u; a++) {
         uint p = a < 8u ? (d.perm.x >> (4u * a)) & 15u : (d.perm.y >> (4u * (a - 8u))) & 15u;
-        vin[p] = attrs[base + a];
+        vin[p] = ATTR(base + a);
     }
     a0x = 0; a0y = 0; aL = 0; cx = false; cy = false;
     run();
@@ -195,7 +215,11 @@ void main() {
         for (uint c = 0u; c < 4u; c++) { uint se = (m >> (8u * c)) & 0x1fu; if (se < 24u) sem[se] = vout[i][c]; }
         o++;
     }
+#ifdef VULKAN
     gl_Position = vec4(sem[0] * d.xf.x, sem[1] * d.xf.y, -sem[2], sem[3]);
+#else
+    gl_Position = vec4(sem[0] * d.xf.x, sem[1] * d.xf.y, CLIP_Z(-sem[2], sem[3]), sem[3]);
+#endif
     v_col = min(abs(vec4(sem[8], sem[9], sem[10], sem[11])), vec4(1.0));
     v_uv01 = vec4(sem[12], sem[13], sem[14], sem[15]);
     v_uv2tw = vec3(sem[22], sem[23], sem[16]);

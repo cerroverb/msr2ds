@@ -95,6 +95,26 @@ foreach(sh pica.vert pica_vs.vert pica.frag present.vert present.frag fsr_easu.f
 endforeach()
 msr_shader(pica_nd.frag.inc pica.frag -DNO_FRAG_DEPTH)
 
+# OpenGL 3.3 (runtime/video_gl.c, pica_gl.c, gl_load.c): presentation and the PICA renderer where Vulkan has no 1.3 device
+# (--renderer=auto, or opengl), with the shaders as GLSL text (cmake/glsl2inc.cmake) the driver compiles. Windows and Linux.
+if (WIN32 OR (UNIX AND NOT APPLE AND NOT ANDROID))
+    set(MSR_OPENGL_DEFAULT ON)
+else()
+    set(MSR_OPENGL_DEFAULT OFF)
+endif()
+option(MSR_OPENGL "OpenGL presentation as well as Vulkan's" ${MSR_OPENGL_DEFAULT})
+set(MSR_GL_SOURCES "")
+if (MSR_OPENGL)
+    foreach(sh present.vert present.frag msr.vert msr.frag fsr_easu.frag fsr_rcas.frag pica.vert pica.frag pica_vs.vert)
+        add_custom_command(OUTPUT ${SHO}/${sh}.glsl.inc
+          COMMAND ${CMAKE_COMMAND} -E make_directory ${SHO}
+          COMMAND ${CMAKE_COMMAND} -DIN=${SH}/${sh} -DOUT=${SHO}/${sh}.glsl.inc -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/glsl2inc.cmake
+          DEPENDS ${SH}/${sh} ${SH}/fsr/ffx_a.h ${SH}/fsr/ffx_fsr1.h ${CMAKE_CURRENT_SOURCE_DIR}/cmake/glsl2inc.cmake)
+        list(APPEND MSR_GL_SOURCES ${SHO}/${sh}.glsl.inc)
+    endforeach()
+    list(APPEND MSR_GL_SOURCES runtime/video_gl.c runtime/gl_load.c runtime/pica_gl.c)
+endif()
+
 set(MSR_NATIVE_SOURCES
   runtime/main.c runtime/kernel.c runtime/services.c runtime/fs.c runtime/dump.c runtime/gsp.c runtime/pica.c runtime/video.c
   runtime/dsp.c runtime/pica_sw.c runtime/input.c runtime/pica_vk.c runtime/pica_vsgen.c runtime/runtime.c
@@ -108,7 +128,7 @@ set(MSR_NATIVE_SOURCES
   ${SHO}/pica.vert.inc ${SHO}/pica_vs.vert.inc ${SHO}/pica.frag.inc
   ${SHO}/present.vert.inc ${SHO}/present.frag.inc
   ${SHO}/fsr_easu.frag.inc ${SHO}/fsr_rcas.frag.inc ${SHO}/pica_nd.frag.inc ${SHO}/msr.vert.inc ${SHO}/msr.frag.inc
-  ${SHO}/hdr.frag.inc)
+  ${SHO}/hdr.frag.inc ${MSR_GL_SOURCES})
 if (ANDROID)
     # The Android app (native/android): this program as libmain.so, which SDL's Java side loads and runs (SDL_main);
     # runtime/android.c is what it asks of the app's Java side (MsrActivity)
@@ -148,6 +168,11 @@ add_library(msr_native_imgui STATIC ${MSR_IMGUI_DIR}/imgui.cpp ${MSR_IMGUI_DIR}/
 target_include_directories(msr_native_imgui SYSTEM PUBLIC ${MSR_IMGUI_DIR})
 target_compile_definitions(msr_native_imgui PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES)
 target_link_libraries(msr_native_imgui PUBLIC Vulkan::Vulkan)
+if (MSR_OPENGL)   # its loader opens the system's OpenGL library itself
+    target_sources(msr_native_imgui PRIVATE ${MSR_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
+    target_link_libraries(msr_native_imgui PUBLIC ${CMAKE_DL_LIBS})
+    target_compile_definitions(msr-native PRIVATE MSR_OPENGL)
+endif()
 target_link_libraries(msr-native PRIVATE msr_native_imgui)
 target_compile_options(msr-native PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wno-unused-result>)
 target_link_libraries(msr-native PRIVATE Threads::Threads Vulkan::Vulkan SDL2::SDL2 m ${CMAKE_DL_LIBS})
