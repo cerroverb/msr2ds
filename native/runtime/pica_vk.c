@@ -27,6 +27,7 @@
 #include "msr/msr.h"
 #include <vulkan/vulkan.h>
 #include "vk_push.h"
+#include "vk_rp.h"
 #include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
@@ -63,6 +64,19 @@ static const uint32_t frag_spv[] =
 ;
 static const uint32_t frag_nd_spv[] =   /* same shader without the gl_FragDepth write */
 #include "pica_nd.frag.inc"
+;
+/* the same for the Vulkan 1.1 mode (vk_rp.h: SPIR-V 1.3, discard as such) */
+static const uint32_t vert_spv11[] =
+#include "pica.vert.11.inc"
+;
+static const uint32_t vs_spv11[] =
+#include "pica_vs.vert.11.inc"
+;
+static const uint32_t frag_spv11[] =
+#include "pica.frag.11.inc"
+;
+static const uint32_t frag_nd_spv11[] =
+#include "pica_nd.frag.11.inc"
 ;
 
 static VkPhysicalDevice phys; static VkDevice dev; static VkQueue queue; static uint32_t qfam;
@@ -146,7 +160,10 @@ typedef struct {
     VkPushArena push;   /* its draws' descriptor sets where the device has no push descriptors (vk_push.c), likewise */
 } BatchSet;
 static BatchSet sets[NSETS]; static int cur_set;
-static void img_destroy(Img *im) { vkDestroyImageView(dev, im->view, NULL); vkDestroyImage(dev, im->img, NULL); vkFreeMemory(dev, im->mem, NULL); }
+static void img_destroy(Img *im) {
+    if (g_vk_rp) vk_rp_forget(im->view);   /* the Vulkan 1.1 mode's framebuffers made with it */
+    vkDestroyImageView(dev, im->view, NULL); vkDestroyImage(dev, im->img, NULL); vkFreeMemory(dev, im->mem, NULL);
+}
 static void sets_idle(void);
 static void img_retire(Img *im) {
     BatchSet *b = &sets[cur_set];
@@ -987,9 +1004,22 @@ static VkSampler sampler_for(int unit) {
 
 /* vs: VkShaderModule. nd: the fragment shader without its depth write. sc: the fragment shader's specialisation constants
    (pica.frag SC_*: [0] on, then the 6 TEV stages' sources, operands, combiners, scales, 0x0E0, 0x104, 0x080, lighting, Z-buffer).
-   Built with memset so the padding compares equal. */
+   Built with memset so the padding compares equal. ds: the Vulkan 1.1 mode's depth, stencil and culling state (ds_pack),
+   dynamic state with Vulkan 1.3, where it stays 0 (in what was the struct's padding: the keys pwr_shaders.bin holds keep
+   their size). */
 #define NSC 30
-typedef struct { uint64_t vs; uint32_t blend; uint8_t blend_on, cmask, has_depth, gpu_vs, nd, pad[3]; uint32_t sc[NSC]; } PKey;
+typedef struct { uint64_t vs; uint32_t blend; uint8_t blend_on, cmask, has_depth, gpu_vs, nd, pad[3]; uint32_t sc[NSC]; uint32_t ds; } PKey;
+_Static_assert(sizeof(PKey) == 144, "PKey's size is in pwr_shaders.bin: a new field goes in place of pad");
+/* a draw's depth, stencil and culling state (draw_ds) */
+typedef struct { VkCullModeFlags cull; VkCompareOp dop, sfn; VkStencilOp sop[3]; uint8_t dt, dw, ste, sref, scmask, swmask; } DsState;   /* sop: fail, depth fail, pass */
+/* the part of it a Vulkan 1.1 pipeline holds (the stencil reference and masks stay dynamic): the compare op only with the
+   depth test on, the stencil function and ops only with the stencil test on, so that fewer pipelines differ */
+static uint32_t ds_pack(const DsState *s) {
+    uint32_t d = 1u << 31 | (uint32_t)s->cull | (uint32_t)s->dt << 2 | (uint32_t)s->dw << 3 | (uint32_t)s->ste << 7;
+    if (s->dt) d |= (uint32_t)s->dop << 4;
+    if (s->ste) d |= (uint32_t)s->sfn << 8 | (uint32_t)s->sop[0] << 11 | (uint32_t)s->sop[1] << 14 | (uint32_t)s->sop[2] << 17;
+    return d;
+}
 /* Pipelines: specialised ones are compiled on a worker thread; until one is ready its draws use the generic pipeline for the same
    fixed-function state (sc all 0: the shader reads its configuration from the uniforms), queued ahead of the others when missing;
    while neither is ready the draw is skipped (an object missing for a few frames instead of the game stopping). Skipping is only
@@ -1054,6 +1084,21 @@ static VkPipeline make_pipeline(const PKey *kp) {
     VkGraphicsPipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2, .pStages = st,
         .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms,
         .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dy, .layout = playout };
+    /* the Vulkan 1.1 mode: the depth, stencil and culling state from the key, for a render pass of these formats */
+    static const VkDynamicState dyn11[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+        VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE };
+    if (g_vk_rp) {
+        uint32_t d = k.ds;
+        rs.cullMode = d & 3; rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        ds.depthTestEnable = d >> 2 & 1; ds.depthWriteEnable = d >> 3 & 1; ds.depthCompareOp = (VkCompareOp)(d >> 4 & 7);
+        ds.stencilTestEnable = d >> 7 & 1;
+        ds.front = ds.back = (VkStencilOpState){ .failOp = (VkStencilOp)(d >> 11 & 7), .passOp = (VkStencilOp)(d >> 17 & 7),
+                                                 .depthFailOp = (VkStencilOp)(d >> 14 & 7), .compareOp = (VkCompareOp)(d >> 8 & 7) };
+        dy.dynamicStateCount = sizeof dyn11 / sizeof *dyn11; dy.pDynamicStates = dyn11;
+        ci.pNext = NULL;
+        ci.renderPass = vk_rp_get(cf, VK_IMAGE_LAYOUT_GENERAL, VK_ATTACHMENT_LOAD_OP_LOAD, k.has_depth ? depth_format : VK_FORMAT_UNDEFINED, has_stencil,
+                                  VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
+    }
     VkPipeline p = VK_NULL_HANDLE; double t0 = now_ms();
     if (vkCreateGraphicsPipelines(dev, pcache, 1, &ci, NULL, &p)) fprintf(stderr, "pica_vk: pipeline creation failed\n");
     static int ptrace = -1; if (ptrace < 0) ptrace = getenv("PWR_VK_PIPE_TRACE") != NULL;   /* each new pipeline's key, to spot keys that change every frame */
@@ -1101,7 +1146,7 @@ const char *pica_vsgen_build(void);
 /* the vertex shader generator's source: its saved SPIR-V must come from the same generator. Pipeline keys from another
    build of this file are harmless (make_pipeline builds a key with today's code; an outdated one is just never used),
    so a rebuild no longer drops the file (it did until 2026-11-02, and every effect then compiled again in play). */
-static void seed_stamp(char out[64]) { memset(out, 0, 64); snprintf(out, 64, "%s", pica_vsgen_build()); }
+static void seed_stamp(char out[64]) { memset(out, 0, 64); snprintf(out, 64, "%s%s", pica_vsgen_build(), g_vk_rp ? " vk11" : ""); }   /* (the 1.1 mode: its own SPIR-V and keys) */
 
 typedef struct { uint32_t kind; uint64_t vkey; PKey k; } SeedPipe;
 static void seed_save(const SeedPipe *sp, uint32_t np) {
@@ -1325,13 +1370,14 @@ static int init(void) {
     VkPipelineLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl };
     if (vkCreatePipelineLayout(dev, &lci, NULL, &playout)) return -1;
     vk_push_layout(playout, dsl);
-    VkShaderModuleCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof vert_spv, .pCode = vert_spv };
+    const int v11 = g_vk_rp;   /* the Vulkan 1.1 mode's SPIR-V */
+    VkShaderModuleCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = v11 ? sizeof vert_spv11 : sizeof vert_spv, .pCode = v11 ? vert_spv11 : vert_spv };
     if (vkCreateShaderModule(dev, &sci, NULL, &vs_mod)) return -1;
-    sci.codeSize = sizeof vs_spv; sci.pCode = vs_spv;
+    sci.codeSize = v11 ? sizeof vs_spv11 : sizeof vs_spv; sci.pCode = v11 ? vs_spv11 : vs_spv;
     if (vkCreateShaderModule(dev, &sci, NULL, &vsi_mod)) return -1;
-    sci.codeSize = sizeof frag_spv; sci.pCode = frag_spv;
+    sci.codeSize = v11 ? sizeof frag_spv11 : sizeof frag_spv; sci.pCode = v11 ? frag_spv11 : frag_spv;
     if (vkCreateShaderModule(dev, &sci, NULL, &fs_mod)) return -1;
-    sci.codeSize = sizeof frag_nd_spv; sci.pCode = frag_nd_spv;
+    sci.codeSize = v11 ? sizeof frag_nd_spv11 : sizeof frag_nd_spv; sci.pCode = v11 ? frag_nd_spv11 : frag_nd_spv;
     if (vkCreateShaderModule(dev, &sci, NULL, &fs_nd_mod)) return -1;
     {   /* pipelines compiled in earlier runs (the driver checks that the data fits this GPU and driver) */
         size_t n = 0; void *data = NULL; FILE *f = fopen("pwr_pipelines.bin", "rb");
@@ -1365,7 +1411,7 @@ static int init(void) {
     pica_vk_flush();
     msr_textures_set_stager(stage_make, stage_drop);   /* texture packs: uploads prepared on their workers */
     if (preload_on && !getenv("PWR_NO_PRELOAD")) seed_load();
-    fprintf(stderr, "pica_vk: hardware renderer on\n");
+    fprintf(stderr, "pica_vk: hardware renderer on%s\n", g_vk_rp ? " (Vulkan 1.1: render passes, depth and stencil state in the pipelines)" : "");
     return 0;
 }
 
@@ -1409,15 +1455,17 @@ static void replay(const DrawRec *r, VkPipeline *bound) {
     if (!st_valid || memcmp(&lvp, &r->vp, sizeof lvp)) { vkCmdSetViewport(cb_draw, 0, 1, &r->vp); lvp = r->vp; }
     if (!st_valid || memcmp(&lsc, &r->sc, sizeof lsc)) { vkCmdSetScissor(cb_draw, 0, 1, dbg == 1 ? &one : &r->sc); lsc = r->sc; }
     if (!st_valid || memcmp(lbc, r->bc, sizeof lbc)) { vkCmdSetBlendConstants(cb_draw, r->bc); memcpy(lbc, r->bc, sizeof lbc); }
-    if (!st_valid) vkCmdSetFrontFace(cb_draw, VK_FRONT_FACE_COUNTER_CLOCKWISE);
-    if (!st_valid || lcull != r->cull) { vkCmdSetCullMode(cb_draw, r->cull); lcull = r->cull; }
-    if (!st_valid || ldt != r->dt) { vkCmdSetDepthTestEnable(cb_draw, r->dt); ldt = r->dt; }
-    if (!st_valid || ldw != r->dw) { vkCmdSetDepthWriteEnable(cb_draw, r->dw); ldw = r->dw; }
-    if (!st_valid || ldop != r->dop) { vkCmdSetDepthCompareOp(cb_draw, r->dop); ldop = r->dop; }
     static uint8_t lste, lsref, lscm, lswm; static VkCompareOp lsfn; static VkStencilOp lsop[3];
-    if (!st_valid || lste != r->ste) { vkCmdSetStencilTestEnable(cb_draw, r->ste); lste = r->ste; }
+    if (!g_vk_rp) {   /* (the Vulkan 1.1 mode: in the pipeline) */
+        if (!st_valid) vkCmdSetFrontFace(cb_draw, VK_FRONT_FACE_COUNTER_CLOCKWISE);
+        if (!st_valid || lcull != r->cull) { vkCmdSetCullMode(cb_draw, r->cull); lcull = r->cull; }
+        if (!st_valid || ldt != r->dt) { vkCmdSetDepthTestEnable(cb_draw, r->dt); ldt = r->dt; }
+        if (!st_valid || ldw != r->dw) { vkCmdSetDepthWriteEnable(cb_draw, r->dw); ldw = r->dw; }
+        if (!st_valid || ldop != r->dop) { vkCmdSetDepthCompareOp(cb_draw, r->dop); ldop = r->dop; }
+        if (!st_valid || lste != r->ste) { vkCmdSetStencilTestEnable(cb_draw, r->ste); lste = r->ste; }
+    }
     if (r->ste || !st_valid) {
-        if (!st_valid || lsfn != r->sfn || memcmp(lsop, r->sop, sizeof lsop)) {
+        if (!g_vk_rp && (!st_valid || lsfn != r->sfn || memcmp(lsop, r->sop, sizeof lsop))) {
             vkCmdSetStencilOp(cb_draw, VK_STENCIL_FACE_FRONT_AND_BACK, r->sop[0], r->sop[2], r->sop[1], r->sfn); lsfn = r->sfn; memcpy(lsop, r->sop, sizeof lsop); }
         if (!st_valid || lsref != r->sref) { vkCmdSetStencilReference(cb_draw, VK_STENCIL_FACE_FRONT_AND_BACK, r->sref); lsref = r->sref; }
         if (!st_valid || lscm != r->scmask) { vkCmdSetStencilCompareMask(cb_draw, VK_STENCIL_FACE_FRONT_AND_BACK, r->scmask); lscm = r->scmask; }
@@ -1468,16 +1516,22 @@ static void begin_rendering(Surf *c, Surf *d, int depth_used) {
         pass_q = bt->npq++; bt->pq_depth[pass_q] = (uint8_t)depth_used;
         vkCmdWriteTimestamp(cb_draw, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, bt->qp, 2 + 2 * (uint32_t)pass_q);
     }
-    VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { c->w * (uint32_t)cur_scale, c->h * (uint32_t)cur_scale } }, .layerCount = 1,
-        .colorAttachmentCount = 1, .pColorAttachments = &ca, .pDepthAttachment = d ? &da : NULL, .pStencilAttachment = d && has_stencil ? &da : NULL };
-    vkCmdBeginRendering(cb_draw, &ri);
+    VkExtent2D size = { c->w * (uint32_t)cur_scale, c->h * (uint32_t)cur_scale };
+    if (g_vk_rp) {   /* the Vulkan 1.1 mode: a render pass with the same attachments and ops (vk_rp.c) */
+        VkRenderPass rp = vk_rp_get(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_GENERAL, ca.loadOp, d ? depth_format : VK_FORMAT_UNDEFINED, has_stencil, da.loadOp, da.storeOp);
+        vk_rp_begin(cb_draw, rp, c->im.view, d ? d->im.view : VK_NULL_HANDLE, size, NULL);
+    } else {
+        VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, size }, .layerCount = 1,
+            .colorAttachmentCount = 1, .pColorAttachments = &ca, .pDepthAttachment = d ? &da : NULL, .pStencilAttachment = d && has_stencil ? &da : NULL };
+        vkCmdBeginRendering(cb_draw, &ri);
+    }
     g_vk_passes++;
     { extern void k_ev(int, uint32_t, uint32_t); k_ev(0x13, c->addr, c->w << 16 | c->h); }
     if (vtrace) fprintf(stderr, "vk: pass %08x %ux%u fmt%d depth %08x\n", c->addr, c->w, c->h, c->fmt, d ? d->addr : 0);
 }
 
 static void end_rendering(void) {
-    vkCmdEndRendering(cb_draw);
+    if (g_vk_rp) vkCmdEndRenderPass(cb_draw); else vkCmdEndRendering(cb_draw);
     if (pass_q >= 0) vkCmdWriteTimestamp(cb_draw, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, sets[cur_set].qp, 3 + 2 * (uint32_t)pass_q);
     pass_q = -1;
 }
@@ -1936,6 +1990,28 @@ static void bloom_scale(uint8_t *fsu) {
 }
 
 #define VS_UBO_SIZE 2048   /* 96 + 5 + 12 + 12 + 1 vec4, rounded up to 256 */
+/* the depth, stencil and culling state of the draw about to be made (its targets bound: ensure_pass) */
+static void draw_ds(DsState *s) {
+    uint32_t om = R(0x107); int depth_on = cur_d && ((R(0x114) & 3) || (R(0x115) & 3));
+    memset(s, 0, sizeof *s);
+    /* pica_sw.c: cull mode 1 drops triangles with positive window-space area, 2 negative ones; Vulkan calls a
+       negative area (in its sign convention) front-facing for COUNTER_CLOCKWISE. Checked on the Mii heads (cull
+       mode 1): the other way round drops the face and keeps the inside of the hair */
+    int cm = (int)(R(0x040) & 3);
+    s->cull = cm == 1 ? VK_CULL_MODE_BACK_BIT : cm == 2 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE;
+    { static int nocull = -1; if (nocull < 0) nocull = getenv("PWR_VK_NOCULL") != NULL; if (nocull) s->cull = VK_CULL_MODE_NONE; }
+    static const VkCompareOp cmp[8] = { VK_COMPARE_OP_NEVER, VK_COMPARE_OP_ALWAYS, VK_COMPARE_OP_EQUAL, VK_COMPARE_OP_NOT_EQUAL,
+                                        VK_COMPARE_OP_LESS, VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER, VK_COMPARE_OP_GREATER_OR_EQUAL };
+    /* PICA writes depth with the test disabled (the game's depth-clearing quads rely on it); Vulkan writes depth only
+       while the test is enabled, so a disabled test becomes ALWAYS */
+    s->dt = (uint8_t)(depth_on && (om & 1)); s->dw = (uint8_t)(depth_on && ((om >> 12) & 1)); s->dop = cmp[om >> 4 & 7];
+    if (s->dw && !s->dt) { s->dt = 1; s->dop = VK_COMPARE_OP_ALWAYS; }
+    /* stencil (0x105 test, 0x106 ops; same numbering as Vulkan) only with a D24S8 buffer; writes need 0x115 */
+    uint32_t sf = R(0x105), so = R(0x106);
+    s->ste = (uint8_t)(has_stencil && depth_on && (sf & 1) && cur_d->fmt == 3);
+    s->sfn = cmp[sf >> 4 & 7]; s->sref = (uint8_t)(sf >> 16); s->scmask = (uint8_t)(sf >> 24); s->swmask = (R(0x115) & 3) ? (uint8_t)(sf >> 8) : 0;
+    s->sop[0] = (VkStencilOp)(so & 7); s->sop[1] = (VkStencilOp)(so >> 4 & 7); s->sop[2] = (VkStencilOp)(so >> 8 & 7);
+}
 static void draw_pkey(PKey *k, VkShaderModule vsm, int gpu) {
     /* the pipeline key of the draw about to be made (its targets bound: ensure_pass) */
     uint32_t om = R(0x107), bl = R(0x101);
@@ -1953,6 +2029,7 @@ static void draw_pkey(PKey *k, VkShaderModule vsm, int gpu) {
         k->sc[25] = R(0x0E0) & 0x1FF07; k->sc[26] = R(0x104) & 0x71;   /* alpha test enable + function: the animated reference stays a uniform */ k->sc[27] = R(0x080) & 0x2007;
         k->sc[28] = (R(0x08F) & 1) && !(R(0x1C6) & 1); k->sc[29] = R(0x06D) & 1;
     }
+    if (g_vk_rp) { DsState s; draw_ds(&s); k->ds = ds_pack(&s); }   /* the Vulkan 1.1 mode: in the pipeline */
 }
 /* the pipeline for k (or its generic one) can be used now; queued for the worker if new */
 static int pipe_usable(const PKey *k) {
@@ -2146,7 +2223,6 @@ static void pica_vk_draw_(const Vtx *vcache, const uint32_t *vlist_index, const 
         last_ubatch = batch_no;
 
         PKey k; draw_pkey(&k, vsm, gpu);
-        uint32_t om = R(0x107); int depth_on = cur_d && ((R(0x114) & 3) || (R(0x115) & 3));
         /* skippable only for screen-sized targets (eyes, screens) and ones drawn in each of the last 8 frames */
         extern unsigned g_gsp_top_swaps; uint32_t fr = g_gsp_top_swaps;
         if (fr != cur_c->frame_last) { cur_c->frames = fr == cur_c->frame_last + 1 ? cur_c->frames + 1 : 1; cur_c->frame_last = fr; }
@@ -2174,23 +2250,9 @@ static void pica_vk_draw_(const Vtx *vcache, const uint32_t *vlist_index, const 
         }
         uint32_t kc = R(0x103);
         rc->bc[0] = (kc & 255) / 255.f; rc->bc[1] = (kc >> 8 & 255) / 255.f; rc->bc[2] = (kc >> 16 & 255) / 255.f; rc->bc[3] = (kc >> 24) / 255.f;
-        /* pica_sw.c: cull mode 1 drops triangles with positive window-space area, 2 negative ones; Vulkan calls a
-           negative area (in its sign convention) front-facing for COUNTER_CLOCKWISE. Checked on the Mii heads (cull
-           mode 1): the other way round drops the face and keeps the inside of the hair */
-        int cm = (int)(R(0x040) & 3);
-        rc->cull = cm == 1 ? VK_CULL_MODE_BACK_BIT : cm == 2 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE;
-        { static int nocull = -1; if (nocull < 0) nocull = getenv("PWR_VK_NOCULL") != NULL; if (nocull) rc->cull = VK_CULL_MODE_NONE; }
-        static const VkCompareOp cmp[8] = { VK_COMPARE_OP_NEVER, VK_COMPARE_OP_ALWAYS, VK_COMPARE_OP_EQUAL, VK_COMPARE_OP_NOT_EQUAL,
-                                            VK_COMPARE_OP_LESS, VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER, VK_COMPARE_OP_GREATER_OR_EQUAL };
-        /* PICA writes depth with the test disabled (the game's depth-clearing quads rely on it); Vulkan writes depth only
-           while the test is enabled, so a disabled test becomes ALWAYS */
-        rc->dt = (uint8_t)(depth_on && (om & 1)); rc->dw = (uint8_t)(depth_on && ((om >> 12) & 1)); rc->dop = cmp[om >> 4 & 7];
-        if (rc->dw && !rc->dt) { rc->dt = 1; rc->dop = VK_COMPARE_OP_ALWAYS; }
-        /* stencil (0x105 test, 0x106 ops; same numbering as Vulkan) only with a D24S8 buffer; writes need 0x115 */
-        uint32_t sf = R(0x105), so = R(0x106);
-        rc->ste = (uint8_t)(has_stencil && depth_on && (sf & 1) && cur_d->fmt == 3);
-        rc->sfn = cmp[sf >> 4 & 7]; rc->sref = (uint8_t)(sf >> 16); rc->scmask = (uint8_t)(sf >> 24); rc->swmask = (R(0x115) & 3) ? (uint8_t)(sf >> 8) : 0;
-        rc->sop[0] = (VkStencilOp)(so & 7); rc->sop[1] = (VkStencilOp)(so >> 4 & 7); rc->sop[2] = (VkStencilOp)(so >> 8 & 7);
+        DsState s; draw_ds(&s);
+        rc->cull = s.cull; rc->dt = s.dt; rc->dw = s.dw; rc->dop = s.dop; rc->ste = s.ste; rc->sfn = s.sfn; rc->sref = s.sref;
+        rc->scmask = s.scmask; rc->swmask = s.swmask; memcpy(rc->sop, s.sop, sizeof rc->sop);
         rc->b[0] = (VkDescriptorBufferInfo){ ubuf.buf, uoff, UBO_SIZE };
         rc->b[1] = (VkDescriptorBufferInfo){ lbuf.buf, lut_off, sizeof light_lut + sizeof fog_lut };
         rc->b[2] = (VkDescriptorBufferInfo){ ubuf.buf, vsoff, VS_UBO_SIZE };

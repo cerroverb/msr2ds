@@ -14,6 +14,7 @@
  * the raw attribute bytes are a texture buffer there, read from word d.perm.w on. */
 #include "pica_int.h"
 #include <vulkan/vulkan.h>
+#include "vk_rp.h"
 #ifdef _WIN32
 #include <windows.h>
 #define dlopen(name, flags) ((void *)LoadLibraryA(name))
@@ -36,6 +37,8 @@ static sc_compiler (*sc_compiler_initialize)(void);
 static sc_options (*sc_compile_options_initialize)(void);
 static void (*sc_set_optimization_level)(sc_options, int);
 static void (*sc_set_target_env)(sc_options, int, uint32_t);
+/* the SPIR-V the device takes: Vulkan 1.3's, or 1.1's in the Vulkan 1.1 mode (vk_rp.h) */
+static uint32_t vsgen_env(void) { return g_vk_rp ? (1u << 22) | (1u << 12) : (1u << 22) | (3u << 12); }
 static sc_result (*sc_compile_into_spv)(sc_compiler, const char *, size_t, int, const char *, const char *, sc_options);
 static size_t (*sc_result_get_length)(sc_result);
 static const char *(*sc_result_get_bytes)(sc_result);
@@ -77,7 +80,7 @@ static int shaderc_load(void) {
     #undef SYM
     compiler = sc_compiler_initialize(); options = sc_compile_options_initialize();
     if (!compiler || !options) return 0;
-    sc_set_target_env(options, 0 /* vulkan */, (1u << 22) | (3u << 12) /* 1.3 */);
+    sc_set_target_env(options, 0 /* vulkan */, vsgen_env());
     sc_set_optimization_level(options, vsgen_opt());
     sc_state = 1;
     return 1;
@@ -498,7 +501,7 @@ static void *vs_worker(void *arg) {
     k_background_thread();   /* draws use the interpreter shader until a translation is ready */
     sc_compiler c = sc_compiler_initialize(); sc_options o = sc_compile_options_initialize();   /* this thread's own */
     if (!c || !o) return NULL;
-    sc_set_target_env(o, 0 /* vulkan */, (1u << 22) | (3u << 12) /* 1.3 */);
+    sc_set_target_env(o, 0 /* vulkan */, vsgen_env());
     sc_set_optimization_level(o, vsgen_opt());
     static int trace = -1; if (trace < 0) trace = getenv("PWR_VSGEN_TRACE") != NULL;
     for (;;) {

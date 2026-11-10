@@ -31,6 +31,7 @@
 #include <vulkan/vulkan.h>
 #include "msr/overlay_host.h"
 #include "vk_push.h"
+#include "vk_rp.h"
 #ifdef MSR_OPENGL
 #include "video_gl.h"
 #endif
@@ -79,7 +80,8 @@ static VkSemaphore sem_acquire, sem_done[MAX_IMAGES];   /* one per swapchain ima
 static VkFence fence;
 static uint8_t top_px[TOP_W * SCR_H * 4], bot_px[BOT_W * SCR_H * 4];
 static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;   /* the queue is shared with the PICA renderer */
-static int vk13;
+static int vk13;     /* the device has Vulkan 1.3's dynamic rendering */
+static int vk_hw;    /* the hardware PICA renderer and the GPU presenter can run: with Vulkan 1.3, or in the 1.1 mode (vk_rp.h) */
 static int use_gl;   /* presenting with OpenGL (video_gl.c), not Vulkan */
 unsigned g_vid_acquire_fail, g_vid_present_fail, g_vid_presented; int g_vid_last_err;
 
@@ -200,8 +202,9 @@ static uint32_t mem_type(uint32_t bits, VkMemoryPropertyFlags want) {
     return UINT32_MAX;
 }
 
-typedef struct { VkImage img; VkDeviceMemory mem; VkImageView view; uint32_t w, h; } Img;
+typedef struct { VkImage img; VkDeviceMemory mem; VkImageView view; uint32_t w, h; VkFormat fmt; } Img;
 static int img_make(Img *im, uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage) {
+    im->fmt = fmt;
     VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt, .extent = { w, h, 1 },
         .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
     VK(vkCreateImage(dev, &ci, NULL, &im->img));
@@ -216,6 +219,7 @@ static int img_make(Img *im, uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageF
 }
 static void img_free(Img *im) {
     if (!im->img) return;
+    if (g_vk_rp) vk_rp_forget(im->view);
     vkDestroyImageView(dev, im->view, NULL); vkDestroyImage(dev, im->img, NULL); vkFreeMemory(dev, im->mem, NULL);
     memset(im, 0, sizeof *im);
 }
@@ -257,6 +261,26 @@ static VkShaderModule shader(const uint32_t *code, size_t size) {
     VkShaderModule m = VK_NULL_HANDLE; vkCreateShaderModule(dev, &ci, NULL, &m); return m;
 }
 
+/* the Vulkan 1.1 mode's render pass into one colour image of this format (vk_rp.h): the presenter's passes keep their
+   attachment in COLOR_ATTACHMENT_OPTIMAL (barrier_img moves it there before and away after, as with dynamic rendering) */
+static VkRenderPass pass_for(VkFormat fmt, VkAttachmentLoadOp load) {
+    return vk_rp_get(fmt, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, load, VK_FORMAT_UNDEFINED, 0, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE);
+}
+/* a pass into a colour view (W x H), its viewport and scissor the whole of it; end_pass ends it */
+static void begin_pass_view(VkImageView view, VkFormat fmt, VkExtent2D ex, VkAttachmentLoadOp load, float clear_alpha) {
+    VkClearValue cv = { .color = { .float32 = { 0, 0, 0, clear_alpha } } };
+    if (g_vk_rp) vk_rp_begin(cmdbuf, pass_for(fmt, load), view, VK_NULL_HANDLE, ex, load == VK_ATTACHMENT_LOAD_OP_CLEAR ? &cv : NULL);
+    else {
+        VkRenderingAttachmentInfo ca = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view, .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = load, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = cv };
+        VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, ex }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca };
+        vkCmdBeginRendering(cmdbuf, &ri);
+    }
+    VkViewport vp = { 0, 0, (float)ex.width, (float)ex.height, 0, 1 }; VkRect2D sc = { { 0, 0 }, ex };
+    vkCmdSetViewport(cmdbuf, 0, 1, &vp); vkCmdSetScissor(cmdbuf, 0, 1, &sc);
+}
+static void end_pass(void) { if (g_vk_rp) vkCmdEndRenderPass(cmdbuf); else vkCmdEndRendering(cmdbuf); }
+
 /* one pipeline per fragment shader: present.vert quad (or vs), alpha blending (the screens write alpha 1), dynamic viewport/scissor.
    blend 0: the colour target's alpha is replaced; 1: coverage accumulates in alpha (the HDR interface layer); 2: none */
 static VkPipeline make_pipe_ex(const uint32_t *vs, size_t vs_size, const uint32_t *fs, size_t fs_size, VkFormat fmt, VkPipelineLayout layout, int blend);
@@ -285,6 +309,7 @@ static VkPipeline make_pipe_ex(const uint32_t *vs, size_t vs_size, const uint32_
         VkGraphicsPipelineCreateInfo gci = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2, .pStages = st,
             .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms,
             .pColorBlendState = &cb, .pDynamicState = &dy, .layout = layout };
+        if (g_vk_rp) { gci.pNext = NULL; gci.renderPass = pass_for(fmt, VK_ATTACHMENT_LOAD_OP_DONT_CARE); }   /* the 1.1 mode (vk_rp.h) */
         if (vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gci, NULL, &p)) p = VK_NULL_HANDLE;
     }
     if (vm) vkDestroyShaderModule(dev, vm, NULL);
@@ -294,7 +319,7 @@ static VkPipeline make_pipe_ex(const uint32_t *vs, size_t vs_size, const uint32_
 static VkPipeline make_pipe(const uint32_t *fs, size_t fs_size, VkFormat fmt) { return make_pipe_with(present_vert, sizeof present_vert, fs, fs_size, fmt, play); }
 
 static int gpu_init(void) {
-    if (!vk13) return -1;
+    if (!vk_hw) return -1;
     if (img_make(&tex_top, TOP_W, SCR_H, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
         img_make(&tex_bot, BOT_W, SCR_H, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return -1;
     VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = UP_TOAST + sizeof toast_px, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT };
@@ -400,7 +425,8 @@ int win_hdr_info(void *hwnd, float *peak, float *paper);   /* win/hdr_win.c */
    have changed), told to the settings overlay */
 static void hdr_detect(void) {
     VkFormat sdr, h10, scrgb; VkColorSpaceKHR cs; surface_formats(&sdr, &cs, &h10, &scrgb);
-    int formats = has_colorspace_ext && (h10 || scrgb), opt = 0; float peak = 1000.f, paper = 200.f;
+    int formats = has_colorspace_ext && (h10 || scrgb) && !g_vk_rp, opt = 0;   /* (HDR: Vulkan 1.3 only) */
+    float peak = 1000.f, paper = 200.f;
 #ifdef _WIN32
     SDL_SysWMinfo wi; SDL_VERSION(&wi.version);
     int on = SDL_GetWindowWMInfo(win, &wi) && win_hdr_info(wi.info.win.window, &peak, &paper);
@@ -451,11 +477,30 @@ static int create_swapchain(void) {
         .preTransform = transform, .compositeAlpha = alpha,
         .presentMode = present_mode(), .clipped = VK_TRUE, .oldSwapchain = swap };
     VkSwapchainKHR old = swap;
-    VK(vkCreateSwapchainKHR(dev, &ci, NULL, &swap));
+    VkResult sr = vkCreateSwapchainKHR(dev, &ci, NULL, &swap);
+    if (sr == VK_ERROR_NATIVE_WINDOW_IN_USE_KHR && !old) {
+        /* #53 (Adreno 640, Android 10): the first swapchain refused, the window's surface said to have one already.
+           What was asked, for the log; then once more on a surface made again */
+        fprintf(stderr, "video: vkCreateSwapchainKHR: the window is in use (images %u of %u-%u, %ux%u, format %d, colour space %d, "
+                "usage %#x of %#x, transform %#x of %#x, alpha %#x, present mode %d): its surface again\n", n, caps.minImageCount,
+                caps.maxImageCount, sc_extent.width, sc_extent.height, (int)sc_format, (int)cs, (unsigned)ci.imageUsage,
+                (unsigned)caps.supportedUsageFlags, (unsigned)transform, (unsigned)caps.supportedTransforms, (unsigned)alpha, (int)ci.presentMode);
+        swap = VK_NULL_HANDLE;
+        vkDestroySurfaceKHR(inst, surf, NULL); surf = VK_NULL_HANDLE;
+        if (!SDL_Vulkan_CreateSurface(win, inst, &surf)) { fprintf(stderr, "video: surface: %s\n", SDL_GetError()); snprintf(init_error, sizeof init_error, "surface: %s", SDL_GetError()); return -1; }
+        ci.surface = surf;
+        sr = vkCreateSwapchainKHR(dev, &ci, NULL, &swap);
+    }
+    if (sr != VK_SUCCESS) {
+        fprintf(stderr, "video: vkCreateSwapchainKHR(dev, &ci, NULL, &swap) failed (%d)\n", (int)sr);
+        snprintf(init_error, sizeof init_error, "vkCreateSwapchainKHR(dev, &ci, NULL, &swap) failed (%d)", (int)sr);
+        swap = old;   /* (retired: the next acquire fails and asks for another) */
+        return -1;
+    }
     if (old) vkDestroySwapchainKHR(dev, old, NULL);
     sc_count = MAX_IMAGES; VK(vkGetSwapchainImagesKHR(dev, swap, &sc_count, sc_images));
     sc_bgra = sc_format == VK_FORMAT_B8G8R8A8_UNORM || sc_format == VK_FORMAT_B8G8R8A8_SRGB;
-    for (int i = 0; i < MAX_IMAGES; i++) if (sc_views[i]) { vkDestroyImageView(dev, sc_views[i], NULL); sc_views[i] = VK_NULL_HANDLE; }
+    for (int i = 0; i < MAX_IMAGES; i++) if (sc_views[i]) { if (g_vk_rp) vk_rp_forget(sc_views[i]); vkDestroyImageView(dev, sc_views[i], NULL); sc_views[i] = VK_NULL_HANDLE; }
     if (gpu_ok) {   /* the window-sized image the presenter draws into */
         img_free(&target); img_free(&ui_layer);
         if (img_make(&target, sc_extent.width, sc_extent.height, target_fmt, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) return -1;
@@ -546,8 +591,9 @@ void video_explain(const char *log) {
 
 /* Vulkan: the window, the instance, the device and the presenter. probe (--renderer=auto): a device without Vulkan 1.3
    returns 1 before the device is made, for OpenGL to try. 0 ok, -1 failed; vk_close then closes what was opened.
-   PWR_NO_VULKAN=1 acts as if there were no Vulkan, =13 as if its device had no 1.3 (the Vulkan loader ignores its own
-   VK_DRIVER_FILES in an elevated process, so this tests the fallback there too). */
+   PWR_NO_VULKAN=1 acts as if there were no Vulkan, =13 as if its device had neither 1.3 nor 1.1 (the presenter on the CPU;
+   the Vulkan loader ignores its own VK_DRIVER_FILES in an elevated process, so this tests the fallback there too);
+   PWR_VK11=1 takes the Vulkan 1.1 mode (vk_rp.h) on any device. */
 static int vk_open(int win_w, int win_h, int probe) {
     const char *no_vk = getenv("PWR_NO_VULKAN");
     if (no_vk && !strcmp(no_vk, "1")) { snprintf(init_error, sizeof init_error, "PWR_NO_VULKAN=1"); return -1; }
@@ -590,8 +636,11 @@ static int vk_open(int win_w, int win_h, int probe) {
         PFN_vkEnumerateInstanceVersion eiv = (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(NULL, "vkEnumerateInstanceVersion");
         if (!eiv || eiv(&inst_version) != VK_SUCCESS) inst_version = VK_API_VERSION_1_0;
     }
+    /* PWR_VK11=1: the Vulkan 1.1 mode on any device (vk_rp.h), the instance asking for 1.1 only, so that the validation
+       layer holds the program to 1.1 (a check of the mode on a PC) */
+    const int force11 = getenv("PWR_VK11") && atoi(getenv("PWR_VK11")) == 1;
     VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "msr-native",
-                             .apiVersion = inst_version >= VK_API_VERSION_1_1 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_0 };
+                             .apiVersion = inst_version < VK_API_VERSION_1_1 ? VK_API_VERSION_1_0 : force11 ? VK_API_VERSION_1_1 : VK_API_VERSION_1_3 };
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = ne, .ppEnabledExtensionNames = exts,
         .flags = has_portability_enum ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0 };
     VK(vkCreateInstance(&ici, NULL, &inst));
@@ -647,10 +696,15 @@ static int vk_open(int win_w, int win_h, int probe) {
     free(dep);
     PFN_vkGetPhysicalDeviceFeatures2 features2 = inst_version >= VK_API_VERSION_1_1
         ? (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceFeatures2") : NULL;
-    if (pp.apiVersion >= VK_API_VERSION_1_3 && features2) features2(phys, &f2);
+    if (pp.apiVersion >= VK_API_VERSION_1_3 && features2 && !force11) features2(phys, &f2);
     /* push descriptors where the device has them, else descriptor sets in their place (vk_push.c) */
-    vk13 = pp.apiVersion >= VK_API_VERSION_1_3 && f13.dynamicRendering && f13.shaderDemoteToHelperInvocation && !(no_vk && !strcmp(no_vk, "13"));
-    if (probe && !vk13) {   /* OpenGL first (video_init) */
+    vk13 = pp.apiVersion >= VK_API_VERSION_1_3 && f13.dynamicRendering && f13.shaderDemoteToHelperInvocation && !(no_vk && !strcmp(no_vk, "13")) && !force11;
+    /* Without them, the Vulkan 1.1 mode (vk_rp.h: render passes, the depth and stencil state in the pipelines, SPIR-V 1.3):
+       phones' GPUs of about 2019-2021 (Adreno 6xx, Mali-G7x) and older PCs' drivers. On a PC --renderer=auto tries OpenGL
+       first there (as before the mode existed: video_init), then this. */
+    g_vk_rp = !vk13 && inst_version >= VK_API_VERSION_1_1 && pp.apiVersion >= VK_API_VERSION_1_1 && !(no_vk && !strcmp(no_vk, "13"));
+    vk_hw = vk13 || g_vk_rp;
+    if (probe && !vk13 && !force11) {   /* OpenGL first (video_init) */
         fprintf(stderr, "video: Vulkan %u.%u without 1.3's dynamic rendering (%d) and demote to helper (%d): trying OpenGL\n",
                 VK_API_VERSION_MAJOR(pp.apiVersion), VK_API_VERSION_MINOR(pp.apiVersion), (int)f13.dynamicRendering, (int)f13.shaderDemoteToHelperInvocation);
         snprintf(init_error, sizeof init_error, "Vulkan %u.%u, without 1.3", VK_API_VERSION_MAJOR(pp.apiVersion), VK_API_VERSION_MINOR(pp.apiVersion));
@@ -659,23 +713,29 @@ static int vk_open(int win_w, int win_h, int probe) {
     VkPhysicalDeviceVulkan13Features en13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = VK_TRUE, .shaderDemoteToHelperInvocation = VK_TRUE };
     VkPhysicalDeviceFeatures2 en2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &en13 };
     en2.features.samplerAnisotropy = f2.features.samplerAnisotropy;   /* pica_vk.c: anisotropic filtering option */
+    VkPhysicalDeviceFeatures f10 = { 0 }, en10 = { 0 };   /* the 1.1 mode's (Vulkan 1.0's query) */
+    if (g_vk_rp) { vkGetPhysicalDeviceFeatures(phys, &f10); en10.samplerAnisotropy = f10.samplerAnisotropy; }
     const char *dext[6] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME }; uint32_t ndext = 1;
     if (has_portability_subset) dext[ndext++] = "VK_KHR_portability_subset";
-    if (vk13 && has_push) dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+    if (vk_hw && has_push) dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
     if (vk13 && has_hdr_metadata) dext[ndext++] = VK_EXT_HDR_METADATA_EXTENSION_NAME; else has_hdr_metadata = 0;
     /* the extension (the instance asks for 1.3, so 1.4's core ops are not ours); not through MoltenVK (Metal's load and
        store actions differ) */
-    g_vk_attachment_none = vk13 && !has_portability_subset && op_none;
+    g_vk_attachment_none = vk_hw && !has_portability_subset && op_none;
     if (g_vk_attachment_none) dext[ndext++] = op_none;
-    if (vk13) fprintf(stderr, "video: depth left alone by passes that don't use it: %s\n", g_vk_attachment_none ? op_none : "no (loaded and stored)");
+    if (vk_hw) fprintf(stderr, "video: depth left alone by passes that don't use it: %s\n", g_vk_attachment_none ? op_none : "no (loaded and stored)");
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = vk13 ? &en2 : NULL, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
-        .enabledExtensionCount = ndext, .ppEnabledExtensionNames = dext };
-    if (!vk13) fprintf(stderr, "video: no Vulkan 1.3 dynamic rendering: hardware PICA renderer and GPU presenter unavailable "
+        .enabledExtensionCount = ndext, .ppEnabledExtensionNames = dext, .pEnabledFeatures = g_vk_rp ? &en10 : NULL };
+    if (g_vk_rp) fprintf(stderr, "video: Vulkan %u.%u without 1.3's dynamic rendering (%d) and demote to helper (%d): the Vulkan 1.1 mode "
+                         "(render passes; push descriptors %s)\n", VK_API_VERSION_MAJOR(pp.apiVersion), VK_API_VERSION_MINOR(pp.apiVersion),
+                         (int)f13.dynamicRendering, (int)f13.shaderDemoteToHelperInvocation, has_push ? "yes" : "no");
+    else if (!vk13) fprintf(stderr, "video: no Vulkan 1.3 dynamic rendering: hardware PICA renderer and GPU presenter unavailable "
                        "(Vulkan %u.%u, dynamic rendering %d, demote to helper %d)\n",
                        VK_API_VERSION_MAJOR(pp.apiVersion), VK_API_VERSION_MINOR(pp.apiVersion), (int)f13.dynamicRendering,
                        (int)f13.shaderDemoteToHelperInvocation);
     VK(vkCreateDevice(phys, &dci, NULL, &dev));
-    if (vk13) vk_push_init(dev, has_push);
+    if (vk_hw) vk_push_init(dev, has_push);
+    if (g_vk_rp) vk_rp_init(dev);
 #ifdef MSR_VK13_FROM_DEVICE
     { extern void msr_vk13_load(VkDevice d); if (vk13) msr_vk13_load(dev); }   /* vk13_load.c */
 #endif
@@ -698,7 +758,7 @@ static int vk_open(int win_w, int win_h, int probe) {
     VK(vkCreateFence(dev, &fi, NULL, &fence));
     if (gpu_ok) {   /* the settings overlay draws into the presentation's target (its font goes up on the shared queue) */
         pthread_mutex_lock(&queue_lock);
-        msr_overlay_vk_init(inst, phys, dev, qfam, queue, target_fmt, sc_count);
+        msr_overlay_vk_init(inst, phys, dev, qfam, queue, target_fmt, sc_count, g_vk_rp ? pass_for(target_fmt, VK_ATTACHMENT_LOAD_OP_DONT_CARE) : VK_NULL_HANDLE);
         pthread_mutex_unlock(&queue_lock);
     }
     fprintf(stderr, "video: presenting with Vulkan\n");
@@ -712,7 +772,7 @@ static void vk_close(void) {
     if (inst && !dev) vkDestroyInstance(inst, NULL);
     if (win) SDL_DestroyWindow(win);
     win = NULL; swap = VK_NULL_HANDLE; surf = VK_NULL_HANDLE; inst = VK_NULL_HANDLE; dev = VK_NULL_HANDLE; phys = VK_NULL_HANDLE;
-    gpu_ok = vk13 = 0;
+    gpu_ok = vk13 = vk_hw = g_vk_rp = 0;
 }
 
 /* OpenGL (video_gl.c): the game's frames are shown without waiting for the display. main.c already paces them (VBlank
@@ -993,13 +1053,7 @@ static void gpu_quad(VkPipeline pl, const Img *t, Rect r, float W, float H, int 
 }
 static void begin_pass_a(const Img *att, VkAttachmentLoadOp load, float clear_alpha) {
     barrier_img(att->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-    VkRenderingAttachmentInfo ca = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = att->view, .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp = load, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = { .color = { .float32 = { 0, 0, 0, clear_alpha } } } };
-    VkExtent2D ex = { att->w, att->h };
-    VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, ex }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca };
-    vkCmdBeginRendering(cmdbuf, &ri);
-    VkViewport vp = { 0, 0, (float)att->w, (float)att->h, 0, 1 }; VkRect2D sc = { { 0, 0 }, ex };
-    vkCmdSetViewport(cmdbuf, 0, 1, &vp); vkCmdSetScissor(cmdbuf, 0, 1, &sc);
+    begin_pass_view(att->view, att->fmt, (VkExtent2D){ att->w, att->h }, load, clear_alpha);
 }
 static void begin_pass(const Img *att, VkAttachmentLoadOp load) { begin_pass_a(att, load, 1); }
 
@@ -1016,7 +1070,7 @@ static void fsr_upscale(int i, const Img *src, Rect *r) {
     begin_pass(t, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
     float ex[4] = { r->w, r->h, 0, 0 };
     gpu_quad(pipe_easu, src, (Rect){ 0, 0, r->w, r->h, 1 }, r->w, r->h, 0, 0, ex);
-    vkCmdEndRendering(cmdbuf);
+    end_pass();
     barrier_img(t->img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 }
 
@@ -1031,7 +1085,7 @@ static const Img *hi_screen(int i, const ScreenSource *s, int screen_w) {
     }
     begin_pass(t, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
     gpu_quad_view(pipe_rgba, v, lw, lh, VK_IMAGE_LAYOUT_GENERAL, 1, (Rect){ 0, 0, (float)lh, (float)lw, 1 }, (float)lh, (float)lw, 0, 0, NULL);
-    vkCmdEndRendering(cmdbuf);
+    end_pass();
     barrier_img(t->img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
     return t;
 }
@@ -1307,7 +1361,7 @@ int video_frame(void) {
             if (use_gl) { extern int pica_gl_bottom_pixels(uint32_t addr, uint8_t *out); read_back = pica_gl_bottom_pixels(bottom.addr, bot_px); }
             else
 #endif
-            read_back = gpu_ok && vk13 && pica_vk_bottom_pixels(bottom.addr, bot_px);
+            read_back = gpu_ok && vk_hw && pica_vk_bottom_pixels(bottom.addr, bot_px);
         }
         if (!read_back) decode_screen(&bottom, BOT_W, bot_px);
     }
@@ -1377,7 +1431,7 @@ int video_frame(void) {
 
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
     vkResetCommandBuffer(cmdbuf, 0); vkBeginCommandBuffer(cmdbuf, &bi);
-    if (gpu_ok && vk13) pica_vk_scan_lock(1);   /* until submitted: a 3D resolution change must not free a scan-out image in use */
+    if (gpu_ok && vk_hw) pica_vk_scan_lock(1);   /* until submitted: a 3D resolution change must not free a scan-out image in use */
     if (gpu_ok) {
         float W = (float)sc_extent.width, H = (float)sc_extent.height;
         memcpy(up_ptr, top_px, sizeof top_px); memcpy(up_ptr + sizeof top_px, bot_px, sizeof bot_px);
@@ -1408,7 +1462,7 @@ int video_frame(void) {
             gpu_quad(pipe, st, rt, W, H, f, 0, NULL); gpu_quad(pipe, sb, rb, W, H, f, 0, NULL);
         }
         if (hdr_mode) {   /* HDR: the interface goes into its own layer, at paper white in hdr.frag */
-            vkCmdEndRendering(cmdbuf);
+            end_pass();
             barrier_img(target.img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
             begin_pass_a(&ui_layer, VK_ATTACHMENT_LOAD_OP_CLEAR, 0);
         }
@@ -1419,16 +1473,11 @@ int video_frame(void) {
         if (!msr_overlay_visible() && now_s() < toast_until && tex_toast.img)   /* layout label, top centre (pixel for pixel) */
             gpu_quad(hdr_mode ? pipe_ui : pipe, &tex_toast, (Rect){ floorf((W - (float)tex_toast.w) / 2), 12, (float)tex_toast.w, (float)tex_toast.h, 1 }, W, H, 0, 1, NULL);
         msr_overlay_draw(cmdbuf, sc_extent.width, sc_extent.height);   /* the settings, the FPS counter, the hints: last */
-        vkCmdEndRendering(cmdbuf);
+        end_pass();
         if (hdr_mode) {
             barrier_img(ui_layer.img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
             barrier_img(sc_images[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-            VkRenderingAttachmentInfo ca = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = sc_views[idx], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
-            VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, sc_extent }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca };
-            vkCmdBeginRendering(cmdbuf, &ri);
-            VkViewport vp = { 0, 0, W, H, 0, 1 }; VkRect2D sc = { { 0, 0 }, sc_extent };
-            vkCmdSetViewport(cmdbuf, 0, 1, &vp); vkCmdSetScissor(cmdbuf, 0, 1, &sc);
+            begin_pass_view(sc_views[idx], sc_format, sc_extent, VK_ATTACHMENT_LOAD_OP_DONT_CARE, 1);
             float pk, pp; msr_hdr(&pk, &pp); if (pk <= 0) pk = disp_peak; if (pp <= 0) pp = disp_paper;
             Push hp = { { -1, -1, 1, 1 }, { W, H, 1, 1 }, { hdr_mode, 0, 0, 0 }, { pp, pk > pp ? pk : pp, 0.5f, 0 } };
             VkDescriptorImageInfo ii[2] = { { smp_linear, target.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }, { smp_linear, ui_layer.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL } };
@@ -1438,7 +1487,7 @@ int video_frame(void) {
             vk_push(&push_arena, cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, play_hdr, 0, 2, wds);
             vkCmdPushConstants(cmdbuf, play_hdr, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof hp, &hp);
             vkCmdDraw(cmdbuf, 4, 1, 0, 0);
-            vkCmdEndRendering(cmdbuf);
+            end_pass();
             barrier_img(sc_images[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
         } else {
             barrier_img(target.img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
@@ -1461,7 +1510,7 @@ int video_frame(void) {
         .commandBufferCount = 1, .pCommandBuffers = &cmdbuf, .signalSemaphoreCount = 1, .pSignalSemaphores = &sem_done[idx] };
     pthread_mutex_lock(&queue_lock);
     vkQueueSubmit(queue, 1, &sub, fence);
-    if (gpu_ok && vk13) pica_vk_scan_lock(0);
+    if (gpu_ok && vk_hw) pica_vk_scan_lock(0);
     VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &sem_done[idx], .swapchainCount = 1, .pSwapchains = &swap, .pImageIndices = &idx };
     r = vkQueuePresentKHR(queue, &pi);
     pthread_mutex_unlock(&queue_lock);
@@ -1474,7 +1523,7 @@ int video_frame(void) {
 }
 
 int video_vk(VkPhysicalDevice *p, VkDevice *d, VkQueue *q, uint32_t *family) {
-    if (!dev || !vk13) return -1;
+    if (!dev || !vk_hw) return -1;
     *p = phys; *d = dev; *q = queue; *family = qfam; return 0;
 }
 void video_queue_lock(void) { pthread_mutex_lock(&queue_lock); }
