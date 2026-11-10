@@ -426,15 +426,15 @@ extern "C" void msr_overlay_start(int fullscreen, int resolution, int vsync, int
 }
 
 extern "C" void msr_overlay_vk_init(VkInstance instance, VkPhysicalDevice physical, VkDevice device, uint32_t family,
-                                    VkQueue queue, VkFormat format, uint32_t images) {
+                                    VkQueue queue, VkFormat format, uint32_t images, VkRenderPass render_pass) {
     MSR::OverlayHook::VulkanContext c{};
-    c.api_version = VK_API_VERSION_1_3;
+    c.api_version = render_pass ? VK_API_VERSION_1_1 : VK_API_VERSION_1_3;   /* the 1.1 mode: a render pass, not dynamic rendering */
     c.instance = instance;
     c.physical_device = physical;
     c.device = device;
     c.queue_family = family;
     c.queue = queue;
-    c.render_pass = VK_NULL_HANDLE;
+    c.render_pass = render_pass;
     c.image_count = images;
     c.get_instance_proc_addr = vkGetInstanceProcAddr;
     c.queue_mutex = &upload_lock;

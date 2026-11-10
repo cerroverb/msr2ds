@@ -223,7 +223,8 @@ every batch.
 **OpenGL** (2026-11-08, msr2ds issue 34; Windows, and Linux untried: CMake's `MSR_OPENGL`): for graphics without Vulkan
 (Intel's before the 6th generation on Windows, issue 24) or without its 1.3. `--renderer=auto|vulkan|opengl` (the
 Display tab's Graphics API, `settings.ini` `[native]` `renderer`, which the launcher passes on and uses for its own
-window): auto takes Vulkan where its device has 1.3, else OpenGL, else Vulkan without 1.3 (its CPU presenter).
+window): auto takes Vulkan where its device has 1.3, else OpenGL, else Vulkan in its 1.1 mode (below; the CPU presenter
+where the device has not even 1.1).
 - The presenter (`video_gl.c`, `gl_load.c`): an OpenGL 3.3 core context (the newest core profile the driver has) on the
   same window, laid out and drawn as video.c's Vulkan path, with the same shaders: `present`, `msr`, `fsr_easu` and
   `fsr_rcas` keep their Vulkan-only lines under `#ifdef VULKAN` (glslc defines it; their SPIR-V is unchanged, byte for
@@ -281,8 +282,32 @@ window): auto takes Vulkan where its device has 1.3, else OpenGL, else Vulkan wi
   build, older hardware.
   Comparing screenshots with Vulkan's: with HDR on (the test profile's `hdr=true`) a capture of Vulkan's HDR10 window
   looks washed out and glowing; OpenGL has no HDR, so compare with `hdr=false`.
-- `PWR_NO_VULKAN=1` acts as if there were no Vulkan, `=13` as if its device had no 1.3 (the loader ignores
-  `VK_DRIVER_FILES` in an elevated process); `PWR_GL_DEBUG=1` a debug context with the driver's messages in the log (it
+
+**The Vulkan 1.1 mode** (2026-11-09, msr2ds issue 53: an Adreno 640, Vulkan 1.1, had no picture at all; the Galaxy
+Note 10's GPUs, Adreno 640 and Mali-G76, are the same): where the device has Vulkan 1.1 but not 1.3's dynamic rendering
+and demote to helper invocation (phones' GPUs of about 2019-2021, older PCs' drivers), the hardware renderer and the GPU
+presenter run on Vulkan 1.1 (`g_vk_rp`, `vk_rp.h`). On a PC `--renderer=auto` still tries OpenGL first there, as before;
+`--renderer=vulkan` takes this mode; Android has no OpenGL and takes it.
+- Render passes stand in for dynamic rendering (`vk_rp.c`): cached by formats, layout and load/store ops, and framebuffers
+  by pass, views and size, made the first time and destroyed with their views (`vk_rp_forget`, from the image frees).
+  pica_vk.c's passes keep their attachments in GENERAL as before; the presenter's in COLOR_ATTACHMENT_OPTIMAL, its
+  barriers unchanged. The depth attachment of a pass that does not use it is neither loaded nor stored where the device
+  has `VK_KHR/EXT_load_store_op_none`, as with 1.3. The settings menu gets the presenter's render pass (Dear ImGui's
+  `RenderPass`, API 1.1).
+- Extended dynamic state (cull mode, depth test, write and compare op, stencil test and ops) is part of each pipeline,
+  `PKey.ds` (`ds_pack`: in what was the key's padding, so `pwr_shaders.bin`'s keys keep their size; with 1.3 it stays
+  0); the stencil reference and masks stay dynamic. About twice the pipelines (127 against 52 in the first minute).
+- SPIR-V 1.3: pica.vert, pica_vs.vert, pica.frag and pica_nd.frag are built twice (`*.11.inc`: discard as OpKill, where
+  1.3's SPIR-V 1.6 makes it a demote), the presenter's shaders once for both (they use nothing newer), and pica_vsgen.c's
+  translations for the device's version (`vsgen_env`). `pwr_shaders.bin` is stamped with the mode (" vk11"). No HDR.
+- `PWR_VK11=1` takes the mode on any device, the instance asking for Vulkan 1.1 so that the validation layer holds the
+  program to it. On an RTX 5090 at 3x (2026-11-09): the same picture as 1.3's (screenshots with `hdr=false`: 0.3 of 255
+  apart on average, the water's animation), the same GPU time, 60 FPS; the launcher, the settings menu, FSR, quick save
+  and load; the validation layer (SDK 1.4.363) silent throughout. Not yet tried on a phone.
+- #53's window error (`vkCreateSwapchainKHR`: `VK_ERROR_NATIVE_WINDOW_IN_USE_KHR` at the first swapchain, Android 10):
+  the log now lists what was asked and the surface's capabilities, and the surface is made again for one more try.
+- `PWR_NO_VULKAN=1` acts as if there were no Vulkan, `=13` as if its device had neither 1.3 nor 1.1 (the CPU presenter;
+  the loader ignores `VK_DRIVER_FILES` in an elevated process); `PWR_GL_DEBUG=1` a debug context with the driver's messages in the log (it
   slows the game); `PWR_GL_PROF=1` where the renderer's time goes, every 2 s; `PWR_GL_DUMPVS=1` each translation to
   `vs_<key>.vert`; `PWR_VSGEN_TRACE=1` each program as it is made or loaded, with its time.
 

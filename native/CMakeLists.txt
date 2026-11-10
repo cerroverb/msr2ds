@@ -75,25 +75,33 @@ endif()
 
 set(SH ${CMAKE_CURRENT_SOURCE_DIR}/runtime/shaders)
 set(SHO ${CMAKE_CURRENT_BINARY_DIR}/shaders)
-# out: the .inc name; src: the shader; extra: defines
-function(msr_shader out src)
+# out: the .inc name; src: the shader; env: the Vulkan version it is for (vulkan1.3, vulkan1.1); extra: defines
+function(msr_shader out src env)
   if (GLSLC)
     add_custom_command(OUTPUT ${SHO}/${out}
       COMMAND ${CMAKE_COMMAND} -E make_directory ${SHO}
-      COMMAND ${GLSLC} --target-env=vulkan1.3 -O ${ARGN} -mfmt=c -o ${SHO}/${out} ${SH}/${src}
+      COMMAND ${GLSLC} --target-env=${env} -O ${ARGN} -mfmt=c -o ${SHO}/${out} ${SH}/${src}
       DEPENDS ${SH}/${src} ${SH}/fsr/ffx_a.h ${SH}/fsr/ffx_fsr1.h)
   else()
     add_custom_command(OUTPUT ${SHO}/${out}
       COMMAND ${CMAKE_COMMAND} -E make_directory ${SHO}
-      COMMAND ${GLSLANG} -V --target-env vulkan1.3 ${ARGN} -o ${SHO}/${out}.spv ${SH}/${src}
+      COMMAND ${GLSLANG} -V --target-env ${env} ${ARGN} -o ${SHO}/${out}.spv ${SH}/${src}
       COMMAND ${CMAKE_COMMAND} -DIN=${SHO}/${out}.spv -DOUT=${SHO}/${out} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/spv2inc.cmake
       DEPENDS ${SH}/${src} ${SH}/fsr/ffx_a.h ${SH}/fsr/ffx_fsr1.h ${CMAKE_CURRENT_SOURCE_DIR}/cmake/spv2inc.cmake)
   endif()
 endfunction()
-foreach(sh pica.vert pica_vs.vert pica.frag present.vert present.frag fsr_easu.frag fsr_rcas.frag msr.vert msr.frag hdr.frag)
-  msr_shader(${sh}.inc ${sh})
+# The PICA renderer's shaders twice: for Vulkan 1.3 (SPIR-V 1.6; pica.frag's discard becomes a demote to helper
+# invocation) and for the Vulkan 1.1 mode (SPIR-V 1.3, *.11.inc; runtime/vk_rp.h). The presenter's are the same for both
+# (SPIR-V 1.3: they use nothing newer).
+foreach(sh pica.vert pica_vs.vert pica.frag)
+  msr_shader(${sh}.inc ${sh} vulkan1.3)
+  msr_shader(${sh}.11.inc ${sh} vulkan1.1)
 endforeach()
-msr_shader(pica_nd.frag.inc pica.frag -DNO_FRAG_DEPTH)
+msr_shader(pica_nd.frag.inc pica.frag vulkan1.3 -DNO_FRAG_DEPTH)
+msr_shader(pica_nd.frag.11.inc pica.frag vulkan1.1 -DNO_FRAG_DEPTH)
+foreach(sh present.vert present.frag fsr_easu.frag fsr_rcas.frag msr.vert msr.frag hdr.frag)
+  msr_shader(${sh}.inc ${sh} vulkan1.1)
+endforeach()
 
 # OpenGL 3.3 (runtime/video_gl.c, pica_gl.c, gl_load.c): presentation and the PICA renderer where Vulkan has no 1.3 device
 # (--renderer=auto, or opengl), with the shaders as GLSL text (cmake/glsl2inc.cmake) the driver compiles. Windows and Linux.
@@ -118,7 +126,7 @@ endif()
 set(MSR_NATIVE_SOURCES
   runtime/main.c runtime/kernel.c runtime/services.c runtime/fs.c runtime/dump.c runtime/gsp.c runtime/pica.c runtime/video.c
   runtime/dsp.c runtime/pica_sw.c runtime/input.c runtime/pica_vk.c runtime/pica_vsgen.c runtime/runtime.c
-  runtime/stubs.c runtime/interp.c runtime/interp_full.c runtime/dispatch.cpp runtime/state.c runtime/vk_push.c
+  runtime/stubs.c runtime/interp.c runtime/interp_full.c runtime/dispatch.cpp runtime/state.c runtime/vk_push.c runtime/vk_rp.c
   runtime/msr/settings.cpp runtime/msr/patches.cpp runtime/msr/compositor.cpp runtime/msr/cheats.cpp runtime/msr/camera_fov.cpp runtime/msr/glyphs.cpp
   runtime/msr/textures.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/cityhash.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../src/msr/touch_nav.cpp
@@ -128,7 +136,8 @@ set(MSR_NATIVE_SOURCES
   ${SHO}/pica.vert.inc ${SHO}/pica_vs.vert.inc ${SHO}/pica.frag.inc
   ${SHO}/present.vert.inc ${SHO}/present.frag.inc
   ${SHO}/fsr_easu.frag.inc ${SHO}/fsr_rcas.frag.inc ${SHO}/pica_nd.frag.inc ${SHO}/msr.vert.inc ${SHO}/msr.frag.inc
-  ${SHO}/hdr.frag.inc ${MSR_GL_SOURCES})
+  ${SHO}/hdr.frag.inc ${SHO}/pica.vert.11.inc ${SHO}/pica_vs.vert.11.inc ${SHO}/pica.frag.11.inc ${SHO}/pica_nd.frag.11.inc
+  ${MSR_GL_SOURCES})
 if (ANDROID)
     # The Android app (native/android): this program as libmain.so, which SDL's Java side loads and runs (SDL_main);
     # runtime/android.c is what it asks of the app's Java side (MsrActivity)
