@@ -121,6 +121,8 @@ static int img_create_mip(Img *im, uint32_t w, uint32_t h, uint32_t levels, VkFo
     VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size,
         .memoryTypeIndex = mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
     if (vkAllocateMemory(dev, &ai, NULL, &im->mem) || vkBindImageMemory(dev, im->img, im->mem, 0)) return -1;
+    im->view = VK_NULL_HANDLE;   /* copies and blits only (the 1x read-back images): no view (it needs a view usage) */
+    if (!(usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))) return 0;
     VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = im->img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
         .format = fmt, .subresourceRange = { aspect, 0, levels, 0, 1 } };
     return vkCreateImageView(dev, &vi, NULL, &im->view) ? -1 : 0;
@@ -135,7 +137,8 @@ static int img_create(Img *im, uint32_t w, uint32_t h, VkFormat fmt, VkImageUsag
 #define MAX_SBUF 64
 typedef struct {
     VkCommandBuffer cb[MAX_PARTS][2]; VkFence fence; int in_flight;
-    VkQueryPool qp;   /* the batch's GPU time (start, end), read when the set comes round again */
+    VkQueryPool qp;   /* the batch's GPU time (start, end), then each pass's (PQ_MAX at most), read when the set comes round again */
+    uint8_t npq, pq_depth[64];   /* passes timed; whether each used its depth attachment */
     Ring rings[8];
     Img dead[512]; int ndead;   /* images let go while it was current: destroyed once its next batch has finished */
     VkBuffer dbuf[8]; VkDeviceMemory dmem[8]; int ndbuf;   /* one-off upload buffers (up_alloc), likewise */
@@ -189,6 +192,11 @@ static int seal_before_draw;   /* set by tex_get: this draw samples a target dra
 static uint32_t lut_uploaded_version = UINT32_MAX; static VkDeviceSize lut_off;   /* LUT copy in this batch's ring */
 static uint32_t prog_uploaded_version = UINT32_MAX; static VkDeviceSize prog_off;  /* same for the vertex shader program */
 unsigned long long g_vk_draws, g_vk_batches, g_vk_uploads, g_vk_tex_uploads, g_vk_passes, g_vk_gpu_us, g_vk_wait_us, g_vk_flush_us, g_vk_verts, g_vk_idx;
+/* the GPU time of passes whose draws use their depth attachment (the scene), of the others (full-screen effects: their
+   depth attachment neither loaded nor stored where the device can), and how many of those (main.c's 2 s line) */
+unsigned long long g_vk_gpu_depth_us, g_vk_gpu_flat_us, g_vk_passes_flat;
+#define PQ_MAX 48
+extern int g_vk_attachment_none;   /* video.c: VK_ATTACHMENT_LOAD_OP_NONE and STORE_OP_NONE can be used */
 /* one command list's costs, for the "slow list" report in pica_vk_flush (lists of 50 ms and more) */
 static struct { double t0, pipe_ms, tex_ms, surf_ms, vs_ms; unsigned pipes, texs, surfs, vss; unsigned long long draws0, passes0; } bs;
 static double now_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (double)ts.tv_sec * 1e3 + ts.tv_nsec * 1e-6; }
@@ -211,7 +219,8 @@ static void begin_batch(void) {
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
     part = 0; cb_up = cb_part[0][0]; cb_draw = cb_part[0][1];
     vkResetCommandBuffer(cb_up, 0); vkBeginCommandBuffer(cb_up, &bi);
-    if (sets[cur_set].qp) { vkCmdResetQueryPool(cb_up, sets[cur_set].qp, 0, 2); vkCmdWriteTimestamp(cb_up, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, sets[cur_set].qp, 0); }
+    if (sets[cur_set].qp) { vkCmdResetQueryPool(cb_up, sets[cur_set].qp, 0, 2 + 2 * PQ_MAX); vkCmdWriteTimestamp(cb_up, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, sets[cur_set].qp, 0); }
+    sets[cur_set].npq = 0;
     vkResetCommandBuffer(cb_draw, 0); vkBeginCommandBuffer(cb_draw, &bi);
     st_valid = 0;
     recording = 1; batch_no++;
@@ -512,9 +521,14 @@ static void set_next(void) {
         wb_why = 0;
         uint64_t f0 = prof_ns(); vkWaitForFences(dev, 1, &b->fence, VK_TRUE, UINT64_MAX); uint64_t d = prof_ns() - f0; g_prof_fence_ns += d; g_prof_wait_why[4] += d;
         vkResetFences(dev, 1, &b->fence); b->in_flight = 0;
-        uint64_t ts[2];
-        if (b->qp && !vkGetQueryPoolResults(dev, b->qp, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) && ts[1] > ts[0])
+        uint64_t ts[2 + 2 * PQ_MAX];
+        if (b->qp && !vkGetQueryPoolResults(dev, b->qp, 0, 2 + 2u * b->npq, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) && ts[1] > ts[0]) {
             g_vk_gpu_us += (unsigned long long)((double)(ts[1] - ts[0]) * ts_period / 1000.0);
+            for (int q = 0; q < b->npq; q++) if (ts[3 + 2 * q] > ts[2 + 2 * q]) {
+                const unsigned long long us = (unsigned long long)((double)(ts[3 + 2 * q] - ts[2 + 2 * q]) * ts_period / 1000.0);
+                if (b->pq_depth[q]) g_vk_gpu_depth_us += us; else g_vk_gpu_flat_us += us;
+            }
+        }
     }
     vk_push_reset(&b->push);   /* its last batch has finished */
     set_free_dead(b);
@@ -1337,8 +1351,9 @@ static int init(void) {
     }
     gpu_vs = getenv("PWR_VK_CPU_VS") == NULL;
     VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(phys, &pp); ts_period = pp.limits.timestampPeriod;
-    VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 };
-    /* the GPU's time per batch, always (main.c's 2 s load line): two timestamps a batch, read once its fence is waited for */
+    VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 + 2 * PQ_MAX };
+    /* the GPU's time per batch, always (main.c's 2 s load line): two timestamps a batch, and two for each of its first
+       PQ_MAX passes, read once its fence is waited for */
     for (int k = 0; k < NSETS; k++) if (!pp.limits.timestampComputeAndGraphics || vkCreateQueryPool(dev, &qi, NULL, &sets[k].qp)) sets[k].qp = VK_NULL_HANDLE;
     /* 1x1 white texture for disabled units */
     begin_batch();
@@ -1424,7 +1439,12 @@ static void replay(const DrawRec *r, VkPipeline *bound) {
     if (dbg != 2) vkCmdDrawIndexed(cb_draw, r->nidx, 1, 0, 0, 0);
 }
 
-static void begin_rendering(Surf *c, Surf *d) {
+/* A pass whose draws neither test nor write depth or stencil (the game's full-screen effects: four in five passes, with
+   the scene's depth buffer still set) keeps the depth attachment its pipelines were made for, but on a tiled GPU
+   (phones) loading and storing it costs a full read and write of the image for nothing: there it is neither loaded nor
+   stored (LOAD_OP_NONE and STORE_OP_NONE: its contents stay as they are), where the device has them (VK_KHR/EXT_load_store_op_none). Each pass is timed by its kind (g_vk_gpu_depth_us, g_vk_gpu_flat_us). */
+static int pass_q = -1;   /* the open pass's timestamp pair, or -1 */
+static void begin_rendering(Surf *c, Surf *d, int depth_used) {
     /* an earlier pass may have written these attachments, or a target this pass samples */
     barrier_all(cb_draw, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -1434,6 +1454,20 @@ static void begin_rendering(Surf *c, Surf *d) {
         .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
     VkRenderingAttachmentInfo da = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = d ? d->im.view : VK_NULL_HANDLE,
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
+    static int keep_depth = -1; if (keep_depth < 0) keep_depth = getenv("PWR_VK_DEPTH_LOADSTORE") != NULL;   /* A/B: as before */
+    if (!depth_used) g_vk_passes_flat++;
+    if (d && !depth_used) {
+        if (g_vk_attachment_none && !keep_depth) {
+            da.loadOp = (VkAttachmentLoadOp)1000400000;     /* VK_ATTACHMENT_LOAD_OP_NONE (KHR, EXT) */
+            da.storeOp = (VkAttachmentStoreOp)1000301000;   /* VK_ATTACHMENT_STORE_OP_NONE */
+        }
+    }
+    BatchSet *bt = &sets[cur_set];
+    pass_q = -1;
+    if (bt->qp && bt->npq < PQ_MAX) {
+        pass_q = bt->npq++; bt->pq_depth[pass_q] = (uint8_t)depth_used;
+        vkCmdWriteTimestamp(cb_draw, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, bt->qp, 2 + 2 * (uint32_t)pass_q);
+    }
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { c->w * (uint32_t)cur_scale, c->h * (uint32_t)cur_scale } }, .layerCount = 1,
         .colorAttachmentCount = 1, .pColorAttachments = &ca, .pDepthAttachment = d ? &da : NULL, .pStencilAttachment = d && has_stencil ? &da : NULL };
     vkCmdBeginRendering(cb_draw, &ri);
@@ -1442,6 +1476,22 @@ static void begin_rendering(Surf *c, Surf *d) {
     if (vtrace) fprintf(stderr, "vk: pass %08x %ux%u fmt%d depth %08x\n", c->addr, c->w, c->h, c->fmt, d ? d->addr : 0);
 }
 
+static void end_rendering(void) {
+    vkCmdEndRendering(cb_draw);
+    if (pass_q >= 0) vkCmdWriteTimestamp(cb_draw, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, sets[cur_set].qp, 3 + 2 * (uint32_t)pass_q);
+    pass_q = -1;
+}
+/* whether any draw of the pass starting at recs[j] (colour c, depth d: the draws of c from j on, until one with another
+   depth) tests or writes depth or stencil */
+static int run_uses_depth(const uint8_t *done, uint32_t j, const Surf *c, const Surf *d) {
+    if (!d) return 0;
+    for (uint32_t k = j; k < nrec; k++) {
+        if (recs[k].c != c || done[k]) continue;
+        if (recs[k].d != d) break;
+        if (recs[k].dt | recs[k].dw | recs[k].ste) return 1;
+    }
+    return 0;
+}
 /* emit the open segment's draws grouped by colour target (first-use order), one pass per (colour, depth) run */
 static void seal(void) {
     static uint8_t *done; static uint32_t cap_done;
@@ -1455,12 +1505,12 @@ static void seal(void) {
         for (uint32_t j = i; j < nrec; j++) {
             if (done[j] || recs[j].c != c) continue;
             if (!open || recs[j].d != d) {
-                if (open) vkCmdEndRendering(cb_draw);
-                d = recs[j].d; begin_rendering(c, d); open = 1; bound = VK_NULL_HANDLE;
+                if (open) end_rendering();
+                d = recs[j].d; begin_rendering(c, d, run_uses_depth(done, j, c, d)); open = 1; bound = VK_NULL_HANDLE;
             }
             replay(&recs[j], &bound); done[j] = 1;
         }
-        if (open) vkCmdEndRendering(cb_draw);
+        if (open) end_rendering();
     }
     nrec = 0; seg++;
 }
@@ -1695,7 +1745,7 @@ int pica_vk_display_transfer(uint32_t in, uint32_t out, uint32_t in_dim, uint32_
     if (k < 0) { pthread_mutex_unlock(&scan_lock); return 0; }
     uint32_t W = ow * (uint32_t)cur_scale, H = oh * (uint32_t)cur_scale;
     if (!scans[k].im.img) {
-        if (img_create(&scans[k].im, W, H, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) { memset(&scans[k], 0, sizeof scans[k]); pthread_mutex_unlock(&scan_lock); return 0; }
+        if (img_create(&scans[k].im, W, H, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT))   /* (the bottom screen's read-back blits from it) */ { memset(&scans[k], 0, sizeof scans[k]); pthread_mutex_unlock(&scan_lock); return 0; }
         scans[k].addr = out; scans[k].w = ow; scans[k].h = oh; scans[k].end = out + ow * oh * 3;
     }
     int sc = scan_next; scan_next = (scan_next + 1) % NSCAN_CB;

@@ -66,6 +66,7 @@ static int hdr_mode;                 /* the swapchain now: 0 SDR, 1 HDR10 (PQ, B
 static int hdr_option;               /* 0 no HDR here, 1 the display is not in HDR mode, 2 HDR possible (msr_overlay_hdr) */
 static float disp_peak = 1000.f, disp_paper = 200.f;   /* nits: the display's peak, Windows' SDR content white */
 static int has_colorspace_ext, has_hdr_metadata;
+int g_vk_attachment_none;   /* pica_vk.c: VK_ATTACHMENT_LOAD_OP_NONE and STORE_OP_NONE can be used (VK_KHR/EXT_load_store_op_none) */
 static VkImageView sc_views[MAX_IMAGES];
 static VkDeviceMemory stage_mem;
 static VkBuffer stage;
@@ -637,6 +638,12 @@ static int vk_open(int win_w, int win_h, int probe) {
     int has_portability_subset = 0;   /* MoltenVK: a device that has it must enable it */
     for (uint32_t i = 0; i < nde; i++) if (!strcmp(dep[i].extensionName, "VK_KHR_portability_subset")) has_portability_subset = 1;
     for (uint32_t i = 0; i < nde; i++) if (!strcmp(dep[i].extensionName, VK_EXT_HDR_METADATA_EXTENSION_NAME)) has_hdr_metadata = 1;
+    int has_khr_none = 0, has_ext_none = 0;   /* attachments neither loaded nor stored (pica_vk.c begin_rendering) */
+    for (uint32_t i = 0; i < nde; i++) {
+        if (!strcmp(dep[i].extensionName, "VK_KHR_load_store_op_none")) has_khr_none = 1;
+        if (!strcmp(dep[i].extensionName, "VK_EXT_load_store_op_none")) has_ext_none = 1;
+    }
+    const char *op_none = has_khr_none ? "VK_KHR_load_store_op_none" : has_ext_none ? "VK_EXT_load_store_op_none" : NULL;
     free(dep);
     PFN_vkGetPhysicalDeviceFeatures2 features2 = inst_version >= VK_API_VERSION_1_1
         ? (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceFeatures2") : NULL;
@@ -652,10 +659,15 @@ static int vk_open(int win_w, int win_h, int probe) {
     VkPhysicalDeviceVulkan13Features en13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = VK_TRUE, .shaderDemoteToHelperInvocation = VK_TRUE };
     VkPhysicalDeviceFeatures2 en2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &en13 };
     en2.features.samplerAnisotropy = f2.features.samplerAnisotropy;   /* pica_vk.c: anisotropic filtering option */
-    const char *dext[4] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME }; uint32_t ndext = 1;
+    const char *dext[6] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME }; uint32_t ndext = 1;
     if (has_portability_subset) dext[ndext++] = "VK_KHR_portability_subset";
     if (vk13 && has_push) dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
     if (vk13 && has_hdr_metadata) dext[ndext++] = VK_EXT_HDR_METADATA_EXTENSION_NAME; else has_hdr_metadata = 0;
+    /* the extension (the instance asks for 1.3, so 1.4's core ops are not ours); not through MoltenVK (Metal's load and
+       store actions differ) */
+    g_vk_attachment_none = vk13 && !has_portability_subset && op_none;
+    if (g_vk_attachment_none) dext[ndext++] = op_none;
+    if (vk13) fprintf(stderr, "video: depth left alone by passes that don't use it: %s\n", g_vk_attachment_none ? op_none : "no (loaded and stored)");
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = vk13 ? &en2 : NULL, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
         .enabledExtensionCount = ndext, .ppEnabledExtensionNames = dext };
     if (!vk13) fprintf(stderr, "video: no Vulkan 1.3 dynamic rendering: hardware PICA renderer and GPU presenter unavailable "
