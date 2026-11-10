@@ -242,6 +242,11 @@ void PlayerSettings::Load(const QString& path) {
     hdr = file.value(QStringLiteral("hdr"), hdr).toBool();
     hdr_peak = file.value(QStringLiteral("hdr_peak"), hdr_peak).toFloat();
     hdr_paper = file.value(QStringLiteral("hdr_paper"), hdr_paper).toFloat();
+    fxaa = file.value(QStringLiteral("fxaa"), fxaa).toBool();
+    smooth_packs = file.value(QStringLiteral("smooth_packs"), smooth_packs).toBool();
+    brightness = std::clamp(file.value(QStringLiteral("brightness"), brightness).toFloat(), .5f, 1.5f);
+    contrast = std::clamp(file.value(QStringLiteral("contrast"), contrast).toFloat(), .5f, 1.5f);
+    saturation = std::clamp(file.value(QStringLiteral("saturation"), saturation).toFloat(), .5f, 1.5f);
     if (std::find(FrameRate::Choices.begin(), FrameRate::Choices.end(), frame_rate) ==
         FrameRate::Choices.end()) {
         frame_rate = 60;
@@ -279,6 +284,11 @@ void PlayerSettings::Save(const QString& path) const {
     file.setValue(QStringLiteral("hdr"), hdr);
     file.setValue(QStringLiteral("hdr_peak"), hdr_peak);
     file.setValue(QStringLiteral("hdr_paper"), hdr_paper);
+    file.setValue(QStringLiteral("fxaa"), fxaa);
+    file.setValue(QStringLiteral("smooth_packs"), smooth_packs);
+    file.setValue(QStringLiteral("brightness"), brightness);
+    file.setValue(QStringLiteral("contrast"), contrast);
+    file.setValue(QStringLiteral("saturation"), saturation);
     file.setValue(QStringLiteral("unlock_galleries"), unlock_galleries);
     file.setValue(QStringLiteral("unlock_fusion_mode"), unlock_fusion_mode);
     file.setValue(QStringLiteral("unlock_hard_mode"), unlock_hard_mode);
@@ -310,6 +320,11 @@ void PlayerSettings::Publish() const {
     P::hdr = hdr;
     P::hdr_peak = hdr_peak;
     P::hdr_paper = hdr_paper;
+    P::fxaa = fxaa;
+    P::smooth_packs = smooth_packs;
+    P::brightness = brightness;
+    P::contrast = contrast;
+    P::saturation = saturation;
     FrameRate::target = frame_rate;
     Cheats::enabled = (unlock_galleries ? Cheats::Galleries : 0u) |
                       (unlock_fusion_mode ? Cheats::FusionMode : 0u) |
@@ -1312,6 +1327,34 @@ void Overlay::DrawMenu(float scale, bool appearing) {
                         player_changed = true;
                     }
                     Note("Highlights: the brightest lights and glows. Paper white: the game's white, menus and HUD.");
+                }
+            }
+            if (e.bloom_option) {   // msr-native's picture: anti-aliasing, texture packs' filtering, colour (#51, #25)
+                row("Anti-aliasing (FXAA)");
+                player_changed |= ImGui::Checkbox("##fxaa", &p.fxaa);
+                Note("Smooths the game's jagged edges, before the picture is scaled to the window. A higher internal "
+                     "resolution smooths them too, at a higher cost.");
+                row("Smooth texture packs");
+                player_changed |= ImGui::Checkbox("##smoothpacks", &p.smooth_packs);
+                Note("A texture pack's textures filtered smoothly, also where the game shows its own with sharp "
+                     "pixels.");
+                auto percent = [&](const char* label, const char* id, float& value) {
+                    row(label);
+                    int v = static_cast<int>(std::lround(value * 100.f));
+                    if (ImGui::SliderInt(id, &v, 50, 150, "%d%%")) {
+                        value = static_cast<float>(v) / 100.f;
+                        player_changed = true;
+                    }
+                };
+                percent("Brightness", "##brightness", p.brightness);
+                percent("Contrast", "##contrast", p.contrast);
+                percent("Saturation", "##saturation", p.saturation);
+                if (p.brightness != 1.f || p.contrast != 1.f || p.saturation != 1.f) {
+                    row("");
+                    if (ImGui::Button("Colours as the game draws them", {ImGui::GetContentRegionAvail().x, 0.f})) {
+                        p.brightness = p.contrast = p.saturation = 1.f;
+                        player_changed = true;
+                    }
                 }
             }
             row("Internal resolution");

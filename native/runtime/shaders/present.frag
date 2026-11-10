@@ -52,5 +52,11 @@ void main() {
         q = (base + 0.5 + f) / size;
     } else q = uv;                                                               // linear
     o = p.mode.x == 4 ? vec4(fxaa(uv, 1.0 / size), 1.0) : texture(tex, q);
+    if (p.mode.w == 1) {   // the player's colours (#25): extra = brightness, contrast, saturation (1 = as drawn)
+        vec3 c = o.rgb * p.extra.x;
+        c = (c - 0.5) * p.extra.y + 0.5;
+        c = mix(vec3(dot(c, vec3(0.299, 0.587, 0.114))), c, p.extra.z);
+        o.rgb = clamp(c, 0.0, 1.0);
+    }
     if (p.mode.y == 0) o.a = 1.0;
 }

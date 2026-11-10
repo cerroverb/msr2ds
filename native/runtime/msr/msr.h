@@ -22,6 +22,9 @@ int msr_settings_wide_culling(void);          /* the game draws all of a wider v
 void msr_state_quick_save(void);             /* state.c: the settings' Quick save and Quick load (main thread) */
 void msr_state_quick_load(void);
 const char *msr_state_message(void);          /* state.c: "Saved", "Loaded"... once, for the screen */
+int msr_fxaa(void);                           /* FXAA on the game's picture (#51) */
+int msr_smooth_packs(void);                   /* texture packs' textures filtered smoothly (#51) */
+int msr_grade(float *v);                      /* brightness, contrast, saturation into v[0..2] (#25); 0 when all are 1 */
 float msr_bloom(void);                        /* the player's Bloom setting, 1 = the game's glow as drawn */
 int msr_hdr(float *peak, float *paper);       /* HDR on; its brightness in nits (0 = the display's) */
 int  msr_settings_save(void);           /* the overlay's player settings back into the settings file; 0 when written */

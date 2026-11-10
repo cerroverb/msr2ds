@@ -774,6 +774,7 @@ std::string Build(const std::string& game, bool android) {
             if (is_python) {
                 const fs::path target = KitFolder() / "python";
                 fs::remove_all(target, e);
+                if (e) Log("python: the old folder could not be removed: " + e.message() + " (is a python.exe from it still running?)\n");
                 fs::create_directories(target, e);
                 const std::string tar = SystemTool("tar");
                 if (tar.empty()) return Fail("Unpacking needs tar, which this system does not have.");
@@ -782,7 +783,24 @@ std::string Build(const std::string& game, bool android) {
 #ifndef _WIN32
                 args.push_back("--strip-components=1");
 #endif
-                if (!RunTool(args)) return Fail("Python could not be unpacked.");
+                bool unpacked = RunTool(args);
+#ifdef _WIN32
+                // #47: Windows' tar.exe failing where the zip is sound and PowerShell's Expand-Archive unpacks it (tar
+                // reads its arguments in the system's code page: a folder name outside it reaches it mangled). Expand-Archive
+                // takes them as they are. Its output and tar's are in recomp-build.log.
+                const std::string ps = SystemTool("WindowsPowerShell\\v1.0\\powershell");
+                if (!unpacked && !ps.empty() && !Cancelled()) {
+                    auto quoted = [](std::string s) {   // a PowerShell single-quoted string
+                        for (std::size_t i = 0; (i = s.find('\'', i)) != std::string::npos; i += 2) s.insert(i, 1, '\'');
+                        return "'" + s + "'";
+                    };
+                    Status("Unpacking Python (again, with PowerShell)");
+                    unpacked = RunTool({ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                                        "$ProgressPreference = 'SilentlyContinue'; $ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath " +
+                                            quoted(Utf8(file)) + " -DestinationPath " + quoted(Utf8(target)) + " -Force"});
+                }
+#endif
+                if (!unpacked) return Fail("Python could not be unpacked.");
 #ifdef _WIN32
                 python = Utf8(target / "python.exe");
 #else

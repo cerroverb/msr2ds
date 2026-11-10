@@ -94,11 +94,12 @@ static void push(const void *data, GLsizeiptr size) {
     ubo_off += (size + ubo_align - 1) / ubo_align * ubo_align;
 }
 
-/* a texture into a rectangle of the current target (W x H), as video.c's gpu_quad_view (rot 1: a framebuffer-oriented image) */
-static void quad_rot(GLuint prog, const Tex *t, VidRect r, float W, float H, int mode, int alpha, const float extra[4], int rot) {
+/* a texture into a rectangle of the current target (W x H), as video.c's gpu_quad_view (rot 1: a framebuffer-oriented image;
+   grade: the player's colours, extra = brightness, contrast, saturation) */
+static void quad_rot(GLuint prog, const Tex *t, VidRect r, float W, float H, int mode, int alpha, const float extra[4], int rot, int grade) {
     if (!r.on || r.w < 1 || r.h < 1 || !prog || !t->id) return;
     Push p = { { r.x / W * 2 - 1, r.y / H * 2 - 1, (r.x + r.w) / W * 2 - 1, (r.y + r.h) / H * 2 - 1 },
-               { (float)t->w, (float)t->h, r.w / (float)t->w, r.h / (float)t->h }, { mode, alpha, rot, 0 }, { 0, 0, 0, 0 } };
+               { (float)t->w, (float)t->h, r.w / (float)t->w, r.h / (float)t->h }, { mode, alpha, rot, grade }, { 0, 0, 0, 0 } };
     if (extra) memcpy(p.extra, extra, sizeof p.extra);
     glUseProgram(prog);
     glBindTexture(GL_TEXTURE_2D, t->id);
@@ -106,7 +107,7 @@ static void quad_rot(GLuint prog, const Tex *t, VidRect r, float W, float H, int
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 static void quad(GLuint prog, const Tex *t, VidRect r, float W, float H, int mode, int alpha, const float extra[4]) {
-    quad_rot(prog, t, r, W, H, mode, alpha, extra, 0);
+    quad_rot(prog, t, r, W, H, mode, alpha, extra, 0, 0);
 }
 /* a screen at the internal resolution: the renderer's scan-out texture for the framebuffer at addr (stored as the
    framebuffer is: 240 lines of the screen's width), turned upright into hi_scr[i] (video.c hi_screen). Under the scan-out
@@ -118,7 +119,9 @@ static const Tex *hi_screen(int i, uint32_t addr, int screen_w) {
     tex_size(&hi_scr[i], (int)lh, (int)lw);
     draw_into(&hi_scr[i]);
     const Tex src = { t, (int)lw, (int)lh };
-    quad_rot(prog_present, &src, (VidRect){ 0, 0, (float)lh, (float)lw, 1 }, (float)lh, (float)lw, 0, 0, NULL, 1);
+    /* FXAA (#51) and the player's colours (#25) here, at the internal resolution, before any upscaling (video.c hi_screen) */
+    float g[4]; const int grade = msr_grade(g);
+    quad_rot(prog_present, &src, (VidRect){ 0, 0, (float)lh, (float)lw, 1 }, (float)lh, (float)lw, msr_fxaa() ? 4 : 0, 0, grade ? g : NULL, 1, grade);
     return &hi_scr[i];
 }
 /* Samus Returns' compositor: one quad of msr_compose's list, sampling the bottom screen (video.c msr_quad) */
@@ -270,7 +273,10 @@ void vgl_frame(const VglFrame *f) {
         quad(prog_rcas, &fsr_tmp[1], rb, W, H, 0, 0, eb);
     } else {
         const int m = f->filter == 0 ? 0 : f->filter == 2 || f->filter == 3 ? 2 : f->filter == 4 ? 4 : 1;
-        quad(prog_present, st, rt, W, H, m, 0, NULL); quad(prog_present, sb, rb, W, H, m, 0, NULL);
+        /* a screen decoded on the CPU (no internal-resolution copy: hi_screen) gets FXAA and the colours here */
+        float g[4]; const int grade = msr_grade(g), fx = msr_fxaa();
+        quad_rot(prog_present, st, rt, W, H, st == &tex_top && fx ? 4 : m, 0, g, 0, grade && st == &tex_top);
+        quad_rot(prog_present, sb, rb, W, H, sb == &tex_bot && fx ? 4 : m, 0, g, 0, grade && sb == &tex_bot);
     }
     if (f->mf && f->mf->count) {
         glUseProgram(prog_msr);

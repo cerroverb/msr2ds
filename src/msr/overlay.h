@@ -51,6 +51,11 @@ struct PlayerSettings {
     bool hdr = false;      ///< HDR output
     float hdr_peak = 0.f;  ///< HDR: the brightest highlights in nits, 0 = the display's peak
     float hdr_paper = 0.f; ///< HDR: the game's white in nits, 0 = Windows' SDR content brightness
+    bool fxaa = false;          ///< FXAA on the game's picture at its internal resolution (#51)
+    bool smooth_packs = false;  ///< Texture packs' textures filtered smoothly where the game filters its own sharply (#51)
+    float brightness = 1.f;     ///< The picture's brightness, contrast and saturation, 1 = as drawn (#25; 0.5..1.5)
+    float contrast = 1.f;
+    float saturation = 1.f;
     // Extras otherwise given by amiibo (msr/cheats.h)
     bool unlock_galleries = true;
     bool unlock_fusion_mode = true;

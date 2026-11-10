@@ -113,7 +113,12 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   and go to `settings.ini` `[native]`, which the launcher takes over when msr-native exits. The resolution goes up to
   4x. Restart exits with code 75 and the launcher starts it again. msr-native's own rows: Bloom (the game's glow,
   0-100%, default 75%: `pica_vk.c bloom_scale` scales the combiner constant of the pass that adds the blurred,
-  downscaled scene) and HDR (below). The Controls tab rebinds a key and a pad button per 3DS button (`input.c`, `settings.ini`
+  downscaled scene), HDR (below), and since 2.0.6 Anti-aliasing (FXAA, #51), Smooth texture packs (#51: a pack's
+  replacement sampled linearly where the game's registers ask for nearest, `tex_packed` in both renderers' `sampler_for`)
+  and brightness, contrast and saturation (#25, 50-150%). FXAA and the colours run in the pass that turns each screen
+  upright at the internal resolution (`hi_screen`, `present.frag` mode 4 and `mode.w`), before FSR or the stretch to
+  the window, so the HUD (drawn from the bottom screen) gets the same colours; a screen decoded on the CPU gets them in
+  its final quad instead. The Controls tab rebinds a key and a pad button per 3DS button (`input.c`, `settings.ini`
   `[native_controls]`); Select's binding opens the menu, ZL and ZR are the triggers' taps.
 - Save states (`state.c`, `state.h`): the menu's Quick save and Quick load, F5 and F8. The guest's memory (the
   reservation's committed pages, without the game's code) and every part that keeps state, in sections, zlib-compressed
@@ -306,6 +311,8 @@ presenter run on Vulkan 1.1 (`g_vk_rp`, `vk_rp.h`). On a PC `--renderer=auto` st
   and load; the validation layer (SDK 1.4.363) silent throughout. Not yet tried on a phone.
 - #53's window error (`vkCreateSwapchainKHR`: `VK_ERROR_NATIVE_WINDOW_IN_USE_KHR` at the first swapchain, Android 10):
   the log now lists what was asked and the surface's capabilities, and the surface is made again for one more try.
+- `PWR_VK_NO_PUSH=1`: descriptor sets in place of push descriptors, as on Mali GPUs (`vk_push.c`; checked on an RTX 5090
+  for #52, 2026-11-09: the same picture, the validation layer silent, the GX commands about 3 ms slower a frame).
 - `PWR_NO_VULKAN=1` acts as if there were no Vulkan, `=13` as if its device had neither 1.3 nor 1.1 (the CPU presenter;
   the loader ignores `VK_DRIVER_FILES` in an elevated process); `PWR_GL_DEBUG=1` a debug context with the driver's messages in the log (it
   slows the game); `PWR_GL_PROF=1` where the renderer's time goes, every 2 s; `PWR_GL_DUMPVS=1` each translation to

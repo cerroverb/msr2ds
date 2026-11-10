@@ -559,6 +559,7 @@ typedef struct { uint32_t addr, w, h; int fmt, levels; Img im; uint64_t hash; ui
                  int glyph_sheet; unsigned glyph_ver; } Tex;   /* glyph_sheet: one of the game's face-button icon sheets (msr/glyphs.cpp) */   /* rep: a texture pack's replacement (msr/textures.cpp), rep_extra
                                                                           more mip levels than the game's (its scale, as a power of two) */
 static int tex_lod_extra[3];   /* per unit, for sampler_for: the replacement's extra levels */
+static int tex_packed[3];      /* per unit, for sampler_for: a texture pack's replacement is bound (smooth_packs) */
 static Tex *texs; static int ntex, cap_tex;
 static Img white;
 
@@ -874,7 +875,7 @@ static void tex_replace(Tex *t) {
 static VkImageView tex_get_(int unit, int *full);
 static VkImageView tex_get(int unit, int *full) { uint64_t t0 = prof_ns(); VkImageView v = tex_get_(unit, full); g_prof_tex_ns += prof_ns() - t0; return v; }
 static VkImageView tex_get_(int unit, int *full) {
-    tex_lod_extra[unit] = 0;
+    tex_lod_extra[unit] = 0; tex_packed[unit] = 0;
     static const int dimr[3] = { 0x082, 0x092, 0x09A }, addrr[3] = { 0x085, 0x095, 0x09D }, fmtr[3] = { 0x08E, 0x096, 0x09E };
     uint32_t dim = R(dimr[unit]);
     uint32_t h = dim & 0x7ff, w = (dim >> 16) & 0x7ff, addr = pa_to_va(R(addrr[unit]) << 3);
@@ -958,7 +959,7 @@ static VkImageView tex_get_(int unit, int *full) {
     if (need && tex_upload(t)) { t->checked_list = 0; t->hash = 0; *full = 1; return NULL; }   /* hash 0: re-upload after the flush */
     if (t->rep_key && !t->rep.img) tex_replace(t);
     t->used_batch = t->last_batch = batch_no;
-    if (t->rep.img) { tex_lod_extra[unit] = t->rep_extra; return t->rep.view; }
+    if (t->rep.img) { tex_lod_extra[unit] = t->rep_extra; tex_packed[unit] = 1; return t->rep.view; }
     return t->im.view;
 }
 
@@ -975,6 +976,7 @@ static VkSampler sampler_for(int unit) {
     uint32_t par = R(parr[unit]);
     static const int lodr[3] = { 0x084, 0x094, 0x09C };
     int ws = (int)((par >> 12) & 3), wt = (int)((par >> 8) & 3), mag = (int)((par >> 1) & 1), min = (int)((par >> 2) & 1), mip = (int)((par >> 24) & 1);
+    if (tex_packed[unit] && msr_smooth_packs()) mag = min = 1;   /* #51: a pack's texture smooth where the game asks for sharp pixels */
     static int nomip = -1; if (nomip < 0) nomip = getenv("PWR_VK_NOMIP") != NULL;
     int maxl = nomip ? 0 : (int)(R(lodr[unit]) >> 16 & 15);   /* tex_get clamps the image's level count; maxLod beyond it is harmless */
     maxl += tex_lod_extra[unit]; if (maxl > 15) maxl = 15;   /* a pack's larger texture: its extra levels */
