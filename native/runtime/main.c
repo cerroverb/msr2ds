@@ -401,6 +401,17 @@ int main(int argc, char **argv) {   /* SDL_main */
     if (argc > 1) {
         mkdir("user", 0777);
         if (freopen("user/msr-native.log", "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);   /* the launcher's is its own */
+        /* user/env.txt: test switches (PWR_..., one NAME=value a line, # comments), as a PC's environment would give them;
+           a phone has no other way to set them */
+        FILE *ef = fopen("user/env.txt", "r"); char line[512];
+        while (ef && fgets(line, sizeof line, ef)) {
+            char *e = line + strcspn(line, "\r\n"); *e = 0;
+            char *eq = strchr(line, '=');
+            if (line[0] == '#' || !eq || eq == line) continue;
+            *eq = 0; setenv(line, eq + 1, 1);
+            fprintf(stderr, "native: user/env.txt: %s=%s\n", line, eq + 1);
+        }
+        if (ef) fclose(ef);
     }
     g_android_argc = argc; g_android_argv = (const char *const *)argv;
     const int r = msr_main(argc, argv);
@@ -602,9 +613,10 @@ int main(int argc, char **argv) {
             fprintf(stderr, "native: sw tris=%llu drawn=%llu px covered=%llu zfail=%llu afail=%llu written=%llu | top %08x fmt%u bottom %08x fmt%u\n",
                     g_sw_tri_in, g_sw_tri_drawn, g_sw_px_cov, g_sw_px_zfail, g_sw_px_afail, g_sw_px_written, st.addr, st.format, sb.addr, sb.format);
             extern unsigned long long g_vk_draws, g_vk_batches, g_vk_uploads, g_vk_tex_uploads, g_vk_passes, g_vk_gpu_us, g_vk_wait_us, g_vk_flush_us, g_vk_verts, g_vk_idx;
+            extern unsigned long long g_vk_gpu_depth_us, g_vk_gpu_flat_us, g_vk_passes_flat;
             extern unsigned g_vsgen_compiled, g_vsgen_failed;
             extern int pica_vk_npipes(void);
-            fprintf(stderr, "native: vk draws=%llu batches=%llu target-uploads=%llu tex-uploads=%llu vs-compiled=%u vs-failed=%u passes=%llu gpu-ms=%llu fence-wait-ms=%llu verts=%llu idx=%llu pipelines=%d\n", g_vk_draws, g_vk_batches, g_vk_uploads, g_vk_tex_uploads, g_vsgen_compiled, g_vsgen_failed, g_vk_passes, g_vk_gpu_us / 1000, g_vk_wait_us / 1000, g_vk_verts, g_vk_idx, pica_vk_npipes());
+            fprintf(stderr, "native: vk draws=%llu batches=%llu target-uploads=%llu tex-uploads=%llu vs-compiled=%u vs-failed=%u passes=%llu (%llu without depth) gpu-ms=%llu (passes with depth %llu, without %llu) fence-wait-ms=%llu verts=%llu idx=%llu pipelines=%d\n", g_vk_draws, g_vk_batches, g_vk_uploads, g_vk_tex_uploads, g_vsgen_compiled, g_vsgen_failed, g_vk_passes, g_vk_passes_flat, g_vk_gpu_us / 1000, g_vk_gpu_depth_us / 1000, g_vk_gpu_flat_us / 1000, g_vk_wait_us / 1000, g_vk_verts, g_vk_idx, pica_vk_npipes());
             { extern unsigned long long g_gs_draws; if (g_gs_draws) fprintf(stderr, "native: geometry-shader draws=%llu (not implemented)\n", g_gs_draws); }
             fflush(stderr);   /* the log, in one write (log_buffered) */
             last_stat = t;

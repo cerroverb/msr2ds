@@ -390,7 +390,23 @@ program kept busy. Under 95% of the frame rate asked for, it names the likeliest
 Measured overloaded (one processor thread, `PWR_VK_CPU_VS=1`): 21 of 30 FPS, GX commands 45-49 ms a frame, "one processor
 thread (GX commands)".
 
-Debugging switches (environment, as in Woohoo! Flight School): `PWR_SKIP=<first>-<last>` (drop those draws of every
+**Tiled GPUs (phones, msr2ds issue 37, 2026-11-08).** An Adreno 830 (Snapdragon 8 Elite) at 4x with the HD textures:
+about 40 of 60 FPS, "short of the graphics", 21 ms of GPU a frame (an RTX 5090: 0.8 ms at 3x; the phone's GPU has very
+roughly 1/25 of its throughput, so the size of the work, not one mistake, is most of it). Every pass loaded and stored
+its colour and depth attachments, and four in five of a frame's passes (the full-screen effects after the scene, on the
+eye targets) have the scene's depth buffer set without testing or writing it: a tiled GPU read and wrote that whole
+depth/stencil image for nothing each time (about 15 MB a pass at 4x). Now such a pass leaves it alone (pica_vk.c
+begin_rendering: VK_ATTACHMENT_LOAD_OP_NONE and STORE_OP_NONE, where the device has VK_KHR/EXT_load_store_op_none; the
+log's `video: depth left alone by passes that don't use it: ...` says which; `PWR_VK_DEPTH_LOADSTORE=1` as before). The
+2 s `native: vk draws=...` line splits the passes and the GPU's time: `passes=N (M without depth) gpu-ms=T (passes with
+depth D, without F)`, T less D and F being the copies, read-backs and uploads between them (on the RTX 5090 at 4x about
+40% of T). Both eyes are drawn every frame (29 draws each in play, the second never shown, the 3D slider at 0 and the
+model an original 3DS; reporting a 2DS changes nothing: the game never asks), and the eyes' copies feed each other's
+effects, so leaving one out would take the game's own code. Image layouts stay GENERAL (Adreno may keep such images
+uncompressed): not measured, as no phone was at hand.
+
+Debugging switches (environment, as in Woohoo! Flight School; on Android `user/env.txt` in the app's folder, one
+`NAME=value` a line, the log listing each): `PWR_SKIP=<first>-<last>` (drop those draws of every
 frame, counted from each top-screen swap: bisects an artifact to its draws; with `PWR_SKIP_DUMP=<frame>` it prints their
 state in that frame instead), `PWR_GX_COPYLOG=1` (each distinct TextureCopy once), `PWR_GXDUMP=<frame>` (VRAM after
 every GX command of that game frame, `gxdump_<n>_<cmd>.bin`: decode the tiled surfaces to see where an artifact appears), `PWR_TRACE=1` (kernel calls and IPC),
