@@ -642,6 +642,7 @@ static int ensure_pass(void) {
 
 /* ---------------- textures ---------------- */
 static int tex_lod_extra[3];   /* per unit, for sampler_for: the replacement's extra levels */
+static int tex_packed[3];      /* per unit, for sampler_for: a texture pack's replacement is bound (smooth_packs) */
 static uint32_t tex_level_size(const Tex *t, int l) { return (t->w >> l) * (t->h >> l) * (uint32_t)pica_tex_bpp[t->fmt] / 8; }
 
 static void tex_upload(Tex *t) {
@@ -684,7 +685,7 @@ static GLuint alias_tex(uint32_t addr, uint32_t w, uint32_t h, int fmt, int leve
 /* the texture for a unit's registers; 0 with *flush set when a target drawn in this command list overlaps it without being
    it (its pixels must reach guest memory first: the caller reads back and tries again) */
 static GLuint tex_get(int unit, int *flush) {
-    tex_lod_extra[unit] = 0;
+    tex_lod_extra[unit] = 0; tex_packed[unit] = 0;
     static const int dimr[3] = { 0x082, 0x092, 0x09A }, addrr[3] = { 0x085, 0x095, 0x09D }, fmtr[3] = { 0x08E, 0x096, 0x09E }, lodr[3] = { 0x084, 0x094, 0x09C };
     const uint32_t dim = R(dimr[unit]), h = dim & 0x7ff, w = (dim >> 16) & 0x7ff, addr = pa_to_va(R(addrr[unit]) << 3);
     const int fmt = (int)(R(fmtr[unit]) & 15);
@@ -724,7 +725,7 @@ static GLuint tex_get(int unit, int *flush) {
     } else if (t->find_pending)   /* a pack worker works out its hash: asked again (the game's texture shows meanwhile) */
         t->rep_key = msr_texture_find(g_mem + addr, w, h, fmt, t->hash, &t->find_pending);
     if (t->rep_key && !t->rep) tex_replace(t);
-    if (t->rep) { tex_lod_extra[unit] = t->rep_extra; return t->rep; }
+    if (t->rep) { tex_lod_extra[unit] = t->rep_extra; tex_packed[unit] = 1; return t->rep; }
     return t->tex;
 }
 
@@ -735,7 +736,8 @@ static void (APIENTRY *sampler_parameterfv)(GLuint, GLenum, const GLfloat *);
 static GLuint sampler_for(int unit) {
     static const int parr[3] = { 0x083, 0x093, 0x09B }, lodr[3] = { 0x084, 0x094, 0x09C };
     const uint32_t par = R(parr[unit]);
-    const int ws = (int)((par >> 12) & 3), wt = (int)((par >> 8) & 3), mag = (int)((par >> 1) & 1), min = (int)((par >> 2) & 1), mip = (int)((par >> 24) & 1);
+    const int ws = (int)((par >> 12) & 3), wt = (int)((par >> 8) & 3), smooth = tex_packed[unit] && msr_smooth_packs(), mip = (int)((par >> 24) & 1);
+    const int mag = (int)((par >> 1) & 1) | smooth, min = (int)((par >> 2) & 1) | smooth;   /* #51 (pica_vk.c sampler_for) */
     int maxl = (int)(R(lodr[unit]) >> 16 & 15) + tex_lod_extra[unit]; if (maxl > 15) maxl = 15;
     const uint32_t bcol = R(unit == 0 ? 0x081 : unit == 1 ? 0x091 : 0x099);
     int bord = (bcol >> 24) < 128 ? 0 : ((bcol & 255) + (bcol >> 8 & 255) + (bcol >> 16 & 255)) >= 384 ? 2 : 1;

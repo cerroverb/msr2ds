@@ -49,6 +49,14 @@ void PlayerSettings::Load(const std::string& path) {
     flag("hdr", hdr);
     number("hdr_peak", hdr_peak);
     number("hdr_paper", hdr_paper);
+    flag("fxaa", fxaa);
+    flag("smooth_packs", smooth_packs);
+    number("brightness", brightness);
+    number("contrast", contrast);
+    number("saturation", saturation);
+    brightness = std::clamp(brightness, .5f, 1.5f);
+    contrast = std::clamp(contrast, .5f, 1.5f);
+    saturation = std::clamp(saturation, .5f, 1.5f);
     flag("unlock_galleries", unlock_galleries);
     flag("unlock_fusion_mode", unlock_fusion_mode);
     flag("unlock_hard_mode", unlock_hard_mode);
@@ -99,6 +107,11 @@ void PlayerSettings::Save(const std::string& path) const {
     flag("hdr", hdr);
     number("hdr_peak", hdr_peak);
     number("hdr_paper", hdr_paper);
+    flag("fxaa", fxaa);
+    flag("smooth_packs", smooth_packs);
+    number("brightness", brightness);
+    number("contrast", contrast);
+    number("saturation", saturation);
     flag("unlock_galleries", unlock_galleries);
     flag("unlock_fusion_mode", unlock_fusion_mode);
     flag("unlock_hard_mode", unlock_hard_mode);
@@ -164,6 +177,26 @@ extern "C" int msr_settings_save(void) {
 /// The renderer's view of the player's picture settings (pica_vk.c, video.c).
 extern "C" float msr_bloom(void) {
     return MSR::Presentation::bloom.load(std::memory_order_relaxed);
+}
+
+/// FXAA on the game's picture (video.c, video_gl.c)
+extern "C" int msr_fxaa(void) {
+    return MSR::Presentation::fxaa.load(std::memory_order_relaxed);
+}
+
+/// Texture packs' textures filtered smoothly (pica_vk.c, pica_gl.c sampler_for)
+extern "C" int msr_smooth_packs(void) {
+    return MSR::Presentation::smooth_packs.load(std::memory_order_relaxed);
+}
+
+/// The picture's brightness, contrast and saturation (1 = as drawn); 1 when all three are as drawn
+extern "C" int msr_grade(float* v) {
+    namespace P = MSR::Presentation;
+    v[0] = P::brightness.load(std::memory_order_relaxed);
+    v[1] = P::contrast.load(std::memory_order_relaxed);
+    v[2] = P::saturation.load(std::memory_order_relaxed);
+    v[3] = 0.f;
+    return v[0] == 1.f && v[1] == 1.f && v[2] == 1.f ? 0 : 1;
 }
 
 extern "C" int msr_hdr(float* peak, float* paper) {

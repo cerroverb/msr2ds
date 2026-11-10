@@ -91,6 +91,12 @@ inline std::atomic<float> bloom{.75f};
 inline std::atomic<bool> hdr{false};
 inline std::atomic<float> hdr_peak{0.f};
 inline std::atomic<float> hdr_paper{0.f};
+/// FXAA on the game's picture, texture packs filtered smoothly, and the picture's brightness, contrast and saturation (1 = as drawn).
+inline std::atomic<bool> fxaa{false};
+inline std::atomic<bool> smooth_packs{false};
+inline std::atomic<float> brightness{1.f};
+inline std::atomic<float> contrast{1.f};
+inline std::atomic<float> saturation{1.f};
 
 /// What the bottom screen is showing, classified from its pixels by the renderer.
 enum class Bottom : int {

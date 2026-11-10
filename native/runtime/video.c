@@ -566,13 +566,24 @@ static int recreate_surface(void) {
 void video_explain(const char *log) {
     char text[1536];
     snprintf(text, sizeof text,
+#if defined(__ANDROID__)
+             /* (#54: the PC's text, Mesa and all, on a phone; Android's dialog wraps the lines itself) */
+             "msr-native could not open its window: this device's Vulkan graphics driver could not show it.\n\n"
+             "Please report it at github.com/gminustwo/msr2ds/issues with your device's name and the file named "
+             "below (in Android/data/io.github.gminustwo.msrnative/files/user).\n\n"
+#elif defined(__APPLE__)
+             "msr-native could not open its window: its Vulkan driver (MoltenVK, inside the app) could not\n"
+             "show one. It needs a Mac with Apple Silicon (M1 or newer) and macOS 13 or newer.\n\n"
+#else
              "msr-native could not open its window: it needs a graphics driver\n"
 #ifdef MSR_OPENGL
              "with Vulkan or OpenGL 3.3, and this computer has none that can show one.\n\n"
 #else
              "with Vulkan, and this computer has none that can show one.\n\n"
 #endif
-#ifdef _WIN32
+#endif
+#if defined(__ANDROID__) || defined(__APPLE__)
+#elif defined(_WIN32)
              "Update the graphics driver from AMD, NVIDIA or Intel. Graphics older\n"
              "than OpenGL 3.3 (Intel's before its 3rd-generation processors, for\n"
              "example) cannot run msr-native.\n\n"
@@ -734,7 +745,7 @@ static int vk_open(int win_w, int win_h, int probe) {
                        VK_API_VERSION_MAJOR(pp.apiVersion), VK_API_VERSION_MINOR(pp.apiVersion), (int)f13.dynamicRendering,
                        (int)f13.shaderDemoteToHelperInvocation);
     VK(vkCreateDevice(phys, &dci, NULL, &dev));
-    if (vk_hw) vk_push_init(dev, has_push);
+    if (vk_hw) vk_push_init(dev, has_push && !getenv("PWR_VK_NO_PUSH"));   /* PWR_VK_NO_PUSH=1: the stand-in sets (vk_push.c), as on Mali */
     if (g_vk_rp) vk_rp_init(dev);
 #ifdef MSR_VK13_FROM_DEVICE
     { extern void msr_vk13_load(VkDevice d); if (vk13) msr_vk13_load(dev); }   /* vk13_load.c */
@@ -1024,10 +1035,11 @@ static void cpu_blit(const uint8_t *src, int sw, Rect r) {
 }
 
 /* GPU path: draw a texture into a rectangle of the current attachment (W x H) with a pipeline */
-static void gpu_quad_view(VkPipeline pl, VkImageView view, uint32_t tw, uint32_t th, VkImageLayout lay, int rot, Rect r, float W, float H, int mode, int alpha, const float extra[4]) {
+/* grade: the player's colours, extra = brightness, contrast, saturation (present.frag) */
+static void gpu_quad_view(VkPipeline pl, VkImageView view, uint32_t tw, uint32_t th, VkImageLayout lay, int rot, Rect r, float W, float H, int mode, int alpha, const float extra[4], int grade) {
     if (!r.on || r.w < 1 || r.h < 1) return;
     Push p = { { r.x / W * 2 - 1, r.y / H * 2 - 1, (r.x + r.w) / W * 2 - 1, (r.y + r.h) / H * 2 - 1 },
-               { (float)tw, (float)th, r.w / (float)tw, r.h / (float)th }, { mode, alpha, rot, 0 }, { 0, 0, 0, 0 } };
+               { (float)tw, (float)th, r.w / (float)tw, r.h / (float)th }, { mode, alpha, rot, grade }, { 0, 0, 0, 0 } };
     if (extra) memcpy(p.extra, extra, sizeof p.extra);
     VkDescriptorImageInfo ii = { smp_linear, view, lay };
     VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii };
@@ -1049,7 +1061,7 @@ static void msr_quad(const MsrQuad *q, const Img *bottom, float W, float H) {
     vkCmdDraw(cmdbuf, 4, 1, 0, 0);
 }
 static void gpu_quad(VkPipeline pl, const Img *t, Rect r, float W, float H, int mode, int alpha, const float extra[4]) {
-    gpu_quad_view(pl, t->view, t->w, t->h, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, r, W, H, mode, alpha, extra);
+    gpu_quad_view(pl, t->view, t->w, t->h, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, r, W, H, mode, alpha, extra, 0);
 }
 static void begin_pass_a(const Img *att, VkAttachmentLoadOp load, float clear_alpha) {
     barrier_img(att->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
@@ -1084,7 +1096,9 @@ static const Img *hi_screen(int i, const ScreenSource *s, int screen_w) {
         if (img_make(t, lh, lw, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return NULL;
     }
     begin_pass(t, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
-    gpu_quad_view(pipe_rgba, v, lw, lh, VK_IMAGE_LAYOUT_GENERAL, 1, (Rect){ 0, 0, (float)lh, (float)lw, 1 }, (float)lh, (float)lw, 0, 0, NULL);
+    /* FXAA (#51) and the player's colours (#25) here, on the screen at the internal resolution, before any upscaling */
+    float g[4]; const int grade = msr_grade(g);
+    gpu_quad_view(pipe_rgba, v, lw, lh, VK_IMAGE_LAYOUT_GENERAL, 1, (Rect){ 0, 0, (float)lh, (float)lw, 1 }, (float)lh, (float)lw, msr_fxaa() ? 4 : 0, 0, grade ? g : NULL, grade);
     end_pass();
     barrier_img(t->img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
     return t;
@@ -1459,7 +1473,11 @@ int video_frame(void) {
             if (rb.on) gpu_quad(pipe_rcas, &fsr_tmp[1], rb, W, H, 0, 0, eb);
         } else {
             int f = opt_filter == F_NEAREST ? 0 : opt_filter == F_SHARP ? 2 : opt_filter == F_FXAA ? 4 : 1;
-            gpu_quad(pipe, st, rt, W, H, f, 0, NULL); gpu_quad(pipe, sb, rb, W, H, f, 0, NULL);
+            /* a screen decoded on the CPU (no copy at the internal resolution: hi_screen) gets FXAA and the colours here */
+            float g[4]; const int grade = msr_grade(g), fx = msr_fxaa();
+            const int ft = st == &tex_top && fx ? 4 : f, fb = sb == &tex_bot && fx ? 4 : f;
+            gpu_quad_view(pipe, st->view, st->w, st->h, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, rt, W, H, ft, 0, g, grade && st == &tex_top);
+            gpu_quad_view(pipe, sb->view, sb->w, sb->h, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, rb, W, H, fb, 0, g, grade && sb == &tex_bot);
         }
         if (hdr_mode) {   /* HDR: the interface goes into its own layer, at paper white in hdr.frag */
             end_pass();

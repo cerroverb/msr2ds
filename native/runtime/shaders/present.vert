@@ -12,7 +12,7 @@ layout(std140) uniform P {
 #endif
     vec4 dst;      // x0, y0, x1, y1 in NDC
     vec4 src;      // texture width, height, output pixels per texel x, y
-    ivec4 mode;    // x = filter (0 nearest, 1 linear, 2 sharp bilinear, 4 FXAA), y = alpha blend, z = 1: rotate (see below)
+    ivec4 mode;    // x = filter (0 nearest, 1 linear, 2 sharp bilinear, 4 FXAA), y = alpha blend, z = 1: rotate (see below), w = 1: colours (present.frag)
     vec4 extra;    // filter parameters (RCAS sharpness in x)
 } p;
 VARYING(0) out vec2 uv;

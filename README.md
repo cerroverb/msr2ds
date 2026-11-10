@@ -261,7 +261,10 @@ same `settings.ini`; LB and RB switch tabs.
   a Mac in fullscreen: more of the level above and below instead of bars), all
   on by default; camera zoom (0.70-1.50); bloom
   (0-100%, default 75%); HDR (Windows, once Use HDR is on in Windows' display
-  settings) with its highlights and paper white; internal resolution (Match
+  settings) with its highlights and paper white; **Anti-aliasing (FXAA)**;
+  **Smooth texture packs** (a pack's textures filtered smoothly, also where the
+  game shows its own with sharp pixels); brightness, contrast and saturation
+  (50-150%); internal resolution (Match
   window, or 1x-10x: 9x is 2160p, 4K); anisotropic filtering (off, 2x-16x);
   upscaling (FSR 1, or Linear: lighter for older graphics on a large screen);
   frame rate (30, the original, 60, 90, 120 or 144; default 60); V-Sync; Show
@@ -282,8 +285,8 @@ same `settings.ini`; LB and RB switch tabs.
   Medium, High and Ultra keep a faster frame rate you chose (90-144, for a faster
   display), and leave Power-saving waits as they are (it follows the processor).
   Changing any of these yourself makes it **Custom**: choosing a preset afterwards
-  keeps your values, and choosing Custom brings them back. Bloom, V-Sync and HDR
-  stay as you set them. On a Steam Deck, the **Steam Deck: 60 FPS with texture
+  keeps your values, and choosing Custom brings them back. Bloom, V-Sync, HDR,
+  anti-aliasing and the colours stay as you set them. On a Steam Deck, the **Steam Deck: 60 FPS with texture
   packs** button above the presets is still there.
 
   **Power-saving waits:** while the game waits (for the next frame, for the
