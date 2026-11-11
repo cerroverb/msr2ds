@@ -148,6 +148,10 @@ if (ANDROID)
     target_compile_options(msr-native PRIVATE -ffp-contract=off)
 else()
     add_executable(msr-native ${MSR_NATIVE_SOURCES})
+    if (MSR_A64 AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # AArch64 Linux: the guest's floating point without fused multiply-adds, as on Android
+        target_compile_options(msr-native PRIVATE -ffp-contract=off)
+    endif()
 endif()
 if (ANDROID OR WIN32)
     # Vulkan 1.3's functions from the device, not the Vulkan library (runtime/vk13_load.c): Android's has none of them,

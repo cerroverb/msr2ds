@@ -70,9 +70,11 @@ CODE_SHA256 = '669090e6caeef405aaf4d2b884749460f8f0b868ecd158c7f1943ac235c102c6'
 STEPS = 5
 WINDOWS = os.name == 'nt'
 MACOS = sys.platform == 'darwin'
-# A Mac with Apple Silicon: the host library is AArch64 code, its SSE intrinsics a64/'s (as the Android app's), and
-# msr-native's runtime hash covers a64/msr_sse_a64.h as native/CMakeLists.txt adds it on AArch64
+# A Mac with Apple Silicon or an AArch64 Linux system: the host library is AArch64 code, its SSE intrinsics a64/'s
+# (as the Android app's), and msr-native's runtime hash covers a64/msr_sse_a64.h as native/CMakeLists.txt adds it on
+# AArch64
 HOST_A64 = platform.machine().lower() in ('arm64', 'aarch64')
+LINUX_A64 = HOST_A64 and not WINDOWS and not MACOS
 LIBRARY = 'msr_aot.dll' if WINDOWS else 'libmsr_aot.dylib' if MACOS else 'libmsr_aot.so'
 NO_WINDOW = 0x08000000 if WINDOWS else 0  # CREATE_NO_WINDOW
 ANDROID = 'android-arm64'
@@ -157,6 +159,9 @@ class Compiler:
                            '-mcpu=x86_64_v2']
         else:
             self.target = ['-march=x86-64-v2']
+        if LINUX_A64 and not self.android:
+            # Any 64-bit ARM Linux system (ARMv8.0) with glibc 2.28 or newer, as msr-native itself
+            self.target = ['-target', 'aarch64-linux-gnu.2.28', '-mcpu=generic'] if self.zig else ['-march=armv8-a']
         if MACOS and not self.android:
             # Any Apple Silicon Mac (M1 or newer) on macOS 13 or newer, as msr-native itself
             self.target = (['-target', 'aarch64-macos.13.0', '-mcpu=apple_m1'] if self.zig else
@@ -244,6 +249,8 @@ class Compiler:
         if MACOS:
             return self.command + (['-target', 'aarch64-macos.13.0' if HOST_A64 else 'x86_64-macos.13.0']
                                    if self.zig else [])
+        if LINUX_A64:
+            return self.command + (['-target', 'aarch64-linux-gnu.2.28'] if self.zig else [])
         return self.command + (['-target', 'x86_64-windows-gnu' if WINDOWS else 'x86_64-linux-gnu.2.28']
                                if self.zig else [])
 
@@ -460,6 +467,7 @@ ZIG_TRIM = ZIG_TRIM_COMMON + (['lib/libc/glibc'] if WINDOWS else
 ZIG_HEADERS_ANDROID = {'any-linux-any', 'generic-musl', 'aarch64-linux-any', 'aarch64-linux-musl'}
 ZIG_HEADERS_KEEP = ({'any-windows-any'} if WINDOWS else
                     {'any-macos-any', 'aarch64-macos-none', 'x86_64-macos-none'} if MACOS else
+                    {'any-linux-any', 'generic-glibc', 'aarch64-linux-any', 'aarch64-linux-gnu'} if LINUX_A64 else
                     {'any-linux-any', 'generic-glibc', 'x86-linux-any', 'x86-linux-gnu'}) | ZIG_HEADERS_ANDROID
 
 

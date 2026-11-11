@@ -95,6 +95,8 @@ dump and holds the settings, which are also in an in-game overlay (F1 or Select)
      can write to and start `msr-native.exe`.
    - **Linux / Steam Deck (x86_64):** `msr2ds-<version>-x86_64.AppImage`. Make it
      executable (`chmod +x`) and start it.
+   - **Linux (ARM64):** `msr2ds-<version>-aarch64.AppImage`, the same way. The
+     native code is built on the device itself.
    - **macOS (Apple Silicon):** `msr2ds-<version>-macos-arm64.zip`. Unzip it, move
      `msr-native.app` to Applications (or anywhere) and open it from there. The
      app is not notarized: the first time, macOS refuses to open it; choose
@@ -487,7 +489,7 @@ python tools/package/windows.py build   # -> dist/msr-native-<version>-windows-x
 ```sh
 sudo apt install cmake ninja-build g++ libsdl2-dev libvulkan-dev glslc libzstd-dev libpng-dev
 cmake -S native -B build -G Ninja && cmake --build build
-LINUXDEPLOY=<linuxdeploy AppImage> bash tools/package/appimage.sh build   # -> dist/msr-native-<version>-x86_64.AppImage
+LINUXDEPLOY=<linuxdeploy AppImage> bash tools/package/appimage.sh build   # -> dist/msr-native-<version>-<x86_64|aarch64>.AppImage (this system's)
 ```
 
 `appimage.sh [build folder] [SDL2 source] [zstd source]` builds SDL2 and zstd
@@ -542,7 +544,7 @@ keep it for your own use.
 `tools/package/` makes each package (above) in `dist/`. The launcher's updater
 reads the GitHub releases of `MSR_UPDATE_REPO` (`gminustwo/msr2ds`, in
 `native/CMakeLists.txt`) and takes the file ending in `-windows-x64.zip`,
-`-x86_64.AppImage` or `-macos-arm64.zip`, so a package can be uploaded under
+`-x86_64.AppImage`, `-aarch64.AppImage` or `-macos-arm64.zip`, so a package can be uploaded under
 another name (`msr2ds-<version>-...`) as long as the ending stays. The packages
 hold no user folder and nothing from the game.
 

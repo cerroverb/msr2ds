@@ -1,5 +1,6 @@
 #!/bin/bash
-# Builds the Linux release on a Linux system (here: WSL Ubuntu 24.04): dist/msr-native-<version>-x86_64.AppImage.
+# Builds the Linux release on a Linux system (here: WSL Ubuntu 24.04): dist/msr-native-<version>-<arch>.AppImage, where
+# <arch> is this system's (x86_64 or aarch64; build the aarch64 one on an AArch64 Linux system).
 #   tools/package/appimage.sh [build folder] [SDL2 source folder] [zstd source folder]
 # Needs: cmake, ninja, g++, the Vulkan headers and loader (libvulkan-dev), glslc or glslangValidator, libpng and zlib
 # headers, and SDL2: the system's (libsdl2-dev), or built statically from a source folder (the second argument; the
@@ -14,7 +15,9 @@ build="${1:-$HOME/msr-native-build}"
 sdl="${2:-}"
 zstd="${3:-}"
 jobs="${MSR_JOBS:-8}"
-linuxdeploy="${LINUXDEPLOY:-$HOME/samus-build/build/appimage-tools/linuxdeploy-x86_64.AppImage}"
+arch="$(uname -m)"
+case "$arch" in x86_64|aarch64) ;; *) echo "no AppImage for $arch (x86_64 or aarch64)" >&2; exit 1 ;; esac
+linuxdeploy="${LINUXDEPLOY:-$HOME/samus-build/build/appimage-tools/linuxdeploy-$arch.AppImage}"
 version="$(sed -n 's/^set(MSR_NATIVE_VERSION "\([^"]*\)").*/\1/p' "$root/native/CMakeLists.txt" | tr -d '\r')"
 [ -n "$version" ] || { echo "no MSR_NATIVE_VERSION in native/CMakeLists.txt" >&2; exit 1; }
 [ -x "$linuxdeploy" ] || { echo "no linuxdeploy at $linuxdeploy (set LINUXDEPLOY)" >&2; exit 1; }
@@ -55,7 +58,7 @@ Terminal=false
 EOF
 
 mkdir -p "$root/dist"
-export APPIMAGE_EXTRACT_AND_RUN=1 OUTPUT="$root/dist/msr-native-$version-x86_64.AppImage"
+export APPIMAGE_EXTRACT_AND_RUN=1 OUTPUT="$root/dist/msr-native-$version-$arch.AppImage"
 rm -f "$OUTPUT"
 (cd "$build" && "$linuxdeploy" --appdir "$appdir" --executable "$appdir/usr/bin/msr-native" \
   --desktop-file "$appdir/usr/share/applications/msr-native.desktop" \
