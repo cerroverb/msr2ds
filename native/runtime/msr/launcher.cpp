@@ -499,6 +499,19 @@ constexpr Download Downloads[] = {   // Apple Silicon
      "fc269c5082e17d7f9f265cd6980e2fdc6ab572df913951d76db0357e06b8001d", 1202361, "capstone.whl"},
 };
 constexpr const char* ZigArchive = "zig.tar.xz";
+#elif defined(__aarch64__)
+constexpr Download Downloads[] = {   // AArch64 Linux
+    // only when the system has no Python 3.8 or newer
+    {"Python 3.12",
+     "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz",
+     "2e1ba0e7f22e01c534caebf7f09e7820322bc0d055271d3434af671e8400f96f", 0, "python.tar.gz"},
+    {"Zig 0.15.2", "https://ziglang.org/download/0.15.2/zig-aarch64-linux-0.15.2.tar.xz",
+     "958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f", 49471996, "zig.tar.xz"},
+    {"capstone 5.0.9",
+     "https://files.pythonhosted.org/packages/45/d9/dbeadb9fcd461e608ce79b1cb647fed6baa812fa6e1c68b0ba5ef81291af/capstone-5.0.9-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+     "41772ad0c71aa5d3e97d541e802593c2e71fb94ac7e20d4202f97ce2a3eb8ed5", 1461016, "capstone.whl"},
+};
+constexpr const char* ZigArchive = "zig.tar.xz";
 #else
 constexpr Download Downloads[] = {
     // only when the system has no Python 3.8 or newer (SteamOS and most desktops have one)
@@ -1360,7 +1373,7 @@ void CancelSaves() {
 // ---- updates: a newer release, downloaded and put in place of this installation's own files ----
 // The releases of MSR_UPDATE_REPO on GitHub (native/CMakeLists.txt; public releases), each with the packages
 // tools/package makes: msr-native-<version>-windows-x64.zip (the program, its libraries and recomp/, in one folder),
-// msr-native-<version>-x86_64.AppImage and msr-native-<version>-macos-arm64.zip (msr-native.app). The launcher looks
+// msr-native-<version>-x86_64.AppImage, msr-native-<version>-aarch64.AppImage and msr-native-<version>-macos-arm64.zip (msr-native.app). The launcher looks
 // when it starts and offers the newest release above its own
 // version that has this system's package (pre-releases too). Update downloads it, checks its SHA-256 against the
 // release's digest, and then
@@ -1556,6 +1569,8 @@ const char* PackageSuffix() {
     return "-windows-x64.zip";
 #elif defined(__APPLE__)
     return "-macos-arm64.zip";
+#elif defined(__aarch64__)
+    return "-aarch64.AppImage";
 #else
     return "-x86_64.AppImage";
 #endif
