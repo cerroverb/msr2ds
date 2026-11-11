@@ -24,7 +24,7 @@ jobs:
           chmod +x "$RUNNER_TEMP/tools/linuxdeploy-aarch64.AppImage"
 
       - name: Build the AppImage
-        run: LINUXDEPLOY="$RUNNER_TEMP/tools/linuxdeploy-aarch64.AppImage" bash tools/package/appimage.sh build
+        run: LINUXDEPLOY="$RUNNER_TEMP/tools/linuxdeploy-aarch64.AppImage" bash tools/package/appimage.sh "$GITHUB_WORKSPACE/build"
 
       - name: SHA-256
         run: sha256sum dist/*.AppImage
