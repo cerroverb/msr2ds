@@ -17,6 +17,9 @@
  *   --texture-pack <folder>   a texture pack to use (repeatable, highest priority first; the launcher passes the enabled ones)
  * Save data goes to $PWR_SAVE_DIR (default user/native-save). PWR_TRACE=1 logs kernel calls and IPC.
  * The guest main thread runs on its own host thread; this thread owns the window and drives VBlank at 60 Hz. */
+#ifndef _WIN32
+#define _GNU_SOURCE   /* glibc's dladdr, Dl_info and REG_RIP (the crash report, crash_report) */
+#endif
 #include "gpu.h"
 #include "runtime.h"
 #include "dump.h"
@@ -24,6 +27,7 @@
 #include "msr/msr.h"
 #include <SDL_filesystem.h>
 #include <math.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +40,13 @@
 #else
 #include <sys/resource.h>
 #include <unistd.h>
+#include <dlfcn.h>
+#include <stdint.h>
+#include <unwind.h>   /* the crash report's calls (crash_report) */
+#ifdef __linux__
+#include <sys/syscall.h>
+#include <ucontext.h>
+#endif
 #endif
 #ifdef __APPLE__
 #include <sys/sysctl.h>
@@ -231,15 +242,25 @@ static int display_timing(double *period, double *vblank) {
 #else
 static int display_timing(double *period, double *vblank) { (void)period; (void)vblank; return 0; }
 #endif
-/* the next VBlank tick after one at `next`: the frame period on the host clock, or the display's next vblank less 2 ms */
+/* the next VBlank tick after one at `next`: the frame period on the host clock, or the display's next vblank less 2 ms.
+   The display is followed when the frame period is a whole number of its refresh periods (60 FPS on a 120 or 240 Hz
+   display too: on the host clock that drifted across a vblank every few seconds, frames then 1 or 3 vblanks apart, a
+   judder that came and went, #49), and when DWM's clock is the window's display's: DWM times the desktop's composition,
+   which with several monitors (or VRR) need not be the one the game is on (its refresh from SDL, video.c). */
+double video_display_hz(void);
 static double next_tick(double next, int fps) {
     double step = fps > 60 ? 1.0 / fps : 1.0 / 60.0;
     static int off = -1; if (off < 0) off = getenv("PWR_NO_DISPLAY_SYNC") != NULL;
     static double period, vblank, checked; static int ok, logged;
     double t = now_s();
-    if (!off && t - checked > 0.5) { checked = t; ok = display_timing(&period, &vblank); }
-    if (off || !ok || fabs(period - step) > step * 0.015) return next + step;
-    if (!logged) { logged = 1; fprintf(stderr, "native: VBlank follows the display (%.3f Hz)\n", 1.0 / period); }
+    if (!off && t - checked > 0.5) {
+        checked = t; ok = display_timing(&period, &vblank);
+        const double hz = video_display_hz();
+        if (ok && hz > 0 && fabs(1.0 / period - hz) > 1.5 + hz * 0.01) ok = 0;   /* another display's clock */
+    }
+    const double n = ok ? floor(step / period + 0.5) : 0;   /* vblanks a frame */
+    if (off || !ok || n < 1 || fabs(n * period - step) > step * 0.015) return next + step;
+    if (!logged) { logged = 1; fprintf(stderr, "native: VBlank follows the display (%.3f Hz%s)\n", 1.0 / period, n > 1 ? ", every other vblank or more" : ""); }
     const double lead = 0.002, want = next + step + lead;   /* the display vblank nearest to one frame on, less the lead */
     double k = floor((want - vblank) / period + 0.5);
     double tick = vblank + k * period - lead;
@@ -273,20 +294,155 @@ static void folder_of(const char *path, char *out, size_t n) {
     snprintf(out, n, "%.*s", slash ? (int)(slash - path + 1) : 0, path);
 }
 
+/* ---- what the main thread and the GX thread are doing (gpu.h), and the watchdog ----
+   A stage held for 5 s is logged with the other thread's, the game's threads' waits and the log flushed; again at 60 s.
+   #52 (Mali-G57): the log stopped a few seconds into the game while the audio played on, the main thread stuck
+   somewhere, and the report of a game without frames runs on that thread; #58 (Adreno 830): the launcher's log ended
+   inside vk_open, which says nothing of where. */
+static struct { const char *volatile what; volatile double since; } stages[STAGE_COUNT];
+static const char *const stage_name[STAGE_COUNT] = { "the main thread", "the GX thread" };
+static volatile int g_booted;   /* the game's threads exist: the watchdog's report includes where they wait */
+const char *stage_set(int who, const char *what) {
+    const char *was = stages[who].what;
+    stages[who].since = now_s(); stages[who].what = what;
+    return was;
+}
+static void stages_print(void) {
+    const double t = now_s();
+    for (int i = 0; i < STAGE_COUNT; i++) {
+        const char *w = stages[i].what;
+        fprintf(stderr, "watchdog:   %s: %s", stage_name[i], w ? w : "nothing that waits");
+        if (w) fprintf(stderr, " (for %.1f s)", t - stages[i].since);
+        fputc('\n', stderr);
+    }
+}
+static void *watchdog(void *arg) {
+    (void)arg;
+    double told[STAGE_COUNT] = { 0 }; int times[STAGE_COUNT] = { 0 };
+    for (;;) {
+#ifdef _WIN32
+        Sleep(500);
+#else
+        usleep(500000);
+#endif
+        const double t = now_s();
+        for (int i = 0; i < STAGE_COUNT; i++) {
+            const char *w = stages[i].what; const double since = stages[i].since;
+            if (!w) continue;
+            if (since != told[i]) times[i] = 0;
+            if (t - since < (times[i] ? 60.0 : 5.0) || times[i] >= 2) continue;
+            told[i] = since; times[i]++;
+            fprintf(stderr, "watchdog: %s has been %s for %.0f s%s\n", stage_name[i], w, t - since, times[i] > 1 ? " (still)" : "");
+            stages_print();
+            fflush(stderr);   /* (before the reports: they read the game's state as it is) */
+            if (g_booted && times[i] == 1) { k_hang_report(); gsp_hang_report(); }
+            fflush(stderr);
+        }
+    }
+    return NULL;
+}
+static void watchdog_start(void) {
+    pthread_t th;
+    if (!pthread_create(&th, NULL, watchdog, NULL)) pthread_detach(th);
+}
+
 /* The log (stderr, a file) is buffered and written every 2 s with the stats: unbuffered, each line cost milliseconds of
    writes (about 19 ms for the 2 s stats) on the thread that runs VBlank, a 26 ms frame and a catch-up frame every 2 s
    at 144 FPS (2026-11-02). It still reaches the file on exit, abort() and a crash. */
-static void log_flush_on_abort(int sig) { (void)sig; fflush(stderr); }
+/* Windows: main has returned and the C runtime's exit is under way. Its static destructors run while the game's threads
+   still execute (Linux and Android leave with _exit instead, main): one of them can then fault in the recompiled code's
+   lookup (dispatch.cpp, its tables gone), which the log does not report, as before the crash report existed. */
 #ifdef _WIN32
-static LONG WINAPI log_flush_on_crash(EXCEPTION_POINTERS *e) { (void)e; fflush(stderr); return EXCEPTION_CONTINUE_SEARCH; }
+static volatile int g_teardown;
+static void log_flush_on_abort(int sig) { (void)sig; fprintf(stderr, "native: aborted\n"); stages_print(); fflush(stderr); }
+static LONG WINAPI log_flush_on_crash(EXCEPTION_POINTERS *e) {
+    if (g_teardown) { fflush(stderr); return EXCEPTION_CONTINUE_SEARCH; }
+    void *at = e && e->ExceptionRecord ? e->ExceptionRecord->ExceptionAddress : NULL;
+    HMODULE m = NULL; char path[MAX_PATH] = "?";   /* where: module + offset (addr2line -e <module> <offset>) */
+    if (at && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)at, &m))
+        GetModuleFileNameA(m, path, sizeof path);
+    const char *base = strrchr(path, '\\'); base = base ? base + 1 : path;
+    fprintf(stderr, "native: crashed: exception %08lx at %s+0x%llx, thread %lu\n", e && e->ExceptionRecord ? (unsigned long)e->ExceptionRecord->ExceptionCode : 0ul,
+            base, m ? (unsigned long long)((uintptr_t)at - (uintptr_t)m) : (unsigned long long)(uintptr_t)at, (unsigned long)GetCurrentThreadId());
+    stages_print(); fflush(stderr); return EXCEPTION_CONTINUE_SEARCH;
+}
+#else
+/* A crash (Linux, Android, macOS): the log so far, then the signal, where it struck and the calls that led there (each
+   as library+offset and the nearest exported name), before the system's own handling carries on (Android's tombstone,
+   a core dump): its handler is put back and the faulting instruction runs again. Without this, a crash lost the log's
+   last 2 s and said nothing of itself (#53: an Adreno 640 closing a few seconds in, the log ending at its first stats
+   line). snprintf and dladdr are not async-signal-safe, but the process is ending anyway. */
+static struct sigaction crash_old[NSIG];
+static int crash_fd = 2;
+static void crash_write(const char *s) { size_t n = strlen(s); while (n) { ssize_t w = write(crash_fd, s, n); if (w <= 0) break; s += w; n -= (size_t)w; } }
+static void crash_where(const char *what, uintptr_t pc) {
+    char line[384]; Dl_info di;
+    if (pc && dladdr((void *)pc, &di) && di.dli_fname) {
+        const char *base = strrchr(di.dli_fname, '/'); base = base ? base + 1 : di.dli_fname;
+        if (di.dli_sname && di.dli_saddr)
+            snprintf(line, sizeof line, "native:   %s %s+0x%lx (%s+0x%lx)\n", what, base, (unsigned long)(pc - (uintptr_t)di.dli_fbase), di.dli_sname,
+                     (unsigned long)(pc - (uintptr_t)di.dli_saddr));
+        else snprintf(line, sizeof line, "native:   %s %s+0x%lx\n", what, base, (unsigned long)(pc - (uintptr_t)di.dli_fbase));
+    } else snprintf(line, sizeof line, "native:   %s 0x%lx\n", what, (unsigned long)pc);
+    crash_write(line);
+}
+static _Unwind_Reason_Code crash_frame(struct _Unwind_Context *c, void *arg) {
+    int *n = arg; const uintptr_t pc = (uintptr_t)_Unwind_GetIP(c);
+    if (!pc || ++*n > 32) return _URC_END_OF_STACK;
+    char what[16]; snprintf(what, sizeof what, "#%d", *n - 1); crash_where(what, pc);
+    return _URC_NO_REASON;
+}
+static void crash_handler(int sig, siginfo_t *si, void *ctx) {
+    static volatile sig_atomic_t busy;
+    if (!busy) {   /* the first thread to crash reports */
+        busy = 1;
+        fflush(stderr);   /* the lines since the last stats */
+        crash_fd = fileno(stderr);
+        const char *name = sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : sig == SIGILL ? "SIGILL" : sig == SIGFPE ? "SIGFPE" : sig == SIGABRT ? "SIGABRT" : "?";
+        char line[256];
+#ifdef __linux__
+        const long tid = (long)syscall(SYS_gettid);
+        snprintf(line, sizeof line, "native: crashed: %s (code %d) at address %p, thread %ld%s\n", name, si->si_code, si->si_addr, tid, tid == (long)getpid() ? " (the main thread)" : "");
+#else
+        snprintf(line, sizeof line, "native: crashed: %s (code %d) at address %p\n", name, si->si_code, si->si_addr);
+#endif
+        crash_write(line);
+        for (int i = 0; i < STAGE_COUNT; i++) {   /* what each was doing (constant strings) */
+            const char *w = stages[i].what;
+            crash_write("native:   "); crash_write(stage_name[i]); crash_write(w ? " was " : " was not waiting on anything marked"); if (w) crash_write(w); crash_write("\n");
+        }
+#if defined(__linux__) && defined(__aarch64__)
+        const ucontext_t *uc = ctx;
+        crash_where("pc", (uintptr_t)uc->uc_mcontext.pc); crash_where("lr", (uintptr_t)uc->uc_mcontext.regs[30]);
+#elif defined(__linux__) && defined(__x86_64__) && defined(REG_RIP)
+        const ucontext_t *uc = ctx;
+        crash_where("pc", (uintptr_t)uc->uc_mcontext.gregs[REG_RIP]);
+#else
+        (void)ctx;
+#endif
+        crash_write("native:   called from (the handler's own frames first):\n");
+        int n = 0; _Unwind_Backtrace(crash_frame, &n);
+    }
+    sigaction(sig, &crash_old[sig], NULL);   /* the system's handling next */
+    if (si->si_code <= 0 || sig == SIGABRT) raise(sig);   /* sent, not a fault: it would not happen again by itself */
+}
+static void crash_report(void) {
+    static const int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+    struct sigaction sa; memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = crash_handler; sa.sa_flags = SA_SIGINFO | SA_ONSTACK; sigemptyset(&sa.sa_mask);
+    for (size_t i = 0; i < sizeof sigs / sizeof sigs[0]; i++) sigaction(sigs[i], &sa, &crash_old[sigs[i]]);
+}
 #endif
 static void log_buffered(void) {
-    if (getenv("PWR_LOG_UNBUFFERED")) return;   /* every line at once, as before (debugging a hang without a stats line) */
-    setvbuf(stderr, NULL, _IOFBF, 1 << 16);
+    watchdog_start();
+#ifndef _WIN32
+    crash_report();   /* with an unbuffered log too */
+#else
     signal(SIGABRT, log_flush_on_abort);
-#ifdef _WIN32
     SetUnhandledExceptionFilter(log_flush_on_crash);
 #endif
+    if (getenv("PWR_LOG_UNBUFFERED")) return;   /* every line at once, as before (debugging a hang without a stats line) */
+    setvbuf(stderr, NULL, _IOFBF, 1 << 16);
 }
 
 int msr_launcher_main(void);
@@ -400,6 +556,7 @@ int main(int argc, char **argv) {   /* SDL_main */
     if (chdir(msr_android_root())) return 1;   /* the paths are user/..., as in the PC's folder */
     if (argc > 1) {
         mkdir("user", 0777);
+        video_keep_crashed_log("user/msr-native.log");   /* (a start that ended while opening the graphics: video.c) */
         if (freopen("user/msr-native.log", "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);   /* the launcher's is its own */
         /* user/env.txt: test switches (PWR_..., one NAME=value a line, # comments), as a PC's environment would give them;
            a phone has no other way to set them */
@@ -530,6 +687,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "native: boot (input=%s, audio=%s)\n", g_input_none ? "none" : "default", g_mute ? "muted" : "on");
 
     volatile int *done = k_start_main(0x100000);
+    g_booted = 1;
     double next = now_s(), last_stat = next; unsigned frames = 0;
     while (!*done && g_exit < 0) {
         {   /* PWR_HITCH (gsp.c): the longest pass of this loop between two game frames */
@@ -539,7 +697,9 @@ int main(int argc, char **argv) {
         }
         fps = g_fps;
         extern double g_main_part_max[5]; double pt0 = now_s(), pt1, pt2, pt3, pt4;   /* PWR_HITCH: each part's longest */
+        stage_set(STAGE_MAIN, "reading input");
         input_update(); pt1 = now_s();
+        stage_set(STAGE_MAIN, "giving the game its VBlank");
         {   /* 30 FPS: the game's VBlank on every other tick (30 Hz) while it keeps up. Its frame limit (33 ms) runs a little
                short of two 60 Hz VBlanks, so with each tick's VBlank it ran at 30.3 FPS and caught up with a 50 ms frame
                every 50 frames (1.65 s), a stutter; at 30 Hz each frame is two ticks, 30.0 FPS. A computer that cannot keep
@@ -566,10 +726,13 @@ int main(int argc, char **argv) {
             if (deliver) gsp_vblank();
         }
         pt2 = now_s();
+        stage_set(STAGE_MAIN, "applying the cheats and the camera");
         msr_cheats_frame(now_s());   /* Samus Returns' cheats and the extras' patches (msr/cheats.cpp) */
         msr_camera_frame(now_s());   /* the camera zoom: the game's field of view widened for it (msr/camera_fov.cpp) */
         pt3 = now_s();
+        stage_set(STAGE_MAIN, "presenting (video_frame)");
         if (!video_frame()) break;
+        stage_set(STAGE_MAIN, NULL);   /* (the wait for the next tick and the 2 s stats) */
         pt4 = now_s();
         { double d[4] = { pt1 - pt0, pt2 - pt1, pt3 - pt2, pt4 - pt3 }; for (int i = 0; i < 4; i++) if (d[i] * 1e3 > g_main_part_max[i]) g_main_part_max[i] = d[i] * 1e3; }
         frames++;
@@ -587,6 +750,14 @@ int main(int argc, char **argv) {
                     frames, lists, draws, g_vid_presented, g_vid_acquire_fail, g_vid_present_fail, g_vid_last_err, (g_gsp_top_swaps - last_swaps) / (t - last_stat),
                     g_frame_max_ms, g_frame_over[0], g_frame_over[1], g_frame_over[2]);
             load_line(t - last_stat, g_gsp_top_swaps - last_swaps, g_frame_max_ms, fps);
+            {   /* the main thread's waits in presenting, per presented frame (video.c) */
+                extern double g_vid_wait_fence, g_vid_wait_acquire, g_vid_wait_present, g_vid_wait_queue_gx; static unsigned last_presented;
+                const unsigned np = g_vid_presented - last_presented; last_presented = g_vid_presented;
+                if (np) fprintf(stderr, "native: presenting waits per frame: last frame's fence %.2f ms, next image %.2f ms, present %.2f ms; "
+                                "the GX thread's wait for the queue %.2f ms\n", g_vid_wait_fence * 1e3 / np, g_vid_wait_acquire * 1e3 / np,
+                                g_vid_wait_present * 1e3 / np, g_vid_wait_queue_gx * 1e3 / np);
+                g_vid_wait_fence = g_vid_wait_acquire = g_vid_wait_present = g_vid_wait_queue_gx = 0;
+            }
             g_frame_max_ms = 0; memset(g_frame_over, 0, sizeof g_frame_over);
             {   /* no new top-screen frame for 6 s after the game had started drawing: say where everything waits, once */
                 static unsigned still; static int reported;
@@ -595,6 +766,10 @@ int main(int argc, char **argv) {
                 static double t0; if (!t0) t0 = t;   /* PWR_HANG_AT=<s>: the same report at that run time, frames or not */
                 if (getenv("PWR_HANG_AT") && !reported && t - t0 >= atof(getenv("PWR_HANG_AT"))) {
                     reported = 1; fprintf(stderr, "hang: report at %.0f s (PWR_HANG_AT)\n", t - t0); k_hang_report(); gsp_hang_report();
+                }
+                static int quick_loaded;   /* PWR_QUICK_LOAD_AT=<s>: the quick state loaded at that run time (F8 without a keyboard: tests) */
+                if (getenv("PWR_QUICK_LOAD_AT") && !quick_loaded && t - t0 >= atof(getenv("PWR_QUICK_LOAD_AT"))) {
+                    extern void msr_state_quick_load(void); quick_loaded = 1; msr_state_quick_load();
                 }
             }
             last_swaps = g_gsp_top_swaps;
@@ -622,6 +797,7 @@ int main(int argc, char **argv) {
             last_stat = t;
         }
     }
+    stage_set(STAGE_MAIN, "closing the game");
     fprintf(stderr, "native: %s\n", *done ? "guest main returned" : g_exit == MSR_EXIT_RESTART ? "restart" : "window closed");
     { extern void pica_vk_saves_wait(void); pica_vk_saves_wait(); }   /* a shader cache save under way lands first */
     video_shutdown();
@@ -636,6 +812,9 @@ int main(int argc, char **argv) {
     android_after_game(g_exit == MSR_EXIT_RESTART, *done || g_exit == 0);   /* the window closed: the app stays closed */
 #endif
     _exit(g_exit > 0 ? g_exit : 0);
+#endif
+#ifdef _WIN32
+    g_teardown = 1;   /* (log_flush_on_crash) */
 #endif
     return g_exit > 0 ? g_exit : 0;
 }

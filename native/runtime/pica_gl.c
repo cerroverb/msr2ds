@@ -810,7 +810,7 @@ static void draw_sc(uint32_t *sc) {
     static const int tb[6] = { 0x0C0, 0x0C8, 0x0D0, 0x0D8, 0x0F0, 0x0F8 };
     sc[0] = 1;
     for (int i = 0; i < 6; i++) { sc[1 + i] = R(tb[i]) & 0x0FFF0FFF; sc[7 + i] = R(tb[i] + 1) & 0x777FFF; sc[13 + i] = R(tb[i] + 2) & 0x000F000F; sc[19 + i] = R(tb[i] + 4) & 0x00030003; }
-    sc[25] = R(0x0E0) & 0x1FF07; sc[26] = R(0x104) & 0x71; sc[27] = R(0x080) & 0x2007;
+    sc[25] = R(0x0E0) & 0x1FF07; sc[26] = R(0x104) & 0x71; sc[27] = pica_sc_texen();
     sc[28] = (R(0x08F) & 1) && !(R(0x1C6) & 1); sc[29] = R(0x06D) & 1;
 }
 static uint64_t spec_key(const uint32_t *sc, int nd) {

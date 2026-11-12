@@ -8,6 +8,20 @@ typedef struct { float x, y, z, w; } V4;
 typedef struct { V4 pos; V4 col; float uv[3][2]; float tw; V4 quat; float view[3]; } Vtx;
 
 extern uint32_t pica_regs[0x300];
+/* the fragment shader's SC_TEXEN (pica_vk.c, pica_gl.c): 0x080's texture units and unit 2's coordinates, and for each
+   unit on, whether it clamps to its border colour on s (bit 16 + 2 * unit) and t (17 + 2 * unit) (wrap mode 1): a unit
+   without that samples with no range check or parameter read (shaders/pica.frag sample_unit) */
+static inline uint32_t pica_sc_texen(void) {
+    static const uint16_t par[3] = { 0x083, 0x093, 0x09B };
+    uint32_t en = pica_regs[0x080], sc = en & 0x2007;
+    for (unsigned u = 0; u < 3; u++) {
+        if (!(en >> u & 1)) continue;
+        uint32_t p = pica_regs[par[u]];
+        if ((p >> 12 & 7) == 1) sc |= 1u << (16 + 2 * u);
+        if ((p >> 8 & 7) == 1) sc |= 2u << (16 + 2 * u);
+    }
+    return sc;
+}
 extern uint32_t light_lut[24][256];     /* 0-6 D0 D1 - FR RB RG RR, 8-15 spot per light, 16-23 distance per light */
 extern uint32_t light_lut_version;      /* bumped on every LUT write (lighting or fog) */
 extern uint32_t fog_lut[128];           /* 0x0E8-0x0EF: bits 13-23 value, 0-12 signed difference (both /2047), index 0x0E6 */
@@ -32,6 +46,7 @@ int pica_num_attrs(void);                          /* attribute count of the cur
 /* pica_vk.c */
 int  pica_vk_enabled(void);             /* hardware renderer active (PWR_RENDERER != sw and Vulkan 1.3 present) */
 int  pica_vk_gpu_vs(void);              /* vertex shaders run on the GPU (default; PWR_VK_CPU_VS=1 shades on the CPU) */
+int  pica_vk_vs_ready(void);            /* ...and this draw's can now (phones: not yet translated, it is shaded on the CPU) */
 /* one draw: the nvlist distinct vertices (guest index vlist_index[i], cache slot vlist_slot[i]) and the cache slot of
  * each of the n vertices in draw order; vcache = CPU-shaded vertices by slot, or NULL to shade on the GPU */
 void pica_vk_draw(const Vtx *vcache, const uint32_t *vlist_index, const uint32_t *vlist_slot, uint32_t nvlist,

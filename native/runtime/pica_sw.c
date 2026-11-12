@@ -700,8 +700,10 @@ static float comb(int op, float a, float b, float c) {
 
 static C4 run_tev(C4 prim, C4 tex[3], const C4 *lp, const C4 *ls) {
     /* the combiner buffer lags a stage (as Citra models the hardware): stage 0 reads 0, stage 1 the buffer colour 0x0FD,
-       stage n the buffer from before stage n-1's update */
-    C4 prev = prim, buf = { 0, 0, 0, 0 }, next_buf = unpack(R(0x0FD));
+       stage n the buffer from before stage n-1's update. Stage 0's Previous (source 15) is that stage's third source
+       instead, and the previous output before stage 0 is 0 (Azahar's generator, glsl_fs_shader_gen.cpp force_source3,
+       from the hardware's behaviour; here it had been the primary colour). Same in shaders/pica.frag. */
+    C4 prev = { 0, 0, 0, 0 }, buf = { 0, 0, 0, 0 }, next_buf = unpack(R(0x0FD));
     uint32_t bufcfg = R(0x0E0);
     for (int i = 0; i < 6; i++) {
         int b = tev_base[i];
@@ -709,8 +711,11 @@ static C4 run_tev(C4 prim, C4 tex[3], const C4 *lp, const C4 *ls) {
         C4 konst = unpack(R(b + 3));
         C4 in[3]; float ia[3];
         for (int k = 0; k < 3; k++) {
-            in[k] = oprgb((int)(ops >> (4 * k)) & 15, tev_src((int)(srcs >> (4 * k)) & 15, prim, tex, prev, buf, konst, lp, ls));
-            ia[k] = opa((int)(ops >> (12 + 4 * k)) & 7, tev_src((int)(srcs >> (16 + 4 * k)) & 15, prim, tex, prev, buf, konst, lp, ls));
+            int sc = (int)(srcs >> (4 * k)) & 15, sa = (int)(srcs >> (16 + 4 * k)) & 15;
+            if (i == 0 && sc == 15) sc = (int)(srcs >> 8) & 15;
+            if (i == 0 && sa == 15) sa = (int)(srcs >> 24) & 15;
+            in[k] = oprgb((int)(ops >> (4 * k)) & 15, tev_src(sc, prim, tex, prev, buf, konst, lp, ls));
+            ia[k] = opa((int)(ops >> (12 + 4 * k)) & 7, tev_src(sa, prim, tex, prev, buf, konst, lp, ls));
         }
         int crgb = (int)(cmb & 15), ca = (int)((cmb >> 16) & 15);
         C4 o;
@@ -863,7 +868,8 @@ static void raster(const SV *v0, const SV *v1, const SV *v2, int band, int nband
         C4 lp = { 0, 0, 0, 0 }, ls = { 0, 0, 0, 0 };
         if (lit) fragment_light(a + 11, a + 15, tex, &lp, &ls);
         C4 c = run_tev(prim, tex, &lp, &ls);
-        if (at & 1) { float ref = ((at >> 8) & 0xff) / 255.f; if (!cmp_func((int)(at >> 4 & 7), c.a, ref)) { n_afail++; continue; } }
+        /* the alpha test on the 8-bit alpha (as Azahar: rounded, then compared as integers; floats missed EQUAL) */
+        if (at & 1) { if (!cmp_func((int)(at >> 4 & 7), (float)(int)(c.a * 255.f + .5f), (float)((at >> 8) & 0xff))) { n_afail++; continue; } }
         if (fog_on) { float f = fog_factor(z); c.r = f * c.r + (1 - f) * fogc.r; c.g = f * c.g + (1 - f) * fogc.g; c.b = f * c.b + (1 - f) * fogc.b; }
         if (st_on) {
             uint8_t old = read_stencil((uint32_t)x, (uint32_t)y);
@@ -1133,7 +1139,7 @@ void pica_sw_draw(int indexed) {
         idx[i] = slot;
         if (vstamp[slot] != draw_stamp) { vstamp[slot] = draw_stamp; vlist_index[nvlist] = v; vlist_slot[nvlist++] = slot; }
     }
-    if (pica_vk_enabled() && pica_vk_gpu_vs()) { draw_debug(n, topo, idx, 0); pica_vk_draw(NULL, vlist_index, vlist_slot, nvlist, idx, n, topo); return; }
+    if (pica_vk_enabled() && pica_vk_gpu_vs() && pica_vk_vs_ready()) { draw_debug(n, topo, idx, 0); pica_vk_draw(NULL, vlist_index, vlist_slot, nvlist, idx, n, topo); return; }
     if (nvlist < 128) job_shade(0, 1); else pool_run(job_shade);   /* waking the pool costs more than a small draw */
     draw_debug(n, topo, idx, 1);
     if (pica_vk_enabled()) { pica_vk_draw(vcache, vlist_index, vlist_slot, nvlist, idx, n, topo); return; }

@@ -60,7 +60,7 @@ layout(constant_id = 19) const uint SC_SCL0 = 0u; layout(constant_id = 20) const
 layout(constant_id = 22) const uint SC_SCL3 = 0u; layout(constant_id = 23) const uint SC_SCL4 = 0u; layout(constant_id = 24) const uint SC_SCL5 = 0u;
 layout(constant_id = 25) const uint SC_BUFCFG = 0u;   // 0x0E0: fog mode, combiner-buffer update masks, fog flip
 layout(constant_id = 26) const uint SC_ALPHA = 0u;    // 0x104: alpha test enable and function (the reference is read from the uniforms)
-layout(constant_id = 27) const uint SC_TEXEN = 0u;    // 0x080: texture units, unit 2 coordinates
+layout(constant_id = 27) const uint SC_TEXEN = 0u;    // 0x080: texture units, unit 2 coordinates; 16-21: units' border wrap
 layout(constant_id = 28) const uint SC_LIGHT = 0u;    // fragment lighting on
 layout(constant_id = 29) const uint SC_ZBUF = 0u;     // 0x06D bit 0
 #endif
@@ -69,9 +69,12 @@ uint sc6(uint i, uint a, uint b, uint c, uint d, uint e, uint f) { return i == 0
 vec4 rgba8(uint v) { return vec4(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u), float(v >> 24)) / 255.0; }
 
 vec4 sample_unit(int unit, vec2 uv) {
-    uint par = R(unit == 0 ? 0x083u : unit == 1 ? 0x093u : 0x09Bu);
-    uint ws = (par >> 12) & 7u, wt = (par >> 8) & 7u;
-    if ((ws == 1u && (uv.x < 0.0 || uv.x > 1.0)) || (wt == 1u && (uv.y < 0.0 || uv.y > 1.0)))
+    // clamp to border (wrap mode 1) on s and t: specialised, SC_TEXEN bits 16 + 2 * unit (s) and 17 + 2 * unit (t), so
+    // that a unit without it is a bare sample (as Azahar folds it per configuration); else from the unit's parameters
+    bool bs, bt;
+    if (SC_ON != 0u) { uint b = SC_TEXEN >> (16u + 2u * uint(unit)); bs = (b & 1u) != 0u; bt = (b & 2u) != 0u; }
+    else { uint par = R(unit == 0 ? 0x083u : unit == 1 ? 0x093u : 0x09Bu); bs = ((par >> 12) & 7u) == 1u; bt = ((par >> 8) & 7u) == 1u; }
+    if ((bs && (uv.x < 0.0 || uv.x > 1.0)) || (bt && (uv.y < 0.0 || uv.y > 1.0)))
         return rgba8(R(unit == 0 ? 0x081u : unit == 1 ? 0x091u : 0x099u));
     return unit == 0 ? texture(tex0, uv) : unit == 1 ? texture(tex1, uv) : texture(tex2, uv);
 }
@@ -221,7 +224,9 @@ void main() {
 
     const uint tev_base[6] = uint[6](0x0C0u, 0x0C8u, 0x0D0u, 0x0D8u, 0x0F0u, 0x0F8u);
     // the combiner buffer lags a stage (as Citra models the hardware): stage 0 reads 0, stage 1 the buffer colour
-    vec4 prev = v_col, buf = vec4(0.0), next_buf = rgba8(R(0x0FDu));
+    // stage 0's Previous (source 15) is that stage's third source, and the output before stage 0 is 0 (as Azahar's
+    // generator, from the hardware's behaviour; pica_sw.c run_tev the same)
+    vec4 prev = vec4(0.0), buf = vec4(0.0), next_buf = rgba8(R(0x0FDu));
     uint bufcfg = SC_ON != 0u ? SC_BUFCFG : R(0x0E0u);
     UNROLL for (uint i = 0u; i < 6u; i++) {
         uint b = tev_base[i];
@@ -232,8 +237,11 @@ void main() {
         vec4 konst = rgba8(R(b + 3u));
         vec3 in_rgb[3]; float in_a[3];
         UNROLL for (uint k = 0u; k < 3u; k++) {
-            in_rgb[k] = oprgb((ops >> (4u * k)) & 15u, tev_src((srcs >> (4u * k)) & 15u, tex, prev, buf, konst, lp, ls));
-            in_a[k] = opa((ops >> (12u + 4u * k)) & 7u, tev_src((srcs >> (16u + 4u * k)) & 15u, tex, prev, buf, konst, lp, ls));
+            uint sc = (srcs >> (4u * k)) & 15u, sa = (srcs >> (16u + 4u * k)) & 15u;
+            if (i == 0u && sc == 15u) sc = (srcs >> 8u) & 15u;
+            if (i == 0u && sa == 15u) sa = (srcs >> 24u) & 15u;
+            in_rgb[k] = oprgb((ops >> (4u * k)) & 15u, tev_src(sc, tex, prev, buf, konst, lp, ls));
+            in_a[k] = opa((ops >> (12u + 4u * k)) & 7u, tev_src(sa, tex, prev, buf, konst, lp, ls));
         }
         uint crgb = cmb & 15u, ca = (cmb >> 16) & 15u;
         vec4 o;
@@ -251,7 +259,8 @@ void main() {
     }
     // the reference value (bits 8-15) stays a uniform: games animate it (fades, dissolves), and every value would be a new pipeline
     uint at = SC_ON != 0u ? SC_ALPHA | (R(0x104u) & 0xFF00u) : R(0x104u);
-    if ((at & 1u) != 0u && !cmp_func((at >> 4) & 7u, prev.a, float((at >> 8) & 255u) / 255.0)) discard;
+    // on the 8-bit alpha, as integers (as Azahar; unrounded floats missed EQUAL and moved GREATER's edge)
+    if ((at & 1u) != 0u && !cmp_func((at >> 4) & 7u, floor(prev.a * 255.0 + 0.5), float((at >> 8) & 255u))) discard;
     // depth = z/w * scale + offset (gl_FragCoord.z = -z/w, see the vertex shaders); 0x06D bit 0 clear = W-buffer: times w
     // (gl_FragCoord.w = 1/w). Every draw in this game sets bit 0 (Z-buffer).
     bool zbuf = SC_ON != 0u ? SC_ZBUF != 0u : (R(0x06Du) & 1u) != 0u;

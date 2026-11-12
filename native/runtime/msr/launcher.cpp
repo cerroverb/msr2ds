@@ -88,6 +88,7 @@ void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume, in
 void msr_overlay_launcher(int on);
 void msr_overlay_reload(void);
 void msr_mods_init(const char* user, const char* settings, const char* exe);
+void video_keep_crashed_log(const char* log);
 }
 
 namespace {
@@ -2143,6 +2144,7 @@ void Setup() {
     S.settings = S.user / "msr" / "settings.ini";
     {   // the launcher's own log (a program without a console has no stderr)
         const fs::path log = S.user / "launcher.log";
+        video_keep_crashed_log(Utf8(log).c_str());   // (Android: a start that ended while opening the graphics, video.c)
 #ifdef _WIN32
         _wfreopen(log.c_str(), L"w", stderr);
 #else
