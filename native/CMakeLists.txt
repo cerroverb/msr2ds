@@ -4,7 +4,7 @@
 # Compilers: GCC or Clang (MinGW-w64 on Windows). Needs SDL2, Vulkan headers and loader, glslc.
 cmake_minimum_required(VERSION 3.16)
 project(msr_native C CXX)
-set(MSR_NATIVE_VERSION "2.0.6")   # the launcher shows it; the native code's module.json records it
+set(MSR_NATIVE_VERSION "2.0.7")   # the launcher shows it; the native code's module.json records it
 # Where the launcher looks for newer releases (GitHub owner/repository; its releases must be public): their packages,
 # as tools/package names them, update the installation in place (launcher.cpp)
 set(MSR_UPDATE_REPO "gminustwo/msr2ds" CACHE STRING "GitHub repository whose releases the launcher offers as updates")
