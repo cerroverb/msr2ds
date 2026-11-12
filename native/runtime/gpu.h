@@ -47,6 +47,8 @@ void pica_vk_scanout_invalidate(uint32_t start, uint32_t end);   /* gsp.c: a GX 
 int  video_init(int scale);
 int  video_gl(void);                   /* presenting with OpenGL (video_gl.c): the PICA renderer is pica_gl.c's */
 void video_explain(const char *log);   /* video_init failed: why, in a message box; `log` holds the details */
+void video_keep_crashed_log(const char *log);   /* before a process writes `log` (Android): one that the last start left
+                                                   while opening the graphics is kept as <log>-crashed.log (video.c) */
 void video_set_fps(int fps);
 /* the settings overlay's display settings (msr/overlay_host.cpp): also given as --fullscreen, --resolution, --vsync */
 void video_set_fullscreen(int on);
@@ -66,4 +68,10 @@ void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume, in
                        int power_saving);   /* msr/overlay_host.cpp */   /* before video_init: above 60, frames are presented without waiting for the display (mailbox) */
 int  video_frame(void);                                        /* present current screens; 0 when the window closed */
 void video_shutdown(void);
+
+/* main.c: what the main thread (the window, VBlank, presenting) and the GX thread (the PICA renderer) are doing, for the
+   watchdog (a stage held for 5 s is logged, with where the game's threads wait) and the crash report. `what` is a
+   constant string (or NULL: idle); stage_set returns the one before it, which the caller puts back when done. */
+enum { STAGE_MAIN, STAGE_GX, STAGE_COUNT };
+const char *stage_set(int who, const char *what);
 #endif

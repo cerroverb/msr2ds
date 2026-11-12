@@ -28,6 +28,7 @@
 #include <vulkan/vulkan.h>
 #include "vk_push.h"
 #include "vk_rp.h"
+#include "vk_wait.h"
 #include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
@@ -86,6 +87,17 @@ static VkCommandPool cpool; static VkCommandBuffer cb_up, cb_draw; static VkFenc
 static VkCommandBuffer cb_part[MAX_PARTS][2]; static int part;
 static VkDescriptorSetLayout dsl; static VkPipelineLayout playout; static VkShaderModule vs_mod, vsi_mod, fs_mod, fs_nd_mod;
 static int gpu_vs = 1;
+/* Two things Azahar does on phones' drivers (init):
+   static_ds: the depth, stencil and culling state baked into the pipelines (the pipeline key's ds), not set as Vulkan
+   1.3's extended dynamic state, which Azahar leaves off on ARM's and Qualcomm's drivers as broken (vk_instance.cpp).
+   On in the Vulkan 1.1 mode (its render passes need it anyway) and on ARM's driver (#52: Mali-G57, black screen).
+   PWR_VK_STATIC_DS=1 or 0 forces it either way (A/B, e.g. on Adreno).
+   no_interp: a draw whose translated vertex shader (pica_vsgen.c) or its pipeline is not ready yet is shaded on the
+   CPU, not by the vertex-shader interpreter on the GPU (pica_vs.vert: a 65,536-step loop over dynamically indexed
+   register arrays, a shader old Adreno compilers choke on: #53, an Adreno 640 crashing at the first new draws). Azahar
+   has no GPU interpreter at all. On Android; PWR_VK_GPU_INTERP=1 or 0 forces it either way. */
+extern int g_vk_driver_id;   /* video.c */
+static int static_ds, no_interp;
 static VkFormat depth_format;
 static int has_stencil; static VkImageAspectFlags ds_aspect;
 static int depth_blit;   /* the depth format can be blitted: a depth target is written back from a 1x copy (nearest) */   /* D32_SFLOAT_S8_UINT when available: stencil for D24S8 targets */
@@ -203,6 +215,8 @@ static uint64_t hash_mem_(uint32_t addr, uint32_t size) {
 }
 
 /* ---------------- batch / command buffers ---------------- */
+/* a call that can wait, as the GX thread's stage while it runs (gpu.h: the watchdog and the crash report) */
+#define GX_WAIT(what, call) do { const char *was_ = stage_set(STAGE_GX, what); call; stage_set(STAGE_GX, was_); } while (0)
 static int recording;
 static int st_valid;   /* the dynamic state of the open draw command buffer is known (cleared when it begins) */
 static int seal_before_draw;   /* set by tex_get: this draw samples a target drawn in the open segment */
@@ -465,7 +479,7 @@ static void wb_complete(Surf *s) {
     if (!s->wb_pending) return;
     uint64_t t0 = prof_ns();
     BatchSet *b = &sets[s->wb_set];
-    if (b->in_flight) { uint64_t f0 = prof_ns(); vkWaitForFences(dev, 1, &b->fence, VK_TRUE, UINT64_MAX); uint64_t d = prof_ns() - f0; g_prof_fence_ns += d; g_prof_wait_why[wb_why] += d; }
+    if (b->in_flight) { uint64_t f0 = prof_ns(); GX_WAIT("waiting for the GPU to finish an earlier batch (its set reused)", vk_wait_fences(dev, 1, &b->fence)); uint64_t d = prof_ns() - f0; g_prof_fence_ns += d; g_prof_wait_why[wb_why] += d; }
     s->wb_pending = 0;
     surf_writeback(s, s->wb_ptr);
     g_prof_wb_ns += prof_ns() - t0;
@@ -519,7 +533,7 @@ void pica_vk_discard_range(uint32_t start, uint32_t end) {   /* a fill over the 
 
 /* the GPU idle: every set's batch done, its write-backs landed, its images destroyed */
 static void sets_idle(void) {
-    video_queue_lock(); vkQueueWaitIdle(queue); video_queue_unlock();
+    video_queue_lock(); GX_WAIT("waiting for the GPU to go idle", vk_wait_queue(queue)); video_queue_unlock();
     for (int i = 0; i < nsurf; i++) wb_complete(&surfs[i]);
     for (int k = 0; k < NSETS; k++) {
         BatchSet *b = &sets[k];
@@ -536,7 +550,7 @@ static void set_next(void) {
         wb_why = 2;
         for (int i = 0; i < nsurf; i++) if (surfs[i].wb_pending && surfs[i].wb_set == cur_set) wb_complete(&surfs[i]);   /* its ring is used again */
         wb_why = 0;
-        uint64_t f0 = prof_ns(); vkWaitForFences(dev, 1, &b->fence, VK_TRUE, UINT64_MAX); uint64_t d = prof_ns() - f0; g_prof_fence_ns += d; g_prof_wait_why[4] += d;
+        uint64_t f0 = prof_ns(); GX_WAIT("waiting for the GPU to finish a batch (its write-backs)", vk_wait_fences(dev, 1, &b->fence)); uint64_t d = prof_ns() - f0; g_prof_fence_ns += d; g_prof_wait_why[4] += d;
         vkResetFences(dev, 1, &b->fence); b->in_flight = 0;
         uint64_t ts[2 + 2 * PQ_MAX];
         if (b->qp && !vkGetQueryPoolResults(dev, b->qp, 0, 2 + 2u * b->npq, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) && ts[1] > ts[0]) {
@@ -655,7 +669,7 @@ static void alias_writeback(CopyAlias *a, int can_flush) {
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb_mat };
     video_queue_lock(); VkResult r = vkQueueSubmit(queue, 1, &si, mat_fence); video_queue_unlock();
     if (r) return;
-    vkWaitForFences(dev, 1, &mat_fence, VK_TRUE, UINT64_MAX); vkResetFences(dev, 1, &mat_fence);
+    GX_WAIT("waiting for the GPU to finish a copy", vk_wait_fences(dev, 1, &mat_fence)); vkResetFences(dev, 1, &mat_fence);
     /* image row j = memory row H - 1 - j (tex_upload's order); the copy wrote memory rows 0..ch-1, columns 0..cw-1 */
     static const uint8_t mx2[8] = { 0, 1, 4, 5, 16, 17, 20, 21 }, my2[8] = { 0, 2, 8, 10, 32, 34, 40, 42 };
     const uint8_t *src = mat_buf.ptr; uint8_t *base = g_mem + a->addr;
@@ -1086,10 +1100,11 @@ static VkPipeline make_pipeline(const PKey *kp) {
     VkGraphicsPipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2, .pStages = st,
         .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms,
         .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dy, .layout = playout };
-    /* the Vulkan 1.1 mode: the depth, stencil and culling state from the key, for a render pass of these formats */
+    /* the depth, stencil and culling state from the key (static_ds: the Vulkan 1.1 mode, ARM's driver); the 1.1 mode's
+       pipelines are for a render pass of these formats */
     static const VkDynamicState dyn11[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
         VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE };
-    if (g_vk_rp) {
+    if (static_ds) {
         uint32_t d = k.ds;
         rs.cullMode = d & 3; rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         ds.depthTestEnable = d >> 2 & 1; ds.depthWriteEnable = d >> 3 & 1; ds.depthCompareOp = (VkCompareOp)(d >> 4 & 7);
@@ -1097,6 +1112,8 @@ static VkPipeline make_pipeline(const PKey *kp) {
         ds.front = ds.back = (VkStencilOpState){ .failOp = (VkStencilOp)(d >> 11 & 7), .passOp = (VkStencilOp)(d >> 17 & 7),
                                                  .depthFailOp = (VkStencilOp)(d >> 14 & 7), .compareOp = (VkCompareOp)(d >> 8 & 7) };
         dy.dynamicStateCount = sizeof dyn11 / sizeof *dyn11; dy.pDynamicStates = dyn11;
+    }
+    if (g_vk_rp) {
         ci.pNext = NULL;
         ci.renderPass = vk_rp_get(cf, VK_IMAGE_LAYOUT_GENERAL, VK_ATTACHMENT_LOAD_OP_LOAD, k.has_depth ? depth_format : VK_FORMAT_UNDEFINED, has_stencil,
                                   VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
@@ -1148,7 +1165,7 @@ const char *pica_vsgen_build(void);
 /* the vertex shader generator's source: its saved SPIR-V must come from the same generator. Pipeline keys from another
    build of this file are harmless (make_pipeline builds a key with today's code; an outdated one is just never used),
    so a rebuild no longer drops the file (it did until 2026-11-02, and every effect then compiled again in play). */
-static void seed_stamp(char out[64]) { memset(out, 0, 64); snprintf(out, 64, "%s%s", pica_vsgen_build(), g_vk_rp ? " vk11" : ""); }   /* (the 1.1 mode: its own SPIR-V and keys) */
+static void seed_stamp(char out[64]) { memset(out, 0, 64); snprintf(out, 64, "%s%s", pica_vsgen_build(), g_vk_rp ? " vk11" : static_ds ? " ds" : ""); }   /* (the 1.1 mode: its own SPIR-V and keys; static_ds: its own keys) */
 
 typedef struct { uint32_t kind; uint64_t vkey; PKey k; } SeedPipe;
 static void seed_save(const SeedPipe *sp, uint32_t np) {
@@ -1321,7 +1338,7 @@ static VkPipeline pipeline_for(PKey k, int must) {
     if (e && atomic_load_explicit(&e->ready, memory_order_acquire)) return e->p;
     if (e && must) {
         if (!e->sp) {
-            double t0 = now_ms(); e->sp = make_pipeline(&k); bs.pipe_ms += now_ms() - t0; bs.pipes++;
+            double t0 = now_ms(); GX_WAIT("compiling a pipeline it needs at once", e->sp = make_pipeline(&k)); bs.pipe_ms += now_ms() - t0; bs.pipes++;
             if (getenv("PWR_VK_PIPE_TRACE")) fprintf(stderr, "vk: pipeline compiled on the spot for target %08x\n", cur_c ? cur_c->addr : 0);
         }
         return e->sp;
@@ -1335,6 +1352,16 @@ static VkPipeline pipeline_for(PKey k, int must) {
 /* ---------------- init ---------------- */
 static int init(void) {
     if (video_vk(&phys, &dev, &queue, &qfam)) return -1;
+    {   /* the phones' drivers' ways (static_ds, no_interp), before the saved pipelines' keys are read */
+        const char *e = getenv("PWR_VK_STATIC_DS");
+        static_ds = g_vk_rp || (e ? atoi(e) != 0 : g_vk_driver_id == VK_DRIVER_ID_ARM_PROPRIETARY);
+#ifdef __ANDROID__
+        no_interp = 1;
+#endif
+        if ((e = getenv("PWR_VK_GPU_INTERP"))) no_interp = !atoi(e);
+        if (static_ds && !g_vk_rp) fprintf(stderr, "pica_vk: depth and stencil state in the pipelines (not dynamic state)\n");
+        if (no_interp) fprintf(stderr, "pica_vk: vertex shaders not yet translated run on the CPU (no GPU interpreter)\n");
+    }
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(phys, VK_FORMAT_D32_SFLOAT_S8_UINT, &fp);
     if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) { depth_format = VK_FORMAT_D32_SFLOAT_S8_UINT; has_stencil = 1; }
     else {
@@ -1458,7 +1485,7 @@ static void replay(const DrawRec *r, VkPipeline *bound) {
     if (!st_valid || memcmp(&lsc, &r->sc, sizeof lsc)) { vkCmdSetScissor(cb_draw, 0, 1, dbg == 1 ? &one : &r->sc); lsc = r->sc; }
     if (!st_valid || memcmp(lbc, r->bc, sizeof lbc)) { vkCmdSetBlendConstants(cb_draw, r->bc); memcpy(lbc, r->bc, sizeof lbc); }
     static uint8_t lste, lsref, lscm, lswm; static VkCompareOp lsfn; static VkStencilOp lsop[3];
-    if (!g_vk_rp) {   /* (the Vulkan 1.1 mode: in the pipeline) */
+    if (!static_ds) {   /* (static_ds: in the pipeline) */
         if (!st_valid) vkCmdSetFrontFace(cb_draw, VK_FRONT_FACE_COUNTER_CLOCKWISE);
         if (!st_valid || lcull != r->cull) { vkCmdSetCullMode(cb_draw, r->cull); lcull = r->cull; }
         if (!st_valid || ldt != r->dt) { vkCmdSetDepthTestEnable(cb_draw, r->dt); ldt = r->dt; }
@@ -1467,7 +1494,7 @@ static void replay(const DrawRec *r, VkPipeline *bound) {
         if (!st_valid || lste != r->ste) { vkCmdSetStencilTestEnable(cb_draw, r->ste); lste = r->ste; }
     }
     if (r->ste || !st_valid) {
-        if (!g_vk_rp && (!st_valid || lsfn != r->sfn || memcmp(lsop, r->sop, sizeof lsop))) {
+        if (!static_ds && (!st_valid || lsfn != r->sfn || memcmp(lsop, r->sop, sizeof lsop))) {
             vkCmdSetStencilOp(cb_draw, VK_STENCIL_FACE_FRONT_AND_BACK, r->sop[0], r->sop[2], r->sop[1], r->sfn); lsfn = r->sfn; memcpy(lsop, r->sop, sizeof lsop); }
         if (!st_valid || lsref != r->sref) { vkCmdSetStencilReference(cb_draw, VK_STENCIL_FACE_FRONT_AND_BACK, r->sref); lsref = r->sref; }
         if (!st_valid || lscm != r->scmask) { vkCmdSetStencilCompareMask(cb_draw, VK_STENCIL_FACE_FRONT_AND_BACK, r->scmask); lscm = r->scmask; }
@@ -1582,12 +1609,25 @@ static void end_uploads(void) {
    buffers, so the GPU works while the CPU prepares the rest of the command list (a frame's list took ~12 ms of CPU
    and ~8 ms of GPU one after the other, more than a 60 Hz frame). Ring space is not reused within a batch, and the
    next part starts with a full barrier, so it runs after this one (uploads included). The batch's fence and
-   write-backs stay at its end (pica_vk_flush). PWR_VK_KICK=<draws> per part (default 200, 0 = one part per batch). */
-static uint32_t kick_draws;
+   write-backs stay at its end (pica_vk_flush). PWR_VK_KICK=<draws> per part (default 200, 0 = one part per batch).
+   The part goes at a pass boundary: once `every` draws are recorded (kick_due), at the next point where the open
+   segment is sealed anyway (a draw sampling a target drawn in it, two colour targets sharing a depth buffer:
+   kick_at_boundary, pica_vk_draw_); only after 4x `every` without one, where it is. Sealed in the middle of a target's
+   draws, its pass ended there and the next part's draws began another: on a phone's tiled GPU the whole target (colour
+   and depth) stored and loaded once more (#37; 2 more passes a frame in gameplay, 13 for 11). Not where the draws move
+   to another colour target either: a segment interleaves the scene's two targets, each one pass when sealed. Azahar
+   submits after a pass ends (vk_render_manager.cpp). */
+static uint32_t kick_draws; static int kick_due;
+static void kick_submit(void);
 static void kick(void) {
     static int every = -1; if (every < 0) { const char *e = getenv("PWR_VK_KICK"); every = e ? atoi(e) : 200; }
     if (!every || !recording || ++kick_draws < (uint32_t)every || part + 1 >= MAX_PARTS) return;
-    kick_draws = 0;
+    if (kick_draws < 4u * (uint32_t)every) { kick_due = 1; return; }
+    kick_submit();
+}
+static void kick_at_boundary(void) { if (kick_due && recording && part + 1 < MAX_PARTS) kick_submit(); }
+static void kick_submit(void) {
+    kick_draws = 0; kick_due = 0;
     seal();
     end_uploads();
     vkEndCommandBuffer(cb_up); vkEndCommandBuffer(cb_draw);
@@ -1607,7 +1647,7 @@ static void pica_vk_flush_(void);
 void pica_vk_flush(void) { GL_FWD_VOID(pica_gl_flush()); uint64_t t0 = prof_ns(); pica_vk_flush_(); g_prof_flush_ns += prof_ns() - t0; }
 static void pica_vk_flush_(void) {
     if (!recording) return;
-    kick_draws = 0;
+    kick_draws = 0; kick_due = 0;
     seal();
     barrier_all(cb_draw, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
     int depth_wb = 0;
@@ -1747,7 +1787,7 @@ static struct { uint32_t addr, end, w, h; int valid; Img im; } scans[MAX_SCAN];
 static pthread_mutex_t scan_lock = PTHREAD_MUTEX_INITIALIZER;
 static void scanouts_drop(void) {   /* rescale; video.c may have submitted a use of these after the queue went idle: wait again under the lock */
     pthread_mutex_lock(&scan_lock);
-    video_queue_lock(); vkQueueWaitIdle(queue); video_queue_unlock();
+    video_queue_lock(); GX_WAIT("waiting for the GPU to go idle", vk_wait_queue(queue)); video_queue_unlock();
     for (int i = 0; i < MAX_SCAN; i++) { if (scans[i].im.img) { vkDestroyImageView(dev, scans[i].im.view, NULL); vkDestroyImage(dev, scans[i].im.img, NULL); vkFreeMemory(dev, scans[i].im.mem, NULL); } memset(&scans[i], 0, sizeof scans[i]); }
     pthread_mutex_unlock(&scan_lock);
 }
@@ -1806,7 +1846,7 @@ int pica_vk_display_transfer(uint32_t in, uint32_t out, uint32_t in_dim, uint32_
     }
     int sc = scan_next; scan_next = (scan_next + 1) % NSCAN_CB;
     VkCommandBuffer cb_scan = cb_scans[sc]; VkFence scan_fence = scan_fences[sc];   /* (its last use: two frames ago) */
-    if (scan_used[sc]) { vkWaitForFences(dev, 1, &scan_fence, VK_TRUE, UINT64_MAX); rb_harvest(sc); vkResetFences(dev, 1, &scan_fence); scan_used[sc] = 0; }
+    if (scan_used[sc]) { GX_WAIT("waiting for the GPU to finish a screen read-back", vk_wait_fences(dev, 1, &scan_fence)); rb_harvest(sc); vkResetFences(dev, 1, &scan_fence); scan_used[sc] = 0; }
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
     vkResetCommandBuffer(cb_scan, 0); vkBeginCommandBuffer(cb_scan, &bi);
     VkImageMemoryBarrier b = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -2028,10 +2068,10 @@ static void draw_pkey(PKey *k, VkShaderModule vsm, int gpu) {
         static const int tb[6] = { 0x0C0, 0x0C8, 0x0D0, 0x0D8, 0x0F0, 0x0F8 };
         k->sc[0] = 1;
         for (int i = 0; i < 6; i++) { k->sc[1 + i] = R(tb[i]) & 0x0FFF0FFF; k->sc[7 + i] = R(tb[i] + 1) & 0x777FFF; k->sc[13 + i] = R(tb[i] + 2) & 0x000F000F; k->sc[19 + i] = R(tb[i] + 4) & 0x00030003; }
-        k->sc[25] = R(0x0E0) & 0x1FF07; k->sc[26] = R(0x104) & 0x71;   /* alpha test enable + function: the animated reference stays a uniform */ k->sc[27] = R(0x080) & 0x2007;
+        k->sc[25] = R(0x0E0) & 0x1FF07; k->sc[26] = R(0x104) & 0x71;   /* alpha test enable + function: the animated reference stays a uniform */ k->sc[27] = pica_sc_texen();
         k->sc[28] = (R(0x08F) & 1) && !(R(0x1C6) & 1); k->sc[29] = R(0x06D) & 1;
     }
-    if (g_vk_rp) { DsState s; draw_ds(&s); k->ds = ds_pack(&s); }   /* the Vulkan 1.1 mode: in the pipeline */
+    if (static_ds) { DsState s; draw_ds(&s); k->ds = ds_pack(&s); }   /* static_ds: in the pipeline */
 }
 /* the pipeline for k (or its generic one) can be used now; queued for the worker if new */
 static int pipe_usable(const PKey *k) {
@@ -2041,6 +2081,18 @@ static int pipe_usable(const PKey *k) {
     PKey g = *k; memset(g.sc, 0, sizeof g.sc);
     Pipe *f = pipe_get(&g, 0, 1);
     return f && atomic_load_explicit(&f->ready, memory_order_acquire);
+}
+/* no_interp: this draw can have its vertices shaded on the GPU now (its translated shader and a pipeline for it are
+   ready; both go on being built in the background), else pica_sw.c shades them on the CPU */
+int pica_vk_vs_ready(void) {
+    GL_FWD(1);
+    if (!no_interp) return 1;
+    if (ensure_pass()) return 1;   /* (no target: the draw goes nowhere either way) */
+    VkShaderModule g = pica_vsgen_module(dev);
+    if (!g) return 0;
+    static int sync_pipes = -1; if (sync_pipes < 0) sync_pipes = getenv("PWR_VK_SYNC_PIPES") != NULL;
+    PKey t; draw_pkey(&t, g, 1);
+    return sync_pipes || pipe_usable(&t);
 }
 static void pica_vk_draw_(const Vtx *vcache, const uint32_t *vlist_index, const uint32_t *vlist_slot, uint32_t nvlist,
                   const uint32_t *slots, uint32_t n, int topo);
@@ -2230,9 +2282,9 @@ static void pica_vk_draw_(const Vtx *vcache, const uint32_t *vlist_index, const 
         if (fr != cur_c->frame_last) { cur_c->frames = fr == cur_c->frame_last + 1 ? cur_c->frames + 1 : 1; cur_c->frame_last = fr; }
         VkPipeline p = pipeline_for(k, cur_c->frames < 8 && cur_c->w * cur_c->h < 240 * 320);
         if (!p) return;
-        if (seal_before_draw) { seal(); seal_before_draw = 0; }
+        if (seal_before_draw) { seal(); seal_before_draw = 0; kick_at_boundary(); }
         if (cur_d) {   /* two colour targets sharing a depth buffer in one segment: keep their interleaving */
-            if (cur_d->seg_id == seg && cur_d->seg_color != cur_c) seal();
+            if (cur_d->seg_id == seg && cur_d->seg_color != cur_c) { seal(); kick_at_boundary(); }
             cur_d->seg_id = seg; cur_d->seg_color = cur_c;
         }
         if (nrec == caprec) { caprec = caprec ? caprec * 2 : 4096; recs = realloc(recs, (size_t)caprec * sizeof *recs); }

@@ -34,6 +34,32 @@ endif()
 
 find_package(Threads REQUIRED)
 find_package(Vulkan REQUIRED)
+# Windows (MinGW): vulkan-1.dll delay-loaded, loaded at the first Vulkan call instead of when the program starts. A PC
+# whose graphics have no Vulkan driver often has no vulkan-1.dll at all (Intel HD 4600, #57), and Windows then refused to
+# start the program ("vulkan-1.dll was not found") before it could present with OpenGL. Without the DLL, SDL makes no
+# Vulkan window and vk_open returns before any Vulkan call (video.c). The delay-load import library is made from the
+# Vulkan import library's functions (dlltool; __delayLoadHelper2 is MinGW's libdelayimp). Elsewhere, linked as usual.
+set(MSR_VULKAN_LIB Vulkan::Vulkan)
+if (WIN32 AND MINGW)
+    execute_process(COMMAND ${CMAKE_NM} -g ${Vulkan_LIBRARY} OUTPUT_VARIABLE MSR_VK_NM RESULT_VARIABLE MSR_VK_R)
+    string(REGEX MATCHALL "[ \t]T[ \t]vk[A-Za-z0-9_]+" MSR_VK_SYMS "${MSR_VK_NM}")
+    if (MSR_VK_R OR NOT MSR_VK_SYMS)
+        message(FATAL_ERROR "msr-native: no Vulkan functions listed in ${Vulkan_LIBRARY} (${CMAKE_NM})")
+    endif()
+    list(TRANSFORM MSR_VK_SYMS REPLACE "^[ \t]T[ \t]" "")
+    list(REMOVE_DUPLICATES MSR_VK_SYMS)
+    list(JOIN MSR_VK_SYMS "\n" MSR_VK_DEF)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/vulkan-1.def "LIBRARY vulkan-1.dll\nEXPORTS\n${MSR_VK_DEF}\n")
+    execute_process(COMMAND ${CMAKE_DLLTOOL} --input-def vulkan-1.def --dllname vulkan-1.dll --output-delaylib libvulkan-1-delay.a
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR} RESULT_VARIABLE MSR_VK_R)
+    if (MSR_VK_R)
+        message(FATAL_ERROR "msr-native: ${CMAKE_DLLTOOL} could not make vulkan-1.dll's delay-load library")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${Vulkan_LIBRARY})
+    add_library(msr_vulkan_delay INTERFACE)
+    target_link_libraries(msr_vulkan_delay INTERFACE Vulkan::Headers ${CMAKE_CURRENT_BINARY_DIR}/libvulkan-1-delay.a delayimp)
+    set(MSR_VULKAN_LIB msr_vulkan_delay)
+endif()
 # SDL2 built from a source folder (static: nothing to ship), e.g. for an AppImage on a system without SDL2's headers
 set(MSR_SDL2_SOURCE "" CACHE PATH "Build SDL2 statically from this source folder instead of using the system's")
 if (ANDROID AND NOT MSR_SDL2_SOURCE)
@@ -176,7 +202,7 @@ add_library(msr_native_imgui STATIC ${MSR_IMGUI_DIR}/imgui.cpp ${MSR_IMGUI_DIR}/
             ${MSR_IMGUI_DIR}/imgui_widgets.cpp ${MSR_IMGUI_DIR}/backends/imgui_impl_vulkan.cpp)
 target_include_directories(msr_native_imgui SYSTEM PUBLIC ${MSR_IMGUI_DIR})
 target_compile_definitions(msr_native_imgui PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES)
-target_link_libraries(msr_native_imgui PUBLIC Vulkan::Vulkan)
+target_link_libraries(msr_native_imgui PUBLIC ${MSR_VULKAN_LIB})
 if (MSR_OPENGL)   # its loader opens the system's OpenGL library itself
     target_sources(msr_native_imgui PRIVATE ${MSR_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
     target_link_libraries(msr_native_imgui PUBLIC ${CMAKE_DL_LIBS})
@@ -184,7 +210,7 @@ if (MSR_OPENGL)   # its loader opens the system's OpenGL library itself
 endif()
 target_link_libraries(msr-native PRIVATE msr_native_imgui)
 target_compile_options(msr-native PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wno-unused-result>)
-target_link_libraries(msr-native PRIVATE Threads::Threads Vulkan::Vulkan SDL2::SDL2 m ${CMAKE_DL_LIBS})
+target_link_libraries(msr-native PRIVATE Threads::Threads ${MSR_VULKAN_LIB} SDL2::SDL2 m ${CMAKE_DL_LIBS})
 # zstd's decoder, for compressed game files (.zcci, .zcxi: runtime/dump.c): built statically from a zstd source folder
 # (MSR_ZSTD_SOURCE: the emulator-based build's externals/zstd; the Linux release, whose build system has no zstd
 # headers), else the system's libzstd (MSYS2: mingw-w64-ucrt-x86_64-zstd; Linux: libzstd-dev)

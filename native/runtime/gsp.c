@@ -555,7 +555,9 @@ static void *gx_worker(void *arg) {
         if (gxl_trig) { gxl_ts += gxs_t0 - gxl_trig; gxl_tsn++; gxl_trig = 0; }
         uint8_t *snap = (w[0] & 0xff) == 0x01 ? take_snapshot(qs[0], qs[1], w[1], w[2]) : NULL;
         pthread_mutex_unlock(&G);
+        stage_set(STAGE_GX, (w[0] & 0xff) == 0x01 ? "running a PICA command list" : "running a GX command (copy, fill, transfer)");
         int irqs[2]; gx_exec(w, snap, irqs);
+        stage_set(STAGE_GX, NULL);
         pthread_mutex_lock(&G);
         gx_busy = 0; pthread_cond_broadcast(&gx_idle);
         gx_done(w, gxs_t0, irqs);

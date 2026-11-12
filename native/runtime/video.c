@@ -32,9 +32,11 @@
 #include "msr/overlay_host.h"
 #include "vk_push.h"
 #include "vk_rp.h"
+#include "vk_wait.h"
 #ifdef MSR_OPENGL
 #include "video_gl.h"
 #endif
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,6 +70,7 @@ static int hdr_option;               /* 0 no HDR here, 1 the display is not in H
 static float disp_peak = 1000.f, disp_paper = 200.f;   /* nits: the display's peak, Windows' SDR content white */
 static int has_colorspace_ext, has_hdr_metadata;
 int g_vk_attachment_none;   /* pica_vk.c: VK_ATTACHMENT_LOAD_OP_NONE and STORE_OP_NONE can be used (VK_KHR/EXT_load_store_op_none) */
+int g_vk_driver_id;         /* pica_vk.c: the device's VkDriverId (0: not known) */
 static VkImageView sc_views[MAX_IMAGES];
 static VkDeviceMemory stage_mem;
 static VkBuffer stage;
@@ -84,6 +87,9 @@ static int vk13;     /* the device has Vulkan 1.3's dynamic rendering */
 static int vk_hw;    /* the hardware PICA renderer and the GPU presenter can run: with Vulkan 1.3, or in the 1.1 mode (vk_rp.h) */
 static int use_gl;   /* presenting with OpenGL (video_gl.c), not Vulkan */
 unsigned g_vid_acquire_fail, g_vid_present_fail, g_vid_presented; int g_vid_last_err;
+/* the main thread's waits in presenting (main.c's 2 s line): the last frame's fence, the next image, the present */
+double g_vid_wait_fence, g_vid_wait_acquire, g_vid_wait_present;
+static double wait_clock(void) { return (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency(); }
 
 /* why video_init failed, for the message the player sees (video_explain): Vulkan's reason, OpenGL's */
 static char init_error[256], gl_error[256];
@@ -389,10 +395,25 @@ static int gpu_init(void) {
 static int target_fps = 60;
 static int recreate_swapchain(void);
 static void match_resolution(int drawable_w, int drawable_h);
-/* above 60 FPS the main loop paces VBlank itself: present without waiting for the display (mailbox, else FIFO); without
-   V-Sync, mailbox or else immediate (tearing) */
+/* the refresh rate of the display the window is on (whole hertz, as SDL has it; 0: not known). main.c's next_tick
+   checks DWM's against it */
+double video_display_hz(void) {
+    if (!win) return 0;
+    SDL_DisplayMode m; const int i = SDL_GetWindowDisplayIndex(win);
+    if (i < 0 || SDL_GetCurrentDisplayMode(i, &m) || m.refresh_rate <= 0) return 0;
+    return m.refresh_rate;
+}
+/* With V-Sync, FIFO unless the frame rate is above the display's (by more than a hertz: 144 FPS on a 143.86 Hz display
+   is FIFO), the rule of the emulator-based 1.x (msr/frame_rate.h OutpacesDisplay). Mailbox for any rate above 60 (as
+   before) replaced a frame that reached the display a little late (the main loop presents 2 ms before its vblank) with
+   the next one: the one before shown twice and that one skipped, a jump when running back and forth (#59, 120 FPS on a
+   120 Hz display). FIFO shows it a vblank late instead, and holds the loop to the display where the two clocks drift.
+   Faster than the display: mailbox (frames replaced, the game never waits for it), else FIFO. Without V-Sync: mailbox,
+   else immediate (tearing). */
+static VkPresentModeKHR sc_present_mode;   /* the swapchain's (create_swapchain) */
 static VkPresentModeKHR present_mode(void) {
-    if (target_fps <= 60 && opt_vsync) return VK_PRESENT_MODE_FIFO_KHR;
+    const double hz = video_display_hz();
+    if (opt_vsync && (target_fps <= 60 || (hz > 0 && target_fps <= hz + 1))) return VK_PRESENT_MODE_FIFO_KHR;
     VkPresentModeKHR modes[16]; uint32_t n = 16;
     if (vkGetPhysicalDeviceSurfacePresentModesKHR(phys, surf, &n, modes) != VK_SUCCESS && n == 0) return VK_PRESENT_MODE_FIFO_KHR;
     for (uint32_t i = 0; i < n; i++) if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) return VK_PRESENT_MODE_MAILBOX_KHR;
@@ -408,11 +429,14 @@ void video_set_fps(int fps) {
     if (swap && before != (int)present_mode()) recreate_swapchain();
 }
 
-/* the surface's formats: SDR (B8G8R8A8_UNORM, sRGB colour space, else the first), and the HDR ones (0 when absent) */
+/* the surface's formats: SDR (B8G8R8A8_UNORM in the sRGB colour space, else R8G8B8A8_UNORM, else the first: Azahar
+   takes only those two, a phone may list another first), and the HDR ones (0 when absent) */
 static void surface_formats(VkFormat *sdr, VkColorSpaceKHR *sdr_cs, VkFormat *hdr10, VkFormat *scrgb) {
     uint32_t nf = 0; vkGetPhysicalDeviceSurfaceFormatsKHR(phys, surf, &nf, NULL);
     VkSurfaceFormatKHR fmts[64]; if (nf > 64) nf = 64; vkGetPhysicalDeviceSurfaceFormatsKHR(phys, surf, &nf, fmts);
     *sdr = fmts[0].format; *sdr_cs = fmts[0].colorSpace; *hdr10 = *scrgb = VK_FORMAT_UNDEFINED;
+    for (uint32_t i = 0; i < nf; i++)
+        if (fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { *sdr = fmts[i].format; *sdr_cs = fmts[i].colorSpace; }
     for (uint32_t i = 0; i < nf; i++) {
         if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { *sdr = fmts[i].format; *sdr_cs = fmts[i].colorSpace; }
         if (fmts[i].colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT && (fmts[i].format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || fmts[i].format == VK_FORMAT_A2R10G10B10_UNORM_PACK32)) *hdr10 = fmts[i].format;
@@ -476,6 +500,7 @@ static int create_swapchain(void) {
         .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         .preTransform = transform, .compositeAlpha = alpha,
         .presentMode = present_mode(), .clipped = VK_TRUE, .oldSwapchain = swap };
+    sc_present_mode = ci.presentMode;
     VkSwapchainKHR old = swap;
     VkResult sr = vkCreateSwapchainKHR(dev, &ci, NULL, &swap);
     if (sr == VK_ERROR_NATIVE_WINDOW_IN_USE_KHR && !old) {
@@ -499,6 +524,11 @@ static int create_swapchain(void) {
     }
     if (old) vkDestroySwapchainKHR(dev, old, NULL);
     sc_count = MAX_IMAGES; VK(vkGetSwapchainImagesKHR(dev, swap, &sc_count, sc_images));
+    {   /* what the presentation waits on (main.c's "presenting waits" line) */
+        static const char *pm[4] = { "immediate", "mailbox", "FIFO", "FIFO relaxed" };
+        fprintf(stderr, "video: swapchain %ux%u, %u images (at least %u), %s\n", sc_extent.width, sc_extent.height, sc_count, caps.minImageCount,
+                (unsigned)ci.presentMode < 4 ? pm[ci.presentMode] : "other");
+    }
     sc_bgra = sc_format == VK_FORMAT_B8G8R8A8_UNORM || sc_format == VK_FORMAT_B8G8R8A8_SRGB;
     for (int i = 0; i < MAX_IMAGES; i++) if (sc_views[i]) { if (g_vk_rp) vk_rp_forget(sc_views[i]); vkDestroyImageView(dev, sc_views[i], NULL); sc_views[i] = VK_NULL_HANDLE; }
     if (gpu_ok) {   /* the window-sized image the presenter draws into */
@@ -545,14 +575,14 @@ static int create_swapchain(void) {
 }
 
 static int recreate_swapchain(void) {
-    pthread_mutex_lock(&queue_lock); vkDeviceWaitIdle(dev); pthread_mutex_unlock(&queue_lock);
+    pthread_mutex_lock(&queue_lock); vk_wait_device(dev); pthread_mutex_unlock(&queue_lock);
     return create_swapchain();
 }
 /* the window's surface again, and its swapchain: Android destroys the window's surface while the app is in the
    background (VK_ERROR_SURFACE_LOST_KHR, or the foreground again: SDL_APP_DIDENTERFOREGROUND) */
 static int surface_reset;
 static int recreate_surface(void) {
-    pthread_mutex_lock(&queue_lock); vkDeviceWaitIdle(dev); pthread_mutex_unlock(&queue_lock);
+    pthread_mutex_lock(&queue_lock); vk_wait_device(dev); pthread_mutex_unlock(&queue_lock);
     if (swap) { vkDestroySwapchainKHR(dev, swap, NULL); swap = VK_NULL_HANDLE; }
     vkDestroySurfaceKHR(inst, surf, NULL); surf = VK_NULL_HANDLE;
     if (!SDL_Vulkan_CreateSurface(win, inst, &surf)) { fprintf(stderr, "video: surface: %s\n", SDL_GetError()); return -1; }
@@ -605,9 +635,70 @@ void video_explain(const char *log) {
    PWR_NO_VULKAN=1 acts as if there were no Vulkan, =13 as if its device had neither 1.3 nor 1.1 (the presenter on the CPU;
    the Vulkan loader ignores its own VK_DRIVER_FILES in an elevated process, so this tests the fallback there too);
    PWR_VK11=1 takes the Vulkan 1.1 mode (vk_rp.h) on any device. */
+/* Android, safe levels: a start that ended while opening the graphics (a crash in the driver, or the system's kill) left
+   user/msr/graphics-opening.txt behind (written at safe_begin, removed at the first frame shown or a failure that the
+   program reports itself), and the next start opens them more simply, one level further each time: 1 without optional
+   extensions (attachments neither loaded nor stored, push descriptors, HDR metadata and colour spaces), 2 also in the Vulkan 1.1
+   mode (vk_rp.h). The level stays in user/msr/graphics-safe.txt with the version that set it: another version (which
+   may have the cause fixed) or deleting the file opens them in full again. The log of the
+   start that ended so is kept as <log>-crashed.log (video_keep_crashed_log), since the next start writes its own over it.
+   #58: an Adreno 830 (Odin 3) whose launcher ended inside vk_open every time, the same chip as a phone that works. */
+static int safe_level;
+#ifdef __ANDROID__
+#define GFX_OPENING "user/msr/graphics-opening.txt"
+#define GFX_SAFE "user/msr/graphics-safe.txt"
+static char own_log[512];   /* this process's log (video_keep_crashed_log), named in the marker */
+static int safe_open;       /* the marker is there */
+void video_keep_crashed_log(const char *log) {
+    snprintf(own_log, sizeof own_log, "%s", log);
+    FILE *f = fopen(GFX_OPENING, "r"); if (!f) return;
+    int level = 0; char ver[32] = "", name[512] = "";   /* the marker: "<level> <version>", then the log's name */
+    if (fscanf(f, "%d %31s", &level, ver) < 1) level = 0;
+    if (fscanf(f, " %511[^\r\n]", name) != 1) name[0] = 0;
+    fclose(f);
+    if (!name[0]) return;
+    char to[600]; const size_t n = strlen(name);
+    snprintf(to, sizeof to, "%.*s-crashed.log", (int)(n > 4 && !strcmp(name + n - 4, ".log") ? n - 4 : n), name);
+    remove(to); rename(name, to);
+    if ((f = fopen(GFX_OPENING, "w"))) { fprintf(f, "%d %s\n", level, ver); fclose(f); }   /* (kept once) */
+}
+static void safe_begin(void) {
+    int tried = -1, level = 0; char ver[32] = "";
+    FILE *f = fopen(GFX_OPENING, "r");
+    if (f) {
+        if (fscanf(f, "%d %31s", &tried, ver) < 1) tried = 0;
+        fclose(f);
+        if (strcmp(ver, MSR_NATIVE_VERSION)) tried = -1;   /* another version's start (an update since): not this one's */
+    }
+    ver[0] = 0;
+    if ((f = fopen(GFX_SAFE, "r"))) { if (fscanf(f, "%d %31s", &level, ver) < 1) level = 0; fclose(f); }
+    if (strcmp(ver, MSR_NATIVE_VERSION)) level = 0;   /* set by another version */
+    if (tried >= 0) {
+        const int next = tried + 1 > 2 ? 2 : tried + 1;
+        if (next > level) level = next;
+        if ((f = fopen(GFX_SAFE, "w"))) { fprintf(f, "%d %s\n", level, MSR_NATIVE_VERSION); fclose(f); }
+        fprintf(stderr, "video: the start before this one ended while opening the graphics (at safe level %d; its log may be in a "
+                "-crashed.log file beside this one): opening them at safe level %d\n", tried, level);
+    }
+    if (level < 0) level = 0;
+    if (level > 2) level = 2;
+    if (level) fprintf(stderr, "video: safe level %d: %s (delete user/msr/graphics-safe.txt to open them in full again)\n", level,
+                       level >= 2 ? "the Vulkan 1.1 mode, without optional device extensions" : "without optional device extensions");
+    safe_level = level;
+    if ((f = fopen(GFX_OPENING, "w"))) { fprintf(f, "%d %s\n%s\n", level, MSR_NATIVE_VERSION, own_log); fclose(f); safe_open = 1; }
+}
+static void safe_end(void) { if (safe_open) { remove(GFX_OPENING); safe_open = 0; } }
+#else
+void video_keep_crashed_log(const char *log) { (void)log; }
+static void safe_begin(void) {}
+static void safe_end(void) {}
+#endif
+
 static int vk_open(int win_w, int win_h, int probe) {
     const char *no_vk = getenv("PWR_NO_VULKAN");
     if (no_vk && !strcmp(no_vk, "1")) { snprintf(init_error, sizeof init_error, "PWR_NO_VULKAN=1"); return -1; }
+    safe_begin();
+    stage_set(STAGE_MAIN, "opening the window");
 #ifdef __ANDROID__
     const Uint32 win_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN;   /* the whole screen, without the system bars */
 #elif defined(__APPLE__)
@@ -636,6 +727,7 @@ static int vk_open(int win_w, int win_h, int probe) {
         for (uint32_t i = 0; i < n; i++) if (!strcmp(ep[i].extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) has_portability_enum = 1;
 #endif
         free(ep);
+        if (safe_level >= 1) has_colorspace_ext = 0;   /* safe levels: no HDR colour spaces (as Azahar never asks for them) */
         if (has_colorspace_ext) exts[ne++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
         if (has_portability_enum) exts[ne++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
     }
@@ -648,8 +740,9 @@ static int vk_open(int win_w, int win_h, int probe) {
         if (!eiv || eiv(&inst_version) != VK_SUCCESS) inst_version = VK_API_VERSION_1_0;
     }
     /* PWR_VK11=1: the Vulkan 1.1 mode on any device (vk_rp.h), the instance asking for 1.1 only, so that the validation
-       layer holds the program to 1.1 (a check of the mode on a PC) */
-    const int force11 = getenv("PWR_VK11") && atoi(getenv("PWR_VK11")) == 1;
+       layer holds the program to 1.1 (a check of the mode on a PC); also safe level 2 (safe_begin) */
+    const int force11 = (getenv("PWR_VK11") && atoi(getenv("PWR_VK11")) == 1) || safe_level >= 2;
+    stage_set(STAGE_MAIN, "creating the Vulkan instance");
     VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "msr-native",
                              .apiVersion = inst_version < VK_API_VERSION_1_1 ? VK_API_VERSION_1_0 : force11 ? VK_API_VERSION_1_1 : VK_API_VERSION_1_3 };
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = ne, .ppEnabledExtensionNames = exts,
@@ -660,12 +753,40 @@ static int vk_open(int win_w, int win_h, int probe) {
         snprintf(init_error, sizeof init_error, "surface: %s", SDL_GetError());
         return -1;
     }
+    /* the device, of those that can show the window: a discrete GPU before integrated graphics, then the others, in the
+       order listed among equals. A laptop's NVIDIA or AMD GPU over its Intel graphics: on Linux, Mesa's device-select
+       layer lists the GPU driving the display first, and the first was taken (#56: an Iris Xe over an RTX 3070 Ti, even
+       with prime-run); Windows lists them by its power preference. PWR_VK_DEVICE=<n> (its place in the list, from 0) or
+       =<part of its name, any case> takes that one where it can show the window. */
+    stage_set(STAGE_MAIN, "choosing the Vulkan device");
     uint32_t np = 8; VkPhysicalDevice pds[8]; VK(vkEnumeratePhysicalDevices(inst, &np, pds));
-    for (uint32_t i = 0; i < np && !phys; i++) {
-        uint32_t nq = 16; VkQueueFamilyProperties qp[16]; vkGetPhysicalDeviceQueueFamilyProperties(pds[i], &nq, qp);
-        for (uint32_t q = 0; q < nq; q++) {
-            VkBool32 pres = 0; vkGetPhysicalDeviceSurfaceSupportKHR(pds[i], q, surf, &pres);
-            if ((qp[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) && pres) { phys = pds[i]; qfam = q; break; }
+    {
+        const char *want = getenv("PWR_VK_DEVICE"); int best = -1;
+        for (uint32_t i = 0; i < np; i++) {
+            VkPhysicalDeviceProperties dp; vkGetPhysicalDeviceProperties(pds[i], &dp);
+            uint32_t nq = 16; VkQueueFamilyProperties qp[16]; vkGetPhysicalDeviceQueueFamilyProperties(pds[i], &nq, qp);
+            int fam = -1;
+            for (uint32_t q = 0; q < nq && fam < 0; q++) {
+                VkBool32 pres = 0; vkGetPhysicalDeviceSurfaceSupportKHR(pds[i], q, surf, &pres);
+                if ((qp[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) && pres) fam = (int)q;
+            }
+            const VkPhysicalDeviceType t = dp.deviceType;
+            int score = fam < 0 ? -1 : t == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 4 : t == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 3
+                      : t == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU ? 2 : t == VK_PHYSICAL_DEVICE_TYPE_CPU ? 0 : 1;
+            if (want && *want && fam >= 0) {
+                char *end; const long n = strtol(want, &end, 10);
+                int match = !*end && n == (long)i;
+                for (const char *s = dp.deviceName; *end && *s && !match; s++) {   /* the name, without regard to case */
+                    size_t k = 0; while (want[k] && s[k] && tolower((unsigned char)s[k]) == tolower((unsigned char)want[k])) k++;
+                    match = !want[k];
+                }
+                if (match) score = 10;
+            }
+            if (np > 1)
+                fprintf(stderr, "video: Vulkan device %u of %u: %s (%s)%s\n", i, np, dp.deviceName, t == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "discrete"
+                        : t == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated" : t == VK_PHYSICAL_DEVICE_TYPE_CPU ? "software" : "other",
+                        fam < 0 ? ", cannot show the window" : "");
+            if (score > best) { best = score; phys = pds[i]; qfam = (uint32_t)fam; }
         }
     }
     if (!phys) {
@@ -687,6 +808,17 @@ static int vk_open(int win_w, int win_h, int probe) {
         else snprintf(driver, sizeof driver, "%u.%u.%u", v >> 22, (v >> 12) & 0x3ff, v & 0xfff);
         fprintf(stderr, "video: Vulkan device %s (%s, %.1f GB of graphics memory, driver %s)\n", pp.deviceName, kind, local / 1073741824.0, driver);
     }
+    /* whose driver (pica_vk.c: ARM's gets the depth and stencil state in its pipelines). Vulkan 1.2's driver ID where the
+       device has it, else the vendor: ARM's and Qualcomm's own drivers on the phones of before 1.2 (Mesa's report 1.2+) */
+    g_vk_driver_id = 0;
+    if (pp.apiVersion >= VK_API_VERSION_1_2 && inst_version >= VK_API_VERSION_1_1) {
+        PFN_vkGetPhysicalDeviceProperties2 props2 = (PFN_vkGetPhysicalDeviceProperties2)vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceProperties2");
+        VkPhysicalDeviceDriverProperties drv = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+        VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv };
+        if (props2) { props2(phys, &p2); g_vk_driver_id = (int)drv.driverID; }
+    }
+    if (!g_vk_driver_id && pp.vendorID == 0x13B5) g_vk_driver_id = VK_DRIVER_ID_ARM_PROPRIETARY;
+    if (!g_vk_driver_id && pp.vendorID == 0x5143) g_vk_driver_id = VK_DRIVER_ID_QUALCOMM_PROPRIETARY;
     float prio = 1;
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = qfam, .queueCount = 1, .pQueuePriorities = &prio };
     /* the hardware PICA renderer (pica_vk.c) and the GPU presenter need Vulkan 1.3 dynamic rendering + extended dynamic state and push descriptors */
@@ -705,6 +837,7 @@ static int vk_open(int win_w, int win_h, int probe) {
     }
     const char *op_none = has_khr_none ? "VK_KHR_load_store_op_none" : has_ext_none ? "VK_EXT_load_store_op_none" : NULL;
     free(dep);
+    if (safe_level >= 1) { has_push = 0; op_none = NULL; has_hdr_metadata = 0; }   /* safe levels: no optional device extensions (safe_begin) */
     PFN_vkGetPhysicalDeviceFeatures2 features2 = inst_version >= VK_API_VERSION_1_1
         ? (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceFeatures2") : NULL;
     if (pp.apiVersion >= VK_API_VERSION_1_3 && features2 && !force11) features2(phys, &f2);
@@ -726,6 +859,14 @@ static int vk_open(int win_w, int win_h, int probe) {
     en2.features.samplerAnisotropy = f2.features.samplerAnisotropy;   /* pica_vk.c: anisotropic filtering option */
     VkPhysicalDeviceFeatures f10 = { 0 }, en10 = { 0 };   /* the 1.1 mode's (Vulkan 1.0's query) */
     if (g_vk_rp) { vkGetPhysicalDeviceFeatures(phys, &f10); en10.samplerAnisotropy = f10.samplerAnisotropy; }
+    /* Robust buffer access, as Azahar enables it: a read past a bound buffer range gives zeros, not a GPU fault. The
+       GPU vertex shaders read the game's attributes and programs from storage buffers at computed offsets, where a phone's
+       GPU faults or hangs on a stray index (#53, #52). PWR_VK_NO_ROBUST=1: without (A/B: its cost). */
+    if (vk_hw && !getenv("PWR_VK_NO_ROBUST")) {
+        en2.features.robustBufferAccess = f2.features.robustBufferAccess;
+        en10.robustBufferAccess = f10.robustBufferAccess;
+        if (vk13 ? f2.features.robustBufferAccess : f10.robustBufferAccess) fprintf(stderr, "video: robust buffer access on\n");
+    }
     const char *dext[6] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME }; uint32_t ndext = 1;
     if (has_portability_subset) dext[ndext++] = "VK_KHR_portability_subset";
     if (vk_hw && has_push) dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
@@ -744,7 +885,9 @@ static int vk_open(int win_w, int win_h, int probe) {
                        "(Vulkan %u.%u, dynamic rendering %d, demote to helper %d)\n",
                        VK_API_VERSION_MAJOR(pp.apiVersion), VK_API_VERSION_MINOR(pp.apiVersion), (int)f13.dynamicRendering,
                        (int)f13.shaderDemoteToHelperInvocation);
+    stage_set(STAGE_MAIN, "creating the Vulkan device");
     VK(vkCreateDevice(phys, &dci, NULL, &dev));
+    stage_set(STAGE_MAIN, "setting up the device's functions");
     if (vk_hw) vk_push_init(dev, has_push && !getenv("PWR_VK_NO_PUSH"));   /* PWR_VK_NO_PUSH=1: the stand-in sets (vk_push.c), as on Mali */
     if (g_vk_rp) vk_rp_init(dev);
 #ifdef MSR_VK13_FROM_DEVICE
@@ -752,11 +895,16 @@ static int vk_open(int win_w, int win_h, int probe) {
 #endif
     vkGetDeviceQueue(dev, qfam, 0, &queue);
     /* swapchain format first (the presenter's target uses it), then the presenter, then the swapchain-sized resources */
+    stage_set(STAGE_MAIN, "reading the window's formats");
     { VkFormat h10, scrgb; VkColorSpaceKHR cs; surface_formats(&sdr_format, &cs, &h10, &scrgb); sc_format = sdr_format; }
+    stage_set(STAGE_MAIN, "making the presenter (its shaders compiled)");
     gpu_ok = !gpu_init();
+    stage_set(STAGE_MAIN, "checking for HDR");
     hdr_detect();
     if (!gpu_ok) fprintf(stderr, "video: GPU presenter unavailable, scaling on the CPU (nearest)\n");
+    stage_set(STAGE_MAIN, "making the swapchain");
     if (create_swapchain()) return -1;
+    stage_set(STAGE_MAIN, "making the command buffers");
     if (opt_res_match) { int w, h; SDL_Vulkan_GetDrawableSize(win, &w, &h); match_resolution(w, h); }   /* --resolution=0 */
 
     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qfam };
@@ -768,17 +916,26 @@ static int vk_open(int win_w, int win_h, int probe) {
     VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
     VK(vkCreateFence(dev, &fi, NULL, &fence));
     if (gpu_ok) {   /* the settings overlay draws into the presentation's target (its font goes up on the shared queue) */
+        stage_set(STAGE_MAIN, "starting the overlay (its shaders compiled, its font uploaded)");
         pthread_mutex_lock(&queue_lock);
         msr_overlay_vk_init(inst, phys, dev, qfam, queue, target_fmt, sc_count, g_vk_rp ? pass_for(target_fmt, VK_ATTACHMENT_LOAD_OP_DONT_CARE) : VK_NULL_HANDLE);
         pthread_mutex_unlock(&queue_lock);
     }
+    stage_set(STAGE_MAIN, NULL);
     fprintf(stderr, "video: presenting with Vulkan\n");
     return 0;
+}
+/* vk_open, its stage cleared after it; a failure it reports (or OpenGL to try first) is not a crash: no safe level for it */
+static int vk_open_(int win_w, int win_h, int probe) {
+    const int r = vk_open(win_w, win_h, probe);
+    stage_set(STAGE_MAIN, NULL);
+    if (r) safe_end();
+    return r;
 }
 /* what vk_open opened, so that OpenGL can have the window. Past the device (rare: a failure making the swapchain or the
    presenter), the device and the instance are left as they are, unused. */
 static void vk_close(void) {
-    if (dev) { vkDeviceWaitIdle(dev); if (swap) vkDestroySwapchainKHR(dev, swap, NULL); }
+    if (dev) { vk_wait_device(dev); if (swap) vkDestroySwapchainKHR(dev, swap, NULL); }
     if (surf) vkDestroySurfaceKHR(inst, surf, NULL);
     if (inst && !dev) vkDestroyInstance(inst, NULL);
     if (win) SDL_DestroyWindow(win);
@@ -842,17 +999,17 @@ int video_init(int scale) {
     int vk = -1;
 #ifdef MSR_OPENGL
     if (opt_renderer != R_OPENGL) {
-        if (!(vk = vk_open(win_w, win_h, opt_renderer == R_AUTO))) return 0;
+        if (!(vk = vk_open_(win_w, win_h, opt_renderer == R_AUTO))) return 0;
         vk_close();
         if (opt_renderer == R_VULKAN) return -1;
     }
     if (!gl_open(win_w, win_h)) return 0;
     gl_close();
-    if (vk == 1) { if (!vk_open(win_w, win_h, 0)) return 0; vk_close(); }
+    if (vk == 1) { if (!vk_open_(win_w, win_h, 0)) return 0; vk_close(); }
     return -1;
 #else
     if (opt_renderer == R_OPENGL) fprintf(stderr, "video: no OpenGL in this build: Vulkan\n");
-    if (!(vk = vk_open(win_w, win_h, 0))) return 0;
+    if (!(vk = vk_open_(win_w, win_h, 0))) return 0;
     vk_close();
     return -1;
 #endif
@@ -1423,15 +1580,31 @@ int video_frame(void) {
        the size check above never sees the restore: try again once the window is back, or the picture froze for good */
     if (swap && (!sc_extent.width || !sc_extent.height) && !(SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED)) { if (recreate_swapchain()) return 0; }
     if (surface_reset) { surface_reset = 0; if (recreate_surface()) return 0; }
+    {   /* moved to another display, or its refresh rate changed: the present mode may too (present_mode), checked each second */
+        static double checked; const double t = now_s();
+        if (swap && t - checked > 1.0) { checked = t; if (present_mode() != sc_present_mode && recreate_swapchain()) return 0; }
+    }
     if (!swap || !sc_extent.width || !sc_extent.height) return 1;
 
-    vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX);
+    double w0 = wait_clock();
+    const char *stage_was = stage_set(STAGE_MAIN, "waiting for the GPU to finish the last frame shown");
+    /* the last frame's fence, waited for in earnest (vk_wait.h): reset while still pending, the sets and the command
+       buffer below would be reused under the GPU; the device lost: no picture from now on (the log says so) */
+    if (vk_wait_fences(dev, 1, &fence) != VK_SUCCESS) { stage_set(STAGE_MAIN, stage_was); return 1; }
+    double w1 = wait_clock(); g_vid_wait_fence += w1 - w0;
     vk_push_reset(&push_arena);   /* the last frame's sets are done with */
     uint32_t idx;
+    stage_set(STAGE_MAIN, "waiting for the next swapchain image");
     VkResult r = vkAcquireNextImageKHR(dev, swap, UINT64_MAX, sem_acquire, VK_NULL_HANDLE, &idx);
+    stage_set(STAGE_MAIN, stage_was);
+    g_vid_wait_acquire += wait_clock() - w1;
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { g_vid_acquire_fail++; g_vid_last_err = r; }
     if (r == VK_ERROR_OUT_OF_DATE_KHR) return recreate_swapchain() ? 0 : 1;
     if (r == VK_ERROR_SURFACE_LOST_KHR) { surface_reset = 1; return 1; }
+    /* any other failure (a timeout, Mali's interrupted wait, the device lost): no image, so nothing to draw into, and
+       sem_acquire will never signal; submitting a wait on it stalled the queue for good. Again next frame (as Azahar,
+       vk_swapchain.cpp, which never submits after a failed acquire). The fence stays signalled. */
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return 1;
     vkResetFences(dev, 1, &fence);
     layout_rects((int)sc_extent.width, (int)sc_extent.height, &rt, &rb);   /* drawable pixels (differs from window size on HiDPI) */
     /* Samus Returns' single screen: the compositor places the view (the gallery moves it aside) and lists the HUD
@@ -1526,16 +1699,22 @@ int video_frame(void) {
     VkPipelineStageFlags ws = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo sub = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1, .pWaitSemaphores = &sem_acquire, .pWaitDstStageMask = &ws,
         .commandBufferCount = 1, .pCommandBuffers = &cmdbuf, .signalSemaphoreCount = 1, .pSignalSemaphores = &sem_done[idx] };
+    stage_set(STAGE_MAIN, "waiting for the Vulkan queue (the GX thread submits on it too)");
     pthread_mutex_lock(&queue_lock);
+    stage_set(STAGE_MAIN, "submitting the frame");
     vkQueueSubmit(queue, 1, &sub, fence);
     if (gpu_ok && vk_hw) pica_vk_scan_lock(0);
     VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &sem_done[idx], .swapchainCount = 1, .pSwapchains = &swap, .pImageIndices = &idx };
+    double w2 = wait_clock();
+    stage_set(STAGE_MAIN, "presenting the frame (vkQueuePresentKHR)");
     r = vkQueuePresentKHR(queue, &pi);
+    g_vid_wait_present += wait_clock() - w2;
     pthread_mutex_unlock(&queue_lock);
+    stage_set(STAGE_MAIN, stage_was);
 #ifdef __ANDROID__
     if (r == VK_SUBOPTIMAL_KHR) r = VK_SUCCESS;   /* not pre-rotated (create_swapchain: the compositor turns it), every frame */
 #endif
-    if (r != VK_SUCCESS) { g_vid_present_fail++; g_vid_last_err = r; } else g_vid_presented++;
+    if (r != VK_SUCCESS) { g_vid_present_fail++; g_vid_last_err = r; } else { g_vid_presented++; safe_end(); }   /* (a frame shown: the graphics opened) */
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     return 1;
 }
@@ -1544,11 +1723,21 @@ int video_vk(VkPhysicalDevice *p, VkDevice *d, VkQueue *q, uint32_t *family) {
     if (!dev || !vk_hw) return -1;
     *p = phys; *d = dev; *q = queue; *family = qfam; return 0;
 }
-void video_queue_lock(void) { pthread_mutex_lock(&queue_lock); }
-void video_queue_unlock(void) { pthread_mutex_unlock(&queue_lock); }
+/* the GX thread's submissions (pica_vk.c): its wait for the queue, which presenting holds (main.c's 2 s line) */
+double g_vid_wait_queue_gx;
+static const char *gx_stage_was;
+void video_queue_lock(void) {
+    gx_stage_was = stage_set(STAGE_GX, "waiting for the Vulkan queue (presenting uses it too)");
+    const double t0 = wait_clock();
+    pthread_mutex_lock(&queue_lock);
+    g_vid_wait_queue_gx += wait_clock() - t0;
+    stage_set(STAGE_GX, "submitting to the Vulkan queue");
+}
+void video_queue_unlock(void) { pthread_mutex_unlock(&queue_lock); stage_set(STAGE_GX, gx_stage_was); }
 
 void video_shutdown(void) {
-    if (dev) { pthread_mutex_lock(&queue_lock); vkDeviceWaitIdle(dev); pthread_mutex_unlock(&queue_lock); if (gpu_ok) msr_overlay_shutdown(); }
+    safe_end();
+    if (dev) { pthread_mutex_lock(&queue_lock); vk_wait_device(dev); pthread_mutex_unlock(&queue_lock); if (gpu_ok) msr_overlay_shutdown(); }
 #ifdef MSR_OPENGL
     if (use_gl) vgl_shutdown();
 #endif
