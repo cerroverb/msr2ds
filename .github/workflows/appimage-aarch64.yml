@@ -1,0 +1,36 @@
+name: AppImage (Linux AArch64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [linux-arm64-ci]
+
+jobs:
+  appimage:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ libsdl2-dev libvulkan-dev glslc libzstd-dev libpng-dev
+
+      - name: Download linuxdeploy
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          curl -fsSL -o "$RUNNER_TEMP/tools/linuxdeploy-aarch64.AppImage" \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage
+          chmod +x "$RUNNER_TEMP/tools/linuxdeploy-aarch64.AppImage"
+
+      - name: Build the AppImage
+        run: LINUXDEPLOY="$RUNNER_TEMP/tools/linuxdeploy-aarch64.AppImage" bash tools/package/appimage.sh build
+
+      - name: SHA-256
+        run: sha256sum dist/*.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msr-native-aarch64-appimage
+          path: dist/*-aarch64.AppImage
+          if-no-files-found: error
