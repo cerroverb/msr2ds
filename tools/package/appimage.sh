@@ -12,6 +12,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 build="${1:-$HOME/msr-native-build}"
+mkdir -p "$build" && build="$(cd "$build" && pwd)"   # (absolute: linuxdeploy runs from inside it)
 sdl="${2:-}"
 zstd="${3:-}"
 jobs="${MSR_JOBS:-8}"
